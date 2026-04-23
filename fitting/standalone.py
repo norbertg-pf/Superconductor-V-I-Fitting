@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget
+import pyqtgraph as pg
 
 from . import tab as _tab
 
@@ -47,6 +48,10 @@ class DataFittingWindow(QMainWindow):
 
 
 def main() -> int:
+    # Force a light plot theme in standalone mode.
+    # In embedded mode, the host app can define its own pyqtgraph theme.
+    pg.setConfigOptions(background="w", foreground="k")
+
     app = QApplication(sys.argv)
     win = DataFittingWindow()
     win.show()
