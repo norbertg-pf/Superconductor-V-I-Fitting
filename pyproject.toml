@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superconductor-vi-fitting"
+version = "0.1.0"
+description = "Standalone superconductor V-I fitting tool"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyQt5>=5.15",
+  "pyqtgraph>=0.13",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "nptdms>=1.7"
+]
+
+[project.scripts]
+vi-fitting = "fitting.standalone:main"
+
+[tool.setuptools]
+packages = ["fitting"]

@@ -14,16 +14,18 @@ an interactive Qt UI, and an OriginLab-style graph-settings dialog.
 | `standalone.py` | Minimal `QMainWindow` that wraps the tab for standalone use. |
 | `__main__.py` | `python -m src.fitting` entry point. |
 
-## Running standalone
+## Install (Windows PowerShell)
 
-From the project root:
+```powershell
+cd "D:\Superconductor V-I Fitting"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -e .'''
 
-```
-python -m src.fitting
-```
+## Run Standalon
 
-As its own project — copy this folder next to your script and run
-`python -m fitting`. Dependencies: **PyQt5, pyqtgraph, numpy, scipy, nptdms**.
+python -m fitting
 
 ## Embedding in another Qt app
 
