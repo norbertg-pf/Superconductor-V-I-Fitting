@@ -992,7 +992,8 @@ def _try_select(combo: QComboBox, preferred_substrings):
 
 
 def open_file_dialog(app):
-    start_dir = app.runtime_state.output_folder or ""
+    runtime_state = getattr(app, "runtime_state", None)
+    start_dir = getattr(runtime_state, "output_folder", "") or ""
     path, _ = QFileDialog.getOpenFileName(app, "Select TDMS recording", start_dir, "TDMS Files (*.tdms);;All Files (*)")
     if not path:
         return

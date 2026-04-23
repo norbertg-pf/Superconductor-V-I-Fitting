@@ -26,6 +26,7 @@ class DataFittingWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Superconductor V-I fitting")
         self.ui_state = SimpleNamespace()
+        self.runtime_state = SimpleNamespace(output_folder="")
         central = QWidget()
         self.ui_state.data_fitting_tab = central
         self.setCentralWidget(central)
