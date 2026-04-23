@@ -21,7 +21,7 @@ cd "D:\Superconductor V-I Fitting"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --upgrade pip
-pip install -e .'''
+pip install -e .```
 
 ## Run Standalon
 
