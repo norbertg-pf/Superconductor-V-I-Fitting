@@ -45,6 +45,8 @@ from .service import (
     DEFAULT_MAX_ITERATIONS,
     DEFAULT_POWER_LOW_FRAC,
     DEFAULT_POWER_V_FRAC,
+    DEFAULT_VC_HIGH_MULT,
+    DEFAULT_VC_LOW_MULT,
     DEFAULT_VC_VOLTS,
     FitSettings,
     robust_view_range,
@@ -56,6 +58,7 @@ from .extras import (
     GraphSettings,
     GraphSettingsDialog,
     apply_graph_settings,
+    iec_presets,
     load_preset_from_file,
     save_preset_to_file,
 )
@@ -84,7 +87,7 @@ class _FitParamTable(pg.TextItem):
         if not results:
             self.clear_parameters()
             return
-        param_names = ("Criterion", "Ic", "n", "R", "V0")
+        param_names = ("Criterion", "Ic", "n", "R", "V0", "χ²_red")
         header_cells = "".join(
             f"<th style='padding:2px 8px; border-bottom:1px solid #bbb;'>{name}</th>"
             for name, _ in results
@@ -98,11 +101,18 @@ class _FitParamTable(pg.TextItem):
                 v_name = "Ec" if result.uses_sample_length else "Vc"
                 v_unit = "V/cm" if result.uses_sample_length else "V"
                 value_map = {
-                    "n": f"{result.n_value:.2f}",
-                    "Ic": f"{result.Ic:.6g} A",
-                    "R": _format_engineering(result.R, r_unit, 2),
+                    "n": f"{result.n_value:.2f} ± {result.n_sigma:.2f}",
+                    "Ic": f"{result.Ic:.4f} ± {result.Ic_sigma:.4g} A",
+                    "R": (
+                        f"{_format_engineering(result.R, r_unit, 2)} "
+                        f"± {_format_engineering(result.R_sigma, r_unit, 2)}"
+                    ),
                     "Criterion": _format_engineering(result.criterion, v_unit, 2),
-                    "V0": _format_engineering(result.V0, v_unit, 2),
+                    "V0": (
+                        f"{_format_engineering(result.V0, v_unit, 2)} "
+                        f"± {_format_engineering(result.V0_sigma, v_unit, 2)}"
+                    ),
+                    "χ²_red": f"{result.reduced_chi_sqr:.3g} (dof={result.dof})",
                 }
                 value = value_map[p]
                 row_cells.append(
@@ -208,6 +218,10 @@ def _capture_fit_window_profile(app) -> dict:
         "ic_tol": app.data_fit_ic_tol.text(),
         "chi_tol": app.data_fit_chi_tol.text(),
         "vc": app.data_fit_vc_input.text(),
+        "iec_mode": bool(app.data_fit_iec_cb.isChecked()),
+        "n_log_fit": bool(app.data_fit_log_n_cb.isChecked()),
+        "vc_low_mult": app.data_fit_vc_low_mult.text(),
+        "vc_high_mult": app.data_fit_vc_high_mult.text(),
     }
 
 
@@ -225,9 +239,24 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         (app.data_fit_ic_tol, "ic_tol"),
         (app.data_fit_chi_tol, "chi_tol"),
         (app.data_fit_vc_input, "vc"),
+        (app.data_fit_vc_low_mult, "vc_low_mult"),
+        (app.data_fit_vc_high_mult, "vc_high_mult"),
     ):
         if key in profile:
             _set_silently(widget, str(profile[key]))
+    if "iec_mode" in profile:
+        app.data_fit_iec_cb.blockSignals(True)
+        try:
+            app.data_fit_iec_cb.setChecked(bool(profile["iec_mode"]))
+        finally:
+            app.data_fit_iec_cb.blockSignals(False)
+    if "n_log_fit" in profile:
+        app.data_fit_log_n_cb.blockSignals(True)
+        try:
+            app.data_fit_log_n_cb.setChecked(bool(profile["n_log_fit"]))
+        finally:
+            app.data_fit_log_n_cb.blockSignals(False)
+    _update_iec_mode_ui(app)
     sync_region_to_inputs(app)
 
 
@@ -388,6 +417,13 @@ def _connect_data_fitting_actions(app):
             widget.currentIndexChanged.connect(lambda _: _on_transform_inputs_changed(app))
     for w in (app.data_fit_max_iter, app.data_fit_ic_tol, app.data_fit_chi_tol, app.data_fit_vc_input):
         w.editingFinished.connect(lambda: _save_active_curve_profile(app))
+    for w in (app.data_fit_vc_low_mult, app.data_fit_vc_high_mult):
+        w.editingFinished.connect(lambda: (_save_active_curve_profile(app), _update_iec_mode_ui(app)))
+    app.data_fit_iec_cb.toggled.connect(lambda _: (_update_iec_mode_ui(app), _save_active_curve_profile(app)))
+    app.data_fit_log_n_cb.toggled.connect(lambda _: _save_active_curve_profile(app))
+    app.data_fit_copy_report_btn.clicked.connect(lambda: _copy_report_to_clipboard(app))
+    app.data_fit_save_report_btn.clicked.connect(lambda: _save_report_json(app))
+    app.data_fit_iec_preset_cb.currentIndexChanged.connect(lambda _: _on_iec_preset_selected(app))
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
@@ -438,6 +474,11 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
     app.data_fit_power_low.setText(f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
     app.data_fit_power_vfrac.setText(f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
+    app.data_fit_iec_cb.setChecked(True)
+    app.data_fit_log_n_cb.setChecked(True)
+    app.data_fit_vc_low_mult.setText(f"{DEFAULT_VC_LOW_MULT:g}")
+    app.data_fit_vc_high_mult.setText(f"{DEFAULT_VC_HIGH_MULT:g}")
+    _update_iec_mode_ui(app)
     app.data_fit_show_didt.setChecked(False)
     app.data_fit_show_linear.setChecked(False)
     app.data_fit_show_power.setChecked(False)
@@ -681,6 +722,33 @@ def setup_data_fitting_tab_layout(app):
         "while chi-squared remains much larger than this tolerance.\n"
         "OriginLab's default is 1e-9."
     )
+    # IEC 61788 controls.
+    app.data_fit_iec_cb = QCheckBox("IEC 61788 mode")
+    app.data_fit_iec_cb.setChecked(True)
+    app.data_fit_iec_cb.setToolTip(
+        "When on, the power-law window is set in multiples of the criterion Vc "
+        "(baseline-subtracted), per IEC 61788-1/-2/-3/-14/-21.\n"
+        "When off, the legacy % of Imax / % of Vmax window is used."
+    )
+    app.data_fit_log_n_cb = QCheckBox("Log-log n fit")
+    app.data_fit_log_n_cb.setChecked(True)
+    app.data_fit_log_n_cb.setToolTip(
+        "Compute the n-value from a log-log linear regression of the "
+        "baseline-subtracted voltage vs current in the Vc-window (IEC practice).\n"
+        "When off, n is taken from the nonlinear V-I fit."
+    )
+    app.data_fit_vc_low_mult = QLineEdit(f"{DEFAULT_VC_LOW_MULT:g}")
+    app.data_fit_vc_low_mult.setMaximumWidth(80)
+    app.data_fit_vc_low_mult.setToolTip(
+        "Lower edge of the n-value window expressed as a multiple of Vc.\n"
+        "IEC default is 0.1 (i.e. fit window starts at V-V0-R·I = 0.1·Vc)."
+    )
+    app.data_fit_vc_high_mult = QLineEdit(f"{DEFAULT_VC_HIGH_MULT:g}")
+    app.data_fit_vc_high_mult.setMaximumWidth(80)
+    app.data_fit_vc_high_mult.setToolTip(
+        "Upper edge of the n-value window expressed as a multiple of Vc.\n"
+        "IEC default is 10 (i.e. fit up to V-V0-R·I = 10·Vc)."
+    )
     # Two-column layout: iteration knobs on the left, criterion on the right.
     iter_layout.addWidget(QLabel("Max iterations"), 0, 0)
     iter_layout.addWidget(app.data_fit_max_iter, 0, 1)
@@ -690,11 +758,30 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_chi_tol, 0, 3)
     iter_layout.addWidget(app.data_fit_vc_label, 1, 2)
     iter_layout.addWidget(app.data_fit_vc_input, 1, 3)
+    iter_layout.addWidget(app.data_fit_iec_cb, 2, 0, 1, 2)
+    iter_layout.addWidget(app.data_fit_log_n_cb, 2, 2, 1, 2)
+    iter_layout.addWidget(QLabel("n-window low × Vc"), 3, 0)
+    iter_layout.addWidget(app.data_fit_vc_low_mult, 3, 1)
+    iter_layout.addWidget(QLabel("n-window high × Vc"), 3, 2)
+    iter_layout.addWidget(app.data_fit_vc_high_mult, 3, 3)
     left.addWidget(iter_group)
 
     app.data_fit_run_btn = QPushButton("Run Fit")
     app.data_fit_run_btn.setStyleSheet("font-weight: bold; background-color: #0078D7; color: white; padding: 8px;")
     left.addWidget(app.data_fit_run_btn)
+
+    iec_preset_row = QHBoxLayout()
+    iec_preset_row.addWidget(QLabel("IEC 61788 preset:"))
+    app.data_fit_iec_preset_cb = QComboBox()
+    app.data_fit_iec_preset_cb.addItem("—", None)
+    for name in iec_presets().keys():
+        app.data_fit_iec_preset_cb.addItem(name, name)
+    app.data_fit_iec_preset_cb.setToolTip(
+        "Apply an IEC 61788 document-compliant preset (criterion, window, "
+        "baseline). Pick the document that matches your conductor class."
+    )
+    iec_preset_row.addWidget(app.data_fit_iec_preset_cb, stretch=1)
+    left.addLayout(iec_preset_row)
 
     preset_row = QHBoxLayout()
     app.data_fit_save_preset_btn = QPushButton("Save preset…")
@@ -716,8 +803,22 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_result_text = QTextEdit()
     app.data_fit_result_text.setReadOnly(True)
     app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
-    app.data_fit_result_text.setMaximumHeight(240)
+    app.data_fit_result_text.setMaximumHeight(320)
     left.addWidget(app.data_fit_result_text)
+
+    report_row = QHBoxLayout()
+    app.data_fit_copy_report_btn = QPushButton("Copy report")
+    app.data_fit_copy_report_btn.setToolTip(
+        "Copy the current fit report (IEC 61788 style) to the clipboard."
+    )
+    app.data_fit_save_report_btn = QPushButton("Save report (JSON)…")
+    app.data_fit_save_report_btn.setToolTip(
+        "Save the current fit report to a JSON file alongside the raw numbers, "
+        "fit windows, uncertainties, and IEC settings — suitable for inter-lab sharing."
+    )
+    report_row.addWidget(app.data_fit_copy_report_btn)
+    report_row.addWidget(app.data_fit_save_report_btn)
+    left.addLayout(report_row)
 
     left.addStretch()
     root.addWidget(left_widget)
@@ -849,6 +950,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
     _on_use_length_changed(app)
+    _update_iec_mode_ui(app)
     _refresh_curve_profile_selector(app)
     _connect_data_fitting_actions(app)
 
@@ -943,6 +1045,10 @@ def _settings_from_inputs(app) -> FitSettings:
         vc_mv = _float_from(app.data_fit_vc_input, DEFAULT_VC_VOLTS * 1000.0)
         criterion_value = vc_mv * 1.0e-3
     settings = FitSettings(
+        iec_mode=bool(app.data_fit_iec_cb.isChecked()),
+        n_log_fit=bool(app.data_fit_log_n_cb.isChecked()),
+        vc_low_mult=_float_from(app.data_fit_vc_low_mult, DEFAULT_VC_LOW_MULT),
+        vc_high_mult=_float_from(app.data_fit_vc_high_mult, DEFAULT_VC_HIGH_MULT),
         didt_low_frac=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
         didt_high_frac=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
         linear_low_frac=_float_from(app.data_fit_linear_low, DEFAULT_LINEAR_LOW_FRAC * 100, as_fraction=True),
@@ -1127,6 +1233,25 @@ def _on_use_length_changed(app):
         _save_active_curve_profile(app)
 
 
+def _update_iec_mode_ui(app) -> None:
+    """Enable/disable the legacy power-window inputs based on IEC-mode state."""
+    iec = bool(app.data_fit_iec_cb.isChecked())
+    # Legacy window inputs don't apply in IEC mode.
+    for w in (
+        app.data_fit_power_low, app.data_fit_power_vfrac,
+        app.data_fit_power_low_x, app.data_fit_power_high_x,
+    ):
+        w.setEnabled(not iec)
+    # Vc-multiplier inputs are only meaningful in IEC mode.
+    app.data_fit_vc_low_mult.setEnabled(iec)
+    app.data_fit_vc_high_mult.setEnabled(iec)
+    app.data_fit_log_n_cb.setEnabled(iec)
+    ctx = _data_ctx(app)
+    if ctx is not None:
+        _, _, x_arr, y_arr, _ = ctx
+        _update_fit_bands(app, x_arr, y_arr)
+
+
 def refresh_preview(app):
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
@@ -1184,12 +1309,16 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
     didt_hi = from_pct(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC)
     lin_lo = from_pct(app.data_fit_linear_low, DEFAULT_LINEAR_LOW_FRAC)
     lin_hi = from_pct(app.data_fit_linear_high, DEFAULT_LINEAR_HIGH_FRAC)
-    pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
-    v_f = _float_from(app.data_fit_power_vfrac, DEFAULT_POWER_V_FRAC * 100, as_fraction=True)
-    y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
-    threshold = v_f * y_max
-    above = np.where(y >= threshold)[0] if y is not None else np.array([], dtype=int)
-    pow_hi = float(x[above[0]]) if above.size else x_max
+
+    if app.data_fit_iec_cb.isChecked():
+        pow_lo, pow_hi = _iec_power_band_x(app, x, y, lin_lo, lin_hi, x_min, x_max)
+    else:
+        pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
+        v_f = _float_from(app.data_fit_power_vfrac, DEFAULT_POWER_V_FRAC * 100, as_fraction=True)
+        y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
+        threshold = v_f * y_max
+        above = np.where(y >= threshold)[0] if y is not None else np.array([], dtype=int)
+        pow_hi = float(x[above[0]]) if above.size else x_max
 
     for band, pair in (
         (app.data_fit_band_didt, (didt_lo, didt_hi)),
@@ -1201,6 +1330,60 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             band.setRegion(pair)
         finally:
             band.blockSignals(False)
+
+
+def _iec_power_band_x(app, x, y, lin_lo, lin_hi, x_min, x_max):
+    """Compute the current-range for the IEC Vc-multiplier power-law band.
+
+    Mirrors service._iec_current_window but uses the baseline fit that would
+    come out of the currently-configured linear window, so the band shown in
+    the plot matches what the fit will actually use.
+    """
+    if x is None or y is None or x.size < 2 or y.size < 2:
+        return x_min, x_max
+    try:
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
+        mask = (x_arr >= lin_lo) & (x_arr <= lin_hi) & np.isfinite(x_arr) & np.isfinite(y_arr)
+        if np.count_nonzero(mask) < 2:
+            return x_min, x_max
+        slope, intercept = np.polyfit(x_arr[mask], y_arr[mask], 1)
+    except Exception:
+        return x_min, x_max
+    v_net = y_arr - intercept - slope * x_arr
+    sample_length = _active_sample_length(app)
+    if sample_length is not None:
+        ec_uv_per_cm = _float_from(app.data_fit_vc_input, 1.0)
+        vc = ec_uv_per_cm * 1.0e-6
+    else:
+        vc_mv = _float_from(app.data_fit_vc_input, DEFAULT_VC_VOLTS * 1000.0)
+        vc = vc_mv * 1.0e-3
+    low_mult = _float_from(app.data_fit_vc_low_mult, DEFAULT_VC_LOW_MULT)
+    high_mult = _float_from(app.data_fit_vc_high_mult, DEFAULT_VC_HIGH_MULT)
+
+    def crossing(target):
+        idx = np.where(v_net >= target)[0]
+        if idx.size == 0:
+            return None
+        j = int(idx[0])
+        if j == 0:
+            return float(x_arr[0])
+        v_lo = float(v_net[j - 1])
+        v_hi = float(v_net[j])
+        if v_hi == v_lo:
+            return float(x_arr[j])
+        frac = (target - v_lo) / (v_hi - v_lo)
+        return float(x_arr[j - 1] + frac * (x_arr[j] - x_arr[j - 1]))
+
+    lo = crossing(low_mult * vc)
+    hi = crossing(high_mult * vc)
+    if lo is None:
+        lo = x_min
+    if hi is None:
+        hi = x_max
+    if hi <= lo:
+        hi = min(x_max, max(lo + 1e-9, lo * 1.001))
+    return lo, hi
 
 
 def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
@@ -1428,23 +1611,76 @@ def _format_engineering(value: float, unit: str, decimals: int = 2) -> str:
 
 
 def _format_result(result) -> str:
+    """IEC 61788-style fit report. Every row is something a reviewing lab
+    needs to reproduce or compare the result (criterion, window, ramp rate,
+    uncertainties, quality metrics)."""
     lines = []
     r_name = "Rho" if result.uses_sample_length else "R"
     r_unit = "Ω/cm" if result.uses_sample_length else "Ω"
     v_name = "Ec" if result.uses_sample_length else "Vc"
     v_unit = "V/cm" if result.uses_sample_length else "V"
-    lines.append(f"di/dt         = {_format_engineering(result.di_dt, 'A/s', 2)}")
-    lines.append(f"L             = {_format_engineering(result.inductance_L, 'H', 2)}  (= V0 / di_dt)")
-    lines.append(f"V0            = {_format_engineering(result.V0, v_unit, 2)}")
-    lines.append(f"{r_name:<13} = {_format_engineering(result.R, r_unit, 2)}")
-    lines.append(f"Ic            = {result.Ic:.6g} A")
-    lines.append(f"n-value       = {result.n_value:.2f}")
-    lines.append(f"{v_name:<13} = {_format_engineering(result.criterion, v_unit, 2)}")
-    lines.append(f"chi-squared   = {result.chi_sqr:.3g}")
-    lines.append(f"iterations    = {result.iterations}")
-    lines.append(f"Ic history    = [{', '.join(f'{v:.4g}' for v in result.ic_history)}]")
-    lines.append(f"linear window = [{result.linear_fit_window[0]:.4g}, {result.linear_fit_window[1]:.4g}]")
-    lines.append(f"power window  = [{result.power_fit_window[0]:.4g}, {result.power_fit_window[1]:.4g}]")
+
+    lines.append("--- Critical current (IEC 61788 power-law criterion) ---")
+    lines.append(
+        f"Ic            = {result.Ic:.4f} ± {result.Ic_sigma:.4g} A"
+    )
+    lines.append(
+        f"n-value       = {result.n_value:.2f} ± {result.n_sigma:.2f}  "
+        f"[{result.n_method}]"
+    )
+    lines.append(f"{v_name:<13} = {_format_engineering(result.criterion, v_unit, 3)}")
+    lines.append(
+        f"n-window V    = [{_format_engineering(result.power_fit_window_V[0], v_unit, 3)}, "
+        f"{_format_engineering(result.power_fit_window_V[1], v_unit, 3)}] "
+        f"({result.decades_above_Vc:.2f} decades above Vc)"
+    )
+    lines.append(
+        f"n-window I    = [{result.power_fit_window[0]:.4g}, {result.power_fit_window[1]:.4g}] A, "
+        f"{result.n_points_fit} pts"
+    )
+    lines.append("")
+    lines.append("--- Baseline (V0 + R·I on the pre-transition region) ---")
+    lines.append(
+        f"V0            = {_format_engineering(result.V0, v_unit, 3)} "
+        f"± {_format_engineering(result.V0_sigma, v_unit, 2)}"
+    )
+    lines.append(
+        f"{r_name:<13} = {_format_engineering(result.R, r_unit, 3)} "
+        f"± {_format_engineering(result.R_sigma, r_unit, 2)}"
+    )
+    lines.append(f"Baseline R²   = {result.linear_r2:.6f}")
+    lines.append(
+        f"Baseline RMS  = {_format_engineering(result.baseline_noise_rms, v_unit, 2)} "
+        f"(noise floor)"
+    )
+    lines.append(
+        f"Linear window = [{result.linear_fit_window[0]:.4g}, "
+        f"{result.linear_fit_window[1]:.4g}] A"
+    )
+    lines.append("")
+    lines.append("--- Ramp and inductive offset ---")
+    lines.append(f"dI/dt         = {_format_engineering(result.di_dt, 'A/s', 3)}")
+    lines.append(
+        f"L (= V0/di/dt) = {_format_engineering(result.inductance_L, 'H', 2)}"
+    )
+    lines.append(f"Ramp direction = {result.ramp_direction}")
+    lines.append("")
+    lines.append("--- Fit quality ---")
+    lines.append(f"χ²            = {result.chi_sqr:.3g}")
+    lines.append(
+        f"χ²_reduced    = {result.reduced_chi_sqr:.3g}  (dof = {result.dof})"
+    )
+    lines.append(f"Iterations    = {result.iterations}")
+    if result.ic_history:
+        lines.append(
+            "Ic history    = [" + ", ".join(f"{v:.4g}" for v in result.ic_history) + "]"
+        )
+    lines.append(f"Samples (raw) = {result.n_data_points}")
+    if result.warnings:
+        lines.append("")
+        lines.append("--- Warnings ---")
+        for w in result.warnings:
+            lines.append(f"  • {w}")
     return "\n".join(lines)
 
 
@@ -1504,6 +1740,7 @@ def run_fit(app):
             else:
                 lines.append(f"[{entry['label']}] {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
+        app.data_fit_last_result = last_ok
         if last_ok is not None:
             _show_fit_overlays(
                 app, last_ok, table_entries=ok_results,
@@ -1560,6 +1797,7 @@ def run_fit(app):
         show_criterion=True,
         show_ic=False,
     )
+    app.data_fit_last_result = result
     _plot_residuals(app, result)
     _post_fit_warnings(app, result, settings)
 
@@ -1652,27 +1890,11 @@ def _clear_warning(app) -> None:
 
 
 def _post_fit_warnings(app, result, settings) -> None:
-    warnings = []
-    if result.iterations >= settings.max_iterations:
-        warnings.append(
-            f"Fit reached the iteration cap ({settings.max_iterations}) without "
-            f"meeting the Ic tolerance ({settings.ic_tolerance * 100:.3g}%)."
-        )
-    lo, hi = result.power_fit_window
-    transformed = _apply_transforms(app)
-    x = transformed["x"]
-    if x is not None and x.size:
-        mask = (x >= lo) & (x <= hi)
-        n_points = int(np.count_nonzero(mask))
-        if n_points < 30:
-            warnings.append(
-                f"Power-law window contains only {n_points} samples — consider "
-                f"widening it or lowering the averaging factor for a more reliable fit."
-            )
+    warnings = list(getattr(result, "warnings", []))
     if not warnings:
         _clear_warning(app)
         return
-    _show_warning(app, " \n".join(warnings), severity="warning")
+    _show_warning(app, "\n".join(f"• {w}" for w in warnings), severity="warning")
 
 
 def _open_graph_settings(app) -> None:
@@ -2213,6 +2435,10 @@ def _settings_to_preset(app) -> FitPreset:
         x_channel=app.data_fit_x_cb.currentText(),
         y_channel=app.data_fit_y_cb.currentText(),
         time_channel=app.data_fit_time_cb.currentText(),
+        iec_mode=bool(app.data_fit_iec_cb.isChecked()),
+        n_log_fit=bool(app.data_fit_log_n_cb.isChecked()),
+        vc_low_mult=_float_from(app.data_fit_vc_low_mult, DEFAULT_VC_LOW_MULT),
+        vc_high_mult=_float_from(app.data_fit_vc_high_mult, DEFAULT_VC_HIGH_MULT),
     )
 
 
@@ -2229,10 +2455,19 @@ def _apply_preset(app, preset: FitPreset) -> None:
     _set_silently(app.data_fit_length_input, f"{preset.sample_length_cm:g}")
     _set_silently(app.data_fit_vc_input, f"{preset.criterion_value:g}")
     _set_silently(app.data_fit_avg_input, f"{preset.avg_window}")
+    _set_silently(app.data_fit_vc_low_mult, f"{preset.vc_low_mult:g}")
+    _set_silently(app.data_fit_vc_high_mult, f"{preset.vc_high_mult:g}")
     app.data_fit_use_length_cb.blockSignals(True)
     app.data_fit_use_length_cb.setChecked(preset.use_length)
     app.data_fit_use_length_cb.blockSignals(False)
+    app.data_fit_iec_cb.blockSignals(True)
+    app.data_fit_iec_cb.setChecked(bool(preset.iec_mode))
+    app.data_fit_iec_cb.blockSignals(False)
+    app.data_fit_log_n_cb.blockSignals(True)
+    app.data_fit_log_n_cb.setChecked(bool(preset.n_log_fit))
+    app.data_fit_log_n_cb.blockSignals(False)
     _on_use_length_changed(app)
+    _update_iec_mode_ui(app)
     # Attempt to restore channel selections if they exist in the current file.
     for combo, name in (
         (app.data_fit_x_cb, preset.x_channel),
@@ -2270,6 +2505,23 @@ def _save_preset(app) -> None:
     _show_warning(app, f"Saved preset to {path_str}", severity="warning")
 
 
+def _on_iec_preset_selected(app) -> None:
+    name = app.data_fit_iec_preset_cb.currentData()
+    if not name:
+        return
+    presets = iec_presets()
+    preset = presets.get(name)
+    if preset is None:
+        return
+    _apply_preset(app, preset)
+    _show_warning(
+        app,
+        f"Applied IEC preset '{name}'. Set the real sample length (voltage-tap "
+        "spacing) before running the fit.",
+        severity="warning",
+    )
+
+
 def _load_preset(app) -> None:
     default_dir = _preset_dir(app)
     path_str, _ = QFileDialog.getOpenFileName(
@@ -2284,3 +2536,142 @@ def _load_preset(app) -> None:
         return
     _apply_preset(app, preset)
     _show_warning(app, f"Loaded preset from {path_str}", severity="warning")
+
+
+def _last_fit_result(app):
+    res = getattr(app, "data_fit_last_result", None)
+    if res is not None and getattr(res, "ok", False):
+        return res
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is not None and getattr(controller, "last_result", None) is not None:
+        return controller.last_result
+    for entry in reversed(getattr(app, "data_fit_curves", [])):
+        r = entry.get("fit_result")
+        if r is not None and getattr(r, "ok", False):
+            return r
+    return None
+
+
+def _build_report_dict(app, result) -> dict:
+    """Self-contained, machine-readable IEC 61788 fit report.
+
+    Contains everything a peer lab needs to reproduce or cross-check the
+    result: input identity, criterion + sample length, every fit window, all
+    fit parameters with ±1σ uncertainties, goodness-of-fit metrics, and
+    software provenance. Intended for sharing alongside raw V-I traces.
+    """
+    controller = getattr(app, "data_fit_controller", None)
+    tdms_path = getattr(controller, "tdms_path", "") if controller is not None else ""
+    try:
+        settings = _settings_from_inputs(app)
+    except Exception:
+        settings = None
+    from . import __name__ as pkg_name  # noqa: F401 kept for future version bump
+    try:
+        from importlib.metadata import version
+        sw_version = version("superconductor-vi-fitting")
+    except Exception:
+        sw_version = "unknown"
+
+    n_unit = "V/cm" if result.uses_sample_length else "V"
+    r_unit = "Ω/cm" if result.uses_sample_length else "Ω"
+
+    report: dict = {
+        "standard": "IEC 61788 power-law criterion",
+        "software": {
+            "name": "superconductor-vi-fitting",
+            "version": sw_version,
+        },
+        "source": {
+            "tdms_path": tdms_path,
+            "time_channel": app.data_fit_time_cb.currentText(),
+            "x_channel": app.data_fit_x_cb.currentText(),
+            "y_channel": app.data_fit_y_cb.currentText(),
+            "avg_window": _active_avg_window(app),
+            "sample_length_cm": _active_sample_length(app),
+            "uses_per_unit_length": bool(result.uses_sample_length),
+            "ramp_direction": result.ramp_direction,
+        },
+        "criterion": {
+            "value": float(result.criterion),
+            "units": n_unit,
+            "name": "Ec" if result.uses_sample_length else "Vc",
+        },
+        "fit_mode": {
+            "iec_mode": bool(settings.iec_mode) if settings else True,
+            "n_log_fit": bool(settings.n_log_fit) if settings else True,
+            "vc_low_mult": float(settings.vc_low_mult) if settings else None,
+            "vc_high_mult": float(settings.vc_high_mult) if settings else None,
+            "n_method": result.n_method,
+        },
+        "ramp": {
+            "dI_dt_A_per_s": float(result.di_dt),
+            "inductance_H": float(result.inductance_L),
+        },
+        "baseline": {
+            "V0": float(result.V0),
+            "V0_sigma": float(result.V0_sigma),
+            "V0_units": n_unit,
+            "R": float(result.R),
+            "R_sigma": float(result.R_sigma),
+            "R_units": r_unit,
+            "R_squared": float(result.linear_r2),
+            "residual_rms": float(result.baseline_noise_rms),
+            "window_A": list(result.linear_fit_window),
+        },
+        "power_law": {
+            "Ic_A": float(result.Ic),
+            "Ic_sigma_A": float(result.Ic_sigma),
+            "n_value": float(result.n_value),
+            "n_sigma": float(result.n_sigma),
+            "window_I_A": list(result.power_fit_window),
+            "window_V": list(result.power_fit_window_V),
+            "window_V_units": n_unit,
+            "decades_above_Vc": float(result.decades_above_Vc),
+            "n_points": int(result.n_points_fit),
+        },
+        "quality": {
+            "chi_sqr": float(result.chi_sqr),
+            "reduced_chi_sqr": float(result.reduced_chi_sqr),
+            "dof": int(result.dof),
+            "iterations": int(result.iterations),
+            "Ic_history_A": [float(v) for v in result.ic_history],
+        },
+        "warnings": list(result.warnings),
+    }
+    return report
+
+
+def _copy_report_to_clipboard(app) -> None:
+    from PyQt5.QtWidgets import QApplication
+    result = _last_fit_result(app)
+    if result is None or not getattr(result, "ok", False):
+        QMessageBox.information(app, "Data Fitting", "Run a successful fit first.")
+        return
+    text = _format_result(result)
+    QApplication.clipboard().setText(text)
+    _show_warning(app, "IEC fit report copied to clipboard.", severity="warning")
+
+
+def _save_report_json(app) -> None:
+    import json
+    result = _last_fit_result(app)
+    if result is None or not getattr(result, "ok", False):
+        QMessageBox.information(app, "Data Fitting", "Run a successful fit first.")
+        return
+    report = _build_report_dict(app, result)
+    default_dir = _preset_dir(app)
+    label = app.data_fit_y_cb.currentText() or "fit"
+    path_str, _ = QFileDialog.getSaveFileName(
+        app, "Save IEC fit report",
+        str(default_dir / f"{label}_iec_report.json"), "JSON (*.json)",
+    )
+    if not path_str:
+        return
+    try:
+        with open(path_str, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2, sort_keys=True, default=float)
+    except OSError as exc:
+        QMessageBox.critical(app, "Data Fitting", f"Failed to save report: {exc}")
+        return
+    _show_warning(app, f"Saved IEC fit report to {path_str}", severity="warning")

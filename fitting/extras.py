@@ -800,11 +800,19 @@ class FitPreset:
     chi_tol: float = 1.0e-9
     use_length: bool = False
     sample_length_cm: float = 1.0
+    # Criterion value units follow the UI mode:
+    #   use_length=True  → Ec in µV/cm (IEC 61788 HTS default = 1.0)
+    #   use_length=False → Vc in mV
     criterion_value: float = 1.0
     avg_window: int = 1
     x_channel: str = ""
     y_channel: str = ""
     time_channel: str = "Time"
+    # IEC 61788 mode knobs (default ON — IEC-compliant fitting).
+    iec_mode: bool = True
+    n_log_fit: bool = True
+    vc_low_mult: float = 0.1
+    vc_high_mult: float = 10.0
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:
@@ -827,6 +835,52 @@ def load_preset_from_file(path: Path) -> FitPreset:
     with path.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
     return preset_from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# Named IEC 61788 presets
+# ---------------------------------------------------------------------------
+# Each preset below pins the criterion to the value defined in the relevant
+# IEC 61788 document so all labs that pick the same preset produce comparable
+# Ic and n-values. Sample length defaults to 1 cm (override with the real
+# voltage-tap spacing before running a fit); criterion_value is in µV/cm when
+# use_length=True, otherwise in mV.
+
+def iec_presets() -> dict[str, "FitPreset"]:
+    base = dict(
+        didt_low=40.0, didt_high=60.0,
+        linear_low=5.0, linear_high=40.0,
+        power_low=5.0, power_vfrac=80.0,
+        max_iter=10, ic_tol_pct=0.1, chi_tol=1.0e-9,
+        avg_window=1, iec_mode=True, n_log_fit=True,
+        vc_low_mult=0.1, vc_high_mult=10.0,
+    )
+    return {
+        # IEC 61788-2 (Cu/Nb-Ti composite superconductors)
+        "IEC 61788-2 Nb-Ti (Ec = 0.1 µV/cm)": FitPreset(
+            use_length=True, sample_length_cm=1.0, criterion_value=0.1, **base,
+        ),
+        # IEC 61788-3 (Ag-sheathed Bi-2212 / Bi-2223, HTS)
+        "IEC 61788-3 BSCCO (Ec = 1 µV/cm)": FitPreset(
+            use_length=True, sample_length_cm=1.0, criterion_value=1.0, **base,
+        ),
+        # IEC 61788-14 (REBCO coated conductors)
+        "IEC 61788-14 REBCO tape (Ec = 1 µV/cm)": FitPreset(
+            use_length=True, sample_length_cm=1.0, criterion_value=1.0, **base,
+        ),
+        # IEC 61788-21 (2G HTS cables under self-field conditions)
+        "IEC 61788-21 HTS cable (Ec = 1 µV/cm)": FitPreset(
+            use_length=True, sample_length_cm=1.0, criterion_value=1.0, **base,
+        ),
+        # IEC 61788-19 (Nb3Sn wires)
+        "IEC 61788-19 Nb3Sn (Ec = 0.1 µV/cm)": FitPreset(
+            use_length=True, sample_length_cm=1.0, criterion_value=0.1, **base,
+        ),
+        # Whole-magnet mode: Vc in mV, configure the real Vc for your coil.
+        "Whole magnet / coil (Vc = 1 mV)": FitPreset(
+            use_length=False, sample_length_cm=1.0, criterion_value=1.0, **base,
+        ),
+    }
 
 
 # ----------------------------------------------------------------------------
