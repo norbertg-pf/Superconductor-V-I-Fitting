@@ -20,6 +20,7 @@ from nptdms import TdmsFile
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -30,6 +31,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -39,6 +41,10 @@ from .service import (
     DEFAULT_CHI_SQR_TOL,
     DEFAULT_DIDT_HIGH_FRAC,
     DEFAULT_DIDT_LOW_FRAC,
+    DEFAULT_EC_V_PER_CM,
+    DEFAULT_EC1_V_PER_CM,
+    DEFAULT_EC2_V_PER_CM,
+    DEFAULT_FIT_METHOD,
     DEFAULT_IC_TOLERANCE,
     DEFAULT_LINEAR_HIGH_FRAC,
     DEFAULT_LINEAR_LOW_FRAC,
@@ -46,6 +52,8 @@ from .service import (
     DEFAULT_POWER_LOW_FRAC,
     DEFAULT_POWER_V_FRAC,
     DEFAULT_VC_VOLTS,
+    FIT_METHOD_LOG_LOG,
+    FIT_METHOD_NONLINEAR,
     FitSettings,
     robust_view_range,
     run_full_fit,
@@ -175,17 +183,17 @@ def _xvalue_edit() -> QLineEdit:
 
 
 def _fill_window_grid(layout, show_cb, *, low_label, low_pct, low_x,
-                      high_label, high_pct, high_x):
-    """Show checkbox on row 0, percents row 1, X values row 2."""
-    layout.addWidget(show_cb, 0, 0, 1, 4)
-    layout.addWidget(QLabel(low_label), 1, 0)
-    layout.addWidget(low_pct, 1, 1)
-    layout.addWidget(QLabel(high_label), 1, 2)
-    layout.addWidget(high_pct, 1, 3)
-    layout.addWidget(QLabel("Low (X)"), 2, 0)
-    layout.addWidget(low_x, 2, 1)
-    layout.addWidget(QLabel("High (X)"), 2, 2)
-    layout.addWidget(high_x, 2, 3)
+                      high_label, high_pct, high_x, base_row: int = 0):
+    """Show checkbox on base_row, percents on base_row+1, X values on base_row+2."""
+    layout.addWidget(show_cb, base_row, 0, 1, 4)
+    layout.addWidget(QLabel(low_label), base_row + 1, 0)
+    layout.addWidget(low_pct, base_row + 1, 1)
+    layout.addWidget(QLabel(high_label), base_row + 1, 2)
+    layout.addWidget(high_pct, base_row + 1, 3)
+    layout.addWidget(QLabel("Low (X)"), base_row + 2, 0)
+    layout.addWidget(low_x, base_row + 2, 1)
+    layout.addWidget(QLabel("High (X)"), base_row + 2, 2)
+    layout.addWidget(high_x, base_row + 2, 3)
 
 
 def _set_silently(widget: QLineEdit, text: str) -> None:
@@ -250,11 +258,12 @@ def _read_time_channel(tdms_file):
 
 
 def _read_channel_metadata(channel) -> dict:
-    """Extract Scale_Factor / Offset metadata written by the TDMS writer.
+    """Extract Scale_Factor / Offset / Voltage_Tab_Distance metadata.
 
-    The TDMS data is already stored in scaled engineering units (see
-    math_processing_worker), so returning the metadata here is informational:
-    the user can apply an additional scale/offset on top if needed.
+    Voltage_Tab_Distance is written by the Tape and Cable presets of
+    DAQUniversal (see TDMS metadata spec). When present, the Data Fitting
+    tab auto-populates the voltage-tap separation and enables the E-field
+    path so Ic is computed per IEC 61788 with a 1 uV/cm criterion.
     """
     props = getattr(channel, "properties", {}) or {}
     try:
@@ -265,7 +274,16 @@ def _read_channel_metadata(channel) -> dict:
         offset = float(props.get("Offset", 0.0))
     except (TypeError, ValueError):
         offset = 0.0
-    return {"scale": scale, "offset": offset}
+    v_tap_raw = props.get("Voltage_Tab_Distance", "")
+    v_tap: Optional[float] = None
+    if v_tap_raw not in ("", None):
+        try:
+            v_tap = float(v_tap_raw)
+            if v_tap <= 0:
+                v_tap = None
+        except (TypeError, ValueError):
+            v_tap = None
+    return {"scale": scale, "offset": offset, "voltage_tap_cm": v_tap}
 
 
 def _read_signal_channel(tdms_file, signal_name: str):
@@ -328,7 +346,9 @@ class DataFittingController:
         return self.channel_cache.get(name)
 
     def get_metadata(self, name: str) -> dict:
-        return self.channel_metadata.get(name, {"scale": 1.0, "offset": 0.0})
+        return self.channel_metadata.get(
+            name, {"scale": 1.0, "offset": 0.0, "voltage_tap_cm": None}
+        )
 
     @staticmethod
     def apply_transform(values, scale: float, offset: float):
@@ -393,11 +413,14 @@ def _connect_data_fitting_actions(app):
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
-    app.data_fit_show_power.toggled.connect(lambda _: _update_band_states(app))
+    app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_add_plot_btn.clicked.connect(lambda: (_add_plot_from_current(app), robust_view(app)))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
+    app.data_fit_method_loglog_rb.toggled.connect(lambda _: _on_fit_method_changed(app))
+    app.data_fit_method_nonlinear_rb.toggled.connect(lambda _: _on_fit_method_changed(app))
+    app.data_fit_plot_scale_btn.clicked.connect(lambda: _toggle_plot_scale(app))
 
 
 def _on_transform_inputs_changed(app) -> None:
@@ -429,15 +452,23 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_y_scale.setText("1.0")
     app.data_fit_y_offset.setText("0.0")
     app.data_fit_avg_input.setText("1")
-    app.data_fit_use_length_cb.setChecked(False)
+    # IEC 61788 defaults: enable voltage-tap path with Ec = 1 µV/cm. The box
+    # auto-unchecks if the next loaded TDMS lacks Voltage_Tab_Distance.
+    app.data_fit_use_length_cb.setChecked(True)
     app.data_fit_length_input.setText("1.0")
-    app.data_fit_vc_input.setText(f"{DEFAULT_VC_VOLTS * 1000:.6g}")
+    app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
-    app.data_fit_power_low.setText(f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
-    app.data_fit_power_vfrac.setText(f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
+    if DEFAULT_FIT_METHOD == FIT_METHOD_LOG_LOG:
+        app.data_fit_method_loglog_rb.setChecked(True)
+        app.data_fit_power_low.setText(f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
+        app.data_fit_power_vfrac.setText(f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+    else:
+        app.data_fit_method_nonlinear_rb.setChecked(True)
+        app.data_fit_power_low.setText(f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
+        app.data_fit_power_vfrac.setText(f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
     app.data_fit_show_didt.setChecked(False)
     app.data_fit_show_linear.setChecked(False)
     app.data_fit_show_power.setChecked(False)
@@ -463,6 +494,7 @@ def _reset_data_fitting_defaults(app) -> None:
     _hide_fit_overlays(app)
     _clear_warning(app)
     _update_avg_rate_label(app)
+    _update_method_mode_ui(app)
     _refresh_curve_profile_selector(app)
 
 
@@ -578,15 +610,28 @@ def setup_data_fitting_tab_layout(app):
     ch_grid.addWidget(app.data_fit_add_plot_btn, 6, 0, 1, 2)
     ch_grid.addWidget(app.data_fit_plot_summary_btn, 6, 2, 1, 2)
 
-    # Sample length + criterion widgets.
-    app.data_fit_use_length_cb = QCheckBox("Y is E (V/cm)")
+    # Voltage-tap separation + criterion widgets.
+    # When checked, Y is divided by the tap distance so the fit is in V/cm
+    # (electric field) and the Ic criterion is an E-field per IEC 61788-3/-21.
+    app.data_fit_use_length_cb = QCheckBox("Use voltage-tap separation (Y → E in V/cm)")
+    app.data_fit_use_length_cb.setToolTip(
+        "Enable IEC 61788 electric-field path: Y is divided by the voltage-tap\n"
+        "separation L_v so the Ic criterion Ec has units of V/cm (defaults to\n"
+        "1 µV/cm for HTS at 77 K). Auto-enabled when the TDMS metadata\n"
+        "provides a per-channel Voltage_Tab_Distance."
+    )
     app.data_fit_length_input = QLineEdit("1.0")
     app.data_fit_length_input.setMaximumWidth(80)
-    app.data_fit_vc_input = QLineEdit(f"{DEFAULT_VC_VOLTS * 1000:.6g}")
+    app.data_fit_length_label = QLabel("Tap distance L_v (cm):")
+    app.data_fit_length_input.setToolTip(
+        "Distance between the two voltage taps, in cm. Written by DAQUniversal\n"
+        "to the TDMS file as per-channel property 'Voltage_Tab_Distance'."
+    )
+    app.data_fit_vc_input = QLineEdit(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
     app.data_fit_vc_input.setMaximumWidth(80)
-    app.data_fit_vc_label = QLabel("Vc (mV):")
-    ch_grid.addWidget(app.data_fit_use_length_cb, 4, 1)
-    ch_grid.addWidget(QLabel("Length (cm):"), 4, 2)
+    app.data_fit_vc_label = QLabel("Ec (µV/cm):")
+    ch_grid.addWidget(app.data_fit_use_length_cb, 4, 0, 1, 2)
+    ch_grid.addWidget(app.data_fit_length_label, 4, 2)
     ch_grid.addWidget(app.data_fit_length_input, 4, 3)
     ch_grid.addWidget(app.data_fit_load_metadata_btn, 5, 0, 1, 2)
     app.data_fit_avg_rate_label.setVisible(False)
@@ -637,10 +682,49 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(linear_group)
 
-    power_group = QGroupBox("Step 3: Power-law window")
+    power_group = QGroupBox("Step 3: Ic and n-value")
     power_goal = QLabel('<b>Goal:</b> fit the superconducting transition to get <b>Ic</b> and <b>n</b>.')
     power_goal.setTextFormat(Qt.RichText)
     power_layout = QGridLayout(power_group)
+
+    # --- method selector (row 0) ---
+    app.data_fit_method_group = QButtonGroup(power_group)
+    app.data_fit_method_loglog_rb = QRadioButton(
+        "Log E vs log I linear fit (IEC 61788)"
+    )
+    app.data_fit_method_loglog_rb.setToolTip(
+        "IEC 61788-3 decade method: baseline-subtract (E_sc = E − V0 − R·I),\n"
+        "select points with E_sc ∈ [Ec1, Ec2], then fit\n"
+        "log10(E_sc) = log10(Ec2) + n · log10(I / Ic).\n"
+        "Ic is reported at E = Ec2 (typically 1 µV/cm for HTS at 77 K)."
+    )
+    app.data_fit_method_nonlinear_rb = QRadioButton(
+        "Non-linear V-I fit (V = V0 + R·I + Vc·(I/Ic)^n)"
+    )
+    app.data_fit_method_nonlinear_rb.setToolTip(
+        "Legacy coupled non-linear fit. Uses the full voltage model with\n"
+        "V0, R frozen from Step 2 and Ic, n as free parameters. Not IEC\n"
+        "standardised — kept for backwards compatibility and cross-checks."
+    )
+    app.data_fit_method_group.addButton(app.data_fit_method_loglog_rb, 0)
+    app.data_fit_method_group.addButton(app.data_fit_method_nonlinear_rb, 1)
+    if DEFAULT_FIT_METHOD == FIT_METHOD_LOG_LOG:
+        app.data_fit_method_loglog_rb.setChecked(True)
+    else:
+        app.data_fit_method_nonlinear_rb.setChecked(True)
+    power_layout.addWidget(app.data_fit_method_loglog_rb, 0, 0, 1, 3)
+    power_layout.addWidget(app.data_fit_method_nonlinear_rb, 1, 0, 1, 3)
+
+    # Toggle between linear/linear and log/log axes. Text tracks current mode.
+    app.data_fit_plot_scale_btn = QPushButton("Switch to log-log plot")
+    app.data_fit_plot_scale_btn.setToolTip(
+        "Toggle the V-I plot between linear axes and log-log axes.\n"
+        "Log-log also updates the graph-settings dialog (Scale → Log10\n"
+        "on both axes) so the setting persists when you re-open it."
+    )
+    power_layout.addWidget(app.data_fit_plot_scale_btn, 0, 3, 2, 1)
+
+    # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
     app.data_fit_power_vfrac = _percent_edit(DEFAULT_POWER_V_FRAC)
     app.data_fit_power_low_x = _xvalue_edit()
@@ -648,12 +732,26 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_show_power = QCheckBox("Show / edit")
     app.data_fit_show_power.setChecked(False)
     app.data_fit_show_power.setToolTip("Show/hide the orange band for this window on the plot.")
+    # Pre-fill the low/high editors with the IEC Ec1/Ec2 defaults so they
+    # are correct the first time the user sees them with the log-log
+    # method (the default). The labels switch via _update_method_mode_ui.
+    app.data_fit_power_low.setText(f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
+    app.data_fit_power_vfrac.setText(f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+    # Offset the grid so the method radios/button stay visible above.
     _fill_window_grid(
         power_layout, app.data_fit_show_power,
-        low_label="Low (% of Imax)", low_pct=app.data_fit_power_low, low_x=app.data_fit_power_low_x,
-        high_label="High (% of Vmax)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
+        low_label="Ec1 (µV/cm)", low_pct=app.data_fit_power_low, low_x=app.data_fit_power_low_x,
+        high_label="Ec2 (µV/cm)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
+        base_row=2,
     )
-    power_layout.addWidget(power_goal, 3, 0, 1, 4)
+    power_layout.addWidget(power_goal, 5, 0, 1, 4)
+    # Keep references to the text labels so the method-mode handler can
+    # swap them when the user switches between IEC and non-linear modes.
+    # (row 3 holds the Low/High value labels; row 4 holds the X-value row.)
+    app.data_fit_power_low_label = power_layout.itemAtPosition(3, 0).widget()
+    app.data_fit_power_high_label = power_layout.itemAtPosition(3, 2).widget()
+    app.data_fit_power_low_x_label = power_layout.itemAtPosition(4, 0).widget()
+    app.data_fit_power_high_x_label = power_layout.itemAtPosition(4, 2).widget()
     left.addWidget(power_group)
 
     app.data_fit_window_inputs = {
@@ -767,7 +865,13 @@ def setup_data_fitting_tab_layout(app):
 
     right.addLayout(header)
 
-    app.data_fit_plot = pg.PlotWidget(title="V-I preview")
+    app.data_fit_plot = pg.PlotWidget(
+        title="V-I preview",
+        axisItems={
+            "bottom": EngineeringAxisItem(orientation="bottom"),
+            "left": EngineeringAxisItem(orientation="left"),
+        },
+    )
     app.data_fit_plot.setLabel("bottom", "Current (A)")
     app.data_fit_plot.setLabel("left", "Voltage (V)")
     app.data_fit_plot.showGrid(x=True, y=True)
@@ -813,6 +917,20 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_criterion_line.setVisible(False)
     app.data_fit_plot.addItem(app.data_fit_criterion_line, ignoreBounds=True)
 
+    # IEC 61788 decade lines (Ec1, Ec2) — visible only in the log-log method.
+    app.data_fit_ec1_line = pg.InfiniteLine(
+        angle=0, pen=pg.mkPen(230, 120, 0, 200, style=Qt.DashLine, width=1.2),
+        label="Ec1", labelOpts={"position": 0.02, "color": (230, 120, 0)},
+    )
+    app.data_fit_ec1_line.setVisible(False)
+    app.data_fit_plot.addItem(app.data_fit_ec1_line, ignoreBounds=True)
+    app.data_fit_ec2_line = pg.InfiniteLine(
+        angle=0, pen=pg.mkPen(230, 120, 0, 200, style=Qt.DashLine, width=1.2),
+        label="Ec2", labelOpts={"position": 0.02, "color": (230, 120, 0)},
+    )
+    app.data_fit_ec2_line.setVisible(False)
+    app.data_fit_plot.addItem(app.data_fit_ec2_line, ignoreBounds=True)
+
     # Draggable parameter-table overlay (visible after a successful fit).
     app.data_fit_param_table = _FitParamTable()
     app.data_fit_param_table.setVisible(False)
@@ -821,7 +939,13 @@ def setup_data_fitting_tab_layout(app):
     right.addWidget(app.data_fit_plot, stretch=3)
 
     # Residuals sub-plot, shown after a fit.
-    app.data_fit_resid_plot = pg.PlotWidget(title="Residuals (data − model)")
+    app.data_fit_resid_plot = pg.PlotWidget(
+        title="Residuals (data − model)",
+        axisItems={
+            "bottom": EngineeringAxisItem(orientation="bottom"),
+            "left": EngineeringAxisItem(orientation="left"),
+        },
+    )
     app.data_fit_resid_plot.setLabel("bottom", "Current (A)")
     app.data_fit_resid_plot.setLabel("left", "Residual")
     app.data_fit_resid_plot.showGrid(x=True, y=True)
@@ -849,6 +973,8 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
     _on_use_length_changed(app)
+    _update_method_mode_ui(app)
+    _update_plot_scale_button_text(app)
     _refresh_curve_profile_selector(app)
     _connect_data_fitting_actions(app)
 
@@ -942,6 +1068,16 @@ def _settings_from_inputs(app) -> FitSettings:
         # Input is Vc in mV → convert to V for the service.
         vc_mv = _float_from(app.data_fit_vc_input, DEFAULT_VC_VOLTS * 1000.0)
         criterion_value = vc_mv * 1.0e-3
+
+    method = _active_fit_method(app)
+    # Ec1/Ec2 share the Step 3 Low/High editors when log-log is active.
+    # Absolute units: V/cm when Y has been divided by L_v, V otherwise.
+    to_si = 1.0e-6 if sample_length is not None else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    if method == FIT_METHOD_LOG_LOG:
+        criterion_value = ec2  # Ic is reported at E = Ec2.
+
     settings = FitSettings(
         didt_low_frac=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
         didt_high_frac=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
@@ -954,6 +1090,9 @@ def _settings_from_inputs(app) -> FitSettings:
         chi_sqr_tolerance=_float_from(app.data_fit_chi_tol, DEFAULT_CHI_SQR_TOL),
         criterion_voltage=criterion_value,
         sample_length_cm=sample_length,
+        fit_method=method,
+        ec1=ec1,
+        ec2=ec2,
     )
     return settings
 
@@ -1044,14 +1183,42 @@ def _update_y_axis_label(app):
     auto values, we leave it alone.
     """
     desired = _Y_TITLE_E_FIELD if app.data_fit_use_length_cb.isChecked() else _Y_TITLE_VOLTAGE
-    app.data_fit_plot.setLabel("left", desired)
+    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
+        app.data_fit_plot.setLabel("left", f"{desired}  [log scale]")
+    else:
+        app.data_fit_plot.setLabel("left", desired)
     settings = getattr(app, "data_fit_graph_settings", None)
     if settings is not None and settings.title_left.text in ("", _Y_TITLE_VOLTAGE, _Y_TITLE_E_FIELD):
         settings.title_left.text = desired
 
 
 def _update_equation_label(app):
-    if getattr(app, "data_fit_use_length_cb", None) and app.data_fit_use_length_cb.isChecked():
+    has_length = (
+        getattr(app, "data_fit_use_length_cb", None)
+        and app.data_fit_use_length_cb.isChecked()
+    )
+    method = _active_fit_method(app) if hasattr(app, "data_fit_method_loglog_rb") else DEFAULT_FIT_METHOD
+    if method == FIT_METHOD_LOG_LOG:
+        if has_length:
+            eq = (
+                'Step 3 (IEC 61788, log E vs log I):<br>'
+                '<span style="font-size: 14pt;">'
+                '<b>log</b> E<sub>sc</sub> = <b>log</b> E<sub>c2</sub> + '
+                '<b>n · log</b> (I / I<sub>c</sub>)'
+                '</span><br>'
+                '<span style="color:#555">where '
+                'E<sub>sc</sub> = E − V<sub>0</sub> − ρ·I, '
+                'E<sub>c1</sub> ≤ E<sub>sc</sub> ≤ E<sub>c2</sub></span>'
+            )
+        else:
+            eq = (
+                'Step 3 (IEC 61788, log V vs log I):<br>'
+                '<span style="font-size: 14pt;">'
+                '<b>log</b> V<sub>sc</sub> = <b>log</b> V<sub>c2</sub> + '
+                '<b>n · log</b> (I / I<sub>c</sub>)'
+                '</span>'
+            )
+    elif has_length:
         eq = (
             'Fitting model (IEC 61788, per unit length):<br>'
             '<span style="font-size: 14pt;">'
@@ -1107,12 +1274,193 @@ def _update_avg_rate_label(app):
         )
 
 
+def _active_fit_method(app) -> str:
+    """Return FIT_METHOD_LOG_LOG or FIT_METHOD_NONLINEAR from the radio buttons."""
+    rb = getattr(app, "data_fit_method_loglog_rb", None)
+    if rb is None:
+        return DEFAULT_FIT_METHOD
+    return FIT_METHOD_LOG_LOG if rb.isChecked() else FIT_METHOD_NONLINEAR
+
+
+def _update_method_mode_ui(app) -> None:
+    """Relabel Step 3 editors and gray out widgets irrelevant to the IEC mode.
+
+    Log-log (IEC) mode: Low/High become Ec1/Ec2 in µV/cm; the Ic iteration
+    knobs (max iterations, Ic stop tol, chi-sqr tol, Vc) are disabled — the
+    decade method is a single closed-form linear fit.
+
+    Non-linear mode: Low/High become fractions of Imax / Vmax as before, and
+    the iteration knobs are re-enabled.
+    """
+    method = _active_fit_method(app)
+    is_loglog = method == FIT_METHOD_LOG_LOG
+    has_length = app.data_fit_use_length_cb.isChecked()
+    units = "µV/cm" if has_length else "µV"
+    if is_loglog:
+        if getattr(app, "data_fit_power_low_label", None) is not None:
+            app.data_fit_power_low_label.setText(f"Ec1 ({units})")
+        if getattr(app, "data_fit_power_high_label", None) is not None:
+            app.data_fit_power_high_label.setText(f"Ec2 ({units})")
+    else:
+        if getattr(app, "data_fit_power_low_label", None) is not None:
+            app.data_fit_power_low_label.setText("Low (% of Imax)")
+        if getattr(app, "data_fit_power_high_label", None) is not None:
+            app.data_fit_power_high_label.setText("High (% of Vmax)")
+    # Gray out the non-linear-only inputs in log-log mode.
+    for widget in (
+        app.data_fit_max_iter,
+        app.data_fit_ic_tol,
+        app.data_fit_chi_tol,
+    ):
+        widget.setEnabled(not is_loglog)
+    # Vc input: disabled in log-log mode (criterion is Ec2 from the Step 3
+    # editors) and when the E-field path is active it is Ec not Vc anyway.
+    app.data_fit_vc_input.setEnabled(not is_loglog)
+    app.data_fit_vc_label.setEnabled(not is_loglog)
+    # The X-value editors in Step 3 map a percentage to a current, which is
+    # meaningless when the editors hold Ec1/Ec2. Disable them in log-log mode.
+    for widget in (
+        app.data_fit_power_low_x,
+        app.data_fit_power_high_x,
+        getattr(app, "data_fit_power_low_x_label", None),
+        getattr(app, "data_fit_power_high_x_label", None),
+    ):
+        if widget is not None:
+            widget.setEnabled(not is_loglog)
+    # In log-log mode the Show checkbox still works (it controls the Ec1/Ec2
+    # guide lines); only dragging the band is meaningless since the Step 3
+    # editors hold Ec values, not a draggable current range.
+    app.data_fit_show_power.setEnabled(True)
+    _save_active_curve_profile(app)
+
+
+def _on_fit_method_changed(app) -> None:
+    """Apply IEC-standard defaults when switching into log-log mode; restore
+    the legacy fractions when switching into non-linear mode. Only rewrite
+    the editors when their current content matches the other mode's default,
+    so user-customised values survive toggling back and forth.
+    """
+    method = _active_fit_method(app)
+    low_txt = app.data_fit_power_low.text().strip()
+    high_txt = app.data_fit_power_vfrac.text().strip()
+    if method == FIT_METHOD_LOG_LOG:
+        if low_txt in ("", f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"):
+            _set_silently(app.data_fit_power_low, f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
+        if high_txt in ("", f"{DEFAULT_POWER_V_FRAC * 100:.2f}"):
+            _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+    else:
+        if low_txt in ("", f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"):
+            _set_silently(app.data_fit_power_low, f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
+        if high_txt in ("", f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"):
+            _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
+    _update_method_mode_ui(app)
+    _update_equation_label(app)
+
+
+_PLOT_SCALE_LINEAR = "linear"
+_PLOT_SCALE_LOGLOG = "loglog"
+
+
+def _current_plot_scale(app) -> str:
+    settings = getattr(app, "data_fit_graph_settings", None)
+    if settings is None:
+        return _PLOT_SCALE_LINEAR
+    if (settings.scale_h.scale_type == "Log10"
+            and settings.scale_v.scale_type == "Log10"):
+        return _PLOT_SCALE_LOGLOG
+    return _PLOT_SCALE_LINEAR
+
+
+def _update_plot_scale_button_text(app) -> None:
+    btn = getattr(app, "data_fit_plot_scale_btn", None)
+    if btn is None:
+        return
+    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
+        btn.setText("Switch to linear-linear plot")
+    else:
+        btn.setText("Switch to log-log plot")
+
+
+def _toggle_plot_scale(app) -> None:
+    """Switch the V-I plot between linear/linear and log/log axes.
+
+    Writes the choice into ``data_fit_graph_settings`` so the graph-settings
+    dialog reflects it, then applies it directly to the plot and lets
+    pyqtgraph auto-range in log space. (Going through refresh_preview would
+    re-impose a linear-space robust-view range on top of the log transform,
+    which pushes the data off screen.)
+    """
+    settings = getattr(app, "data_fit_graph_settings", None)
+    if settings is None:
+        return
+    to_loglog = _current_plot_scale(app) != _PLOT_SCALE_LOGLOG
+    if to_loglog:
+        settings.scale_h.scale_type = "Log10"
+        settings.scale_v.scale_type = "Log10"
+        settings.scale_h.auto_range = True
+        settings.scale_v.auto_range = True
+    else:
+        settings.scale_h.scale_type = "Linear"
+        settings.scale_v.scale_type = "Linear"
+    _update_plot_scale_button_text(app)
+    plot_widget = getattr(app, "data_fit_plot", None)
+    if plot_widget is None:
+        return
+    plot_item = plot_widget.getPlotItem()
+    plot_item.setLogMode(x=to_loglog, y=to_loglog)
+    # Keep the linked residuals plot on a matching log x-axis so tick labels
+    # match up with the main plot. Y stays linear — residuals are signed.
+    resid_plot = getattr(app, "data_fit_resid_plot", None)
+    if resid_plot is not None:
+        resid_plot.getPlotItem().setLogMode(x=to_loglog, y=False)
+    _apply_axis_labels_for_scale(app, to_loglog)
+    vb = plot_item.getViewBox()
+    vb.enableAutoRange(axis="x")
+    vb.enableAutoRange(axis="y")
+    # Re-render the step bands / Ec1-Ec2 lines in the new coordinate system.
+    try:
+        refresh_preview(app)
+    except Exception:
+        pass
+    if not to_loglog:
+        # Back to linear: restore the robust, outlier-trimmed view.
+        try:
+            robust_view(app)
+        except Exception:
+            pass
+
+
+def _apply_axis_labels_for_scale(app, to_loglog: bool) -> None:
+    """Rewrite axis titles to make the log transform explicit.
+
+    Tick labels are handled by EngineeringAxisItem (which shows SI-prefixed
+    values in both linear and log mode), so here we only adjust the title.
+    """
+    plot_widget = getattr(app, "data_fit_plot", None)
+    if plot_widget is None:
+        return
+    plot_item = plot_widget.getPlotItem()
+    use_length = (
+        getattr(app, "data_fit_use_length_cb", None)
+        and app.data_fit_use_length_cb.isChecked()
+    )
+    y_base = _Y_TITLE_E_FIELD if use_length else _Y_TITLE_VOLTAGE
+    if to_loglog:
+        plot_item.setLabel("bottom", "Current (A)  [log scale]")
+        plot_item.setLabel("left", f"{y_base}  [log scale]")
+    else:
+        plot_item.setLabel("bottom", "Current (A)")
+        plot_item.setLabel("left", y_base)
+
+
 def _on_use_length_changed(app):
     app.data_fit_plot_dirty = True
-    app.data_fit_length_input.setEnabled(app.data_fit_use_length_cb.isChecked())
-    if app.data_fit_use_length_cb.isChecked():
+    checked = app.data_fit_use_length_cb.isChecked()
+    app.data_fit_length_input.setEnabled(checked)
+    app.data_fit_length_label.setEnabled(checked)
+    if checked:
         app.data_fit_vc_label.setText("Ec (µV/cm):")
-        app.data_fit_vc_input.setText("1")
+        app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
         app.data_fit_linear_goal.setText(
             '<b>Goal:</b> fit the linear part to get <b>Rho</b> and <b>L</b>.'
         )
@@ -1123,6 +1471,7 @@ def _on_use_length_changed(app):
             '<b>Goal:</b> fit the linear part to get <b>R</b> and <b>L</b>.'
         )
     _update_equation_label(app)
+    _update_method_mode_ui(app)
     if hasattr(app, "data_fit_curve_profile_cb"):
         _save_active_curve_profile(app)
 
@@ -1168,8 +1517,35 @@ def refresh_preview(app):
     app.data_fit_xrange_label.setText(f"X window: [{x_min_full:.6g}, {x_max_full:.6g}]")
 
 
+def _plot_is_loglog(app) -> bool:
+    return _current_plot_scale(app) == _PLOT_SCALE_LOGLOG
+
+
+def _xform_for_view(val: float, is_log: bool) -> float:
+    """Linear data value → plot view coordinate (log10 when in log mode)."""
+    if not is_log:
+        return float(val)
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return float("nan")
+    return float(np.log10(v)) if v > 0 else float("nan")
+
+
+def _xform_from_view(val: float, is_log: bool) -> float:
+    """Plot view coordinate → linear data value."""
+    if not is_log:
+        return float(val)
+    return float(10.0 ** float(val))
+
+
 def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
-    """Update the three semi-transparent bands that show the configured windows."""
+    """Update the three semi-transparent bands that show the configured windows.
+
+    LinearRegionItem values are in plot view coordinates, which in log-log
+    mode are log10(data). We transform once here so the bands line up with
+    the underlying curve regardless of axis scale.
+    """
     if x is None or x.size == 0:
         return
     x_min = float(np.min(x))
@@ -1184,29 +1560,88 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
     didt_hi = from_pct(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC)
     lin_lo = from_pct(app.data_fit_linear_low, DEFAULT_LINEAR_LOW_FRAC)
     lin_hi = from_pct(app.data_fit_linear_high, DEFAULT_LINEAR_HIGH_FRAC)
-    pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
-    v_f = _float_from(app.data_fit_power_vfrac, DEFAULT_POWER_V_FRAC * 100, as_fraction=True)
-    y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
-    threshold = v_f * y_max
-    above = np.where(y >= threshold)[0] if y is not None else np.array([], dtype=int)
-    pow_hi = float(x[above[0]]) if above.size else x_max
 
-    for band, pair in (
+    band_pairs = [
         (app.data_fit_band_didt, (didt_lo, didt_hi)),
         (app.data_fit_band_linear, (lin_lo, lin_hi)),
-        (app.data_fit_band_power, (pow_lo, pow_hi)),
-    ):
+    ]
+
+    is_loglog = _plot_is_loglog(app)
+    ec1 = ec2 = None
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        # The Step 3 editors hold Ec1/Ec2 (µV/cm or µV). A full band would
+        # require baseline-subtracted E_sc = y − V0 − R·I which the user
+        # does not have until Step 2 has run. As a visual hint, shade the
+        # current range where y alone exceeds Ec1·L_v / Ec1 and Ec2·L_v /
+        # Ec2 — fine for coarse feedback, exact band is shown post-fit.
+        has_length = app.data_fit_use_length_cb.isChecked()
+        to_si = 1.0e-6 if has_length else 1.0e-3
+        ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+        ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+        if y is not None and y.size:
+            above_1 = np.where(y >= ec1)[0]
+            above_2 = np.where(y >= ec2)[0]
+            pow_lo = float(x[above_1[0]]) if above_1.size else x_max
+            pow_hi = float(x[above_2[0]]) if above_2.size else x_max
+            if pow_hi <= pow_lo:
+                pow_hi = pow_lo + max(1e-12, 0.01 * span)
+            band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+    else:
+        pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
+        v_f = _float_from(
+            app.data_fit_power_vfrac, DEFAULT_POWER_V_FRAC * 100, as_fraction=True
+        )
+        y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
+        threshold = v_f * y_max
+        above = np.where(y >= threshold)[0] if y is not None else np.array([], dtype=int)
+        pow_hi = float(x[above[0]]) if above.size else x_max
+        band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+
+    for band, pair in band_pairs:
+        lo, hi = pair
+        view_pair = (_xform_for_view(lo, is_loglog), _xform_for_view(hi, is_loglog))
+        if not (np.isfinite(view_pair[0]) and np.isfinite(view_pair[1])):
+            continue
         band.blockSignals(True)
         try:
-            band.setRegion(pair)
+            band.setRegion(view_pair)
         finally:
             band.blockSignals(False)
 
+    # Horizontal Ec1/Ec2 guide lines (IEC decade). Only meaningful in the
+    # log-log method; hide otherwise.
+    ec1_line = getattr(app, "data_fit_ec1_line", None)
+    ec2_line = getattr(app, "data_fit_ec2_line", None)
+    if ec1_line is not None and ec2_line is not None:
+        show = (
+            _active_fit_method(app) == FIT_METHOD_LOG_LOG
+            and bool(getattr(app, "data_fit_show_power", None)
+                     and app.data_fit_show_power.isChecked())
+            and ec1 is not None and ec2 is not None
+        )
+        if show:
+            has_length = app.data_fit_use_length_cb.isChecked()
+            unit = "V/cm" if has_length else "V"
+            ec1_line.setValue(_xform_for_view(ec1, is_loglog))
+            ec2_line.setValue(_xform_for_view(ec2, is_loglog))
+            ec1_line.label.setText(f"Ec1 = {_format_engineering(ec1, unit, 2)}")
+            ec2_line.label.setText(f"Ec2 = {_format_engineering(ec2, unit, 2)}")
+        ec1_line.setVisible(show)
+        ec2_line.setVisible(show)
+
 
 def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
+    plot_item = app.data_fit_plot.getPlotItem()
+    view_box = plot_item.getViewBox()
+    # Robust-view is a linear-space percentile range — meaningless once the
+    # axes are in log10 mode (pyqtgraph would interpret the numbers as
+    # log-space bounds). Fall back to autoRange in log mode.
+    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
+        view_box.enableAutoRange(axis="x")
+        view_box.enableAutoRange(axis="y")
+        return
     x_lo, x_hi = robust_view_range(x)
     y_lo, y_hi = robust_view_range(y)
-    view_box = app.data_fit_plot.getPlotItem().getViewBox()
     view_box.setRange(xRange=(x_lo, x_hi), yRange=(y_lo, y_hi), padding=0.0)
 
 
@@ -1248,15 +1683,21 @@ def toggle_zoom(app, checked: bool):
 
 
 def _update_band_states(app) -> None:
-    """Show and allow dragging for every window whose Show checkbox is enabled."""
+    """Show and allow dragging for every window whose Show checkbox is enabled.
+
+    In log-log mode the power band is shown but not draggable (the Step 3
+    editors hold Ec values, not a draggable current range).
+    """
+    is_loglog = _plot_is_loglog(app)
     for window, band, show_cb in (
         ("didt", app.data_fit_band_didt, app.data_fit_show_didt),
         ("linear", app.data_fit_band_linear, app.data_fit_show_linear),
         ("power", app.data_fit_band_power, app.data_fit_show_power),
     ):
-        enabled = bool(show_cb.isChecked())
-        band.setMovable(enabled)
-        band.setVisible(enabled)
+        checked = bool(show_cb.isChecked())
+        draggable = checked and not (window == "power" and is_loglog)
+        band.setMovable(draggable)
+        band.setVisible(checked)
 
 
 def _on_band_dragged(app, window: str) -> None:
@@ -1269,6 +1710,10 @@ def _on_band_dragged(app, window: str) -> None:
     if not bool(getattr(band, "movable", False)):
         return
     lo, hi = band.getRegion()
+    # Region values are in view coordinates — in log mode that means log10(I).
+    is_loglog = _plot_is_loglog(app)
+    lo = _xform_from_view(lo, is_loglog)
+    hi = _xform_from_view(hi, is_loglog)
     ctx = _data_ctx(app)
     if ctx is None:
         return
@@ -1325,6 +1770,10 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
 
 
 def _refresh_x_from_pct(app, window: str, which: str) -> None:
+    # In log-log mode the Step 3 editors hold Ec1/Ec2 (µV/cm), not a
+    # percentage of Imax — no meaningful X mapping until a fit has run.
+    if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        return
     ctx = _data_ctx(app)
     if ctx is None:
         return
@@ -1339,6 +1788,8 @@ def _refresh_x_from_pct(app, window: str, which: str) -> None:
 
 
 def _refresh_pct_from_x(app, window: str, which: str) -> None:
+    if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        return
     ctx = _data_ctx(app)
     if ctx is None:
         return
@@ -1404,7 +1855,38 @@ def load_metadata_from_tdms(app):
         meta = controller.get_metadata(name)
         scale_input.setText(f"{meta['scale']:g}")
         offset_input.setText(f"{meta['offset']:g}")
+    _apply_voltage_tap_from_metadata(app)
     refresh_preview(app)
+
+
+def _apply_voltage_tap_from_metadata(app) -> None:
+    """Pick up Voltage_Tab_Distance from the Y channel (Tape/Cable preset).
+
+    If present and > 0: check the voltage-tap-separation box, populate the
+    distance, and keep Ec at the IEC default (1 uV/cm). If absent:
+    uncheck the box so the tool does not fit in E-field mode with a stale
+    sample length.
+    """
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    y_name = app.data_fit_y_cb.currentText()
+    if not y_name:
+        return
+    meta = controller.get_metadata(y_name)
+    v_tap = meta.get("voltage_tap_cm")
+    cb = app.data_fit_use_length_cb
+    cb.blockSignals(True)
+    try:
+        if v_tap and v_tap > 0:
+            cb.setChecked(True)
+            app.data_fit_length_input.setText(f"{float(v_tap):g}")
+            app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
+        else:
+            cb.setChecked(False)
+    finally:
+        cb.blockSignals(False)
+    _on_use_length_changed(app)
 
 
 _ENG_PREFIXES = [
@@ -1427,12 +1909,76 @@ def _format_engineering(value: float, unit: str, decimals: int = 2) -> str:
     return f"{scaled:.{decimals}f} {prefix}{unit}".strip()
 
 
+_ENG_PREFIX_BY_EXP = {
+    -24: "y", -21: "z", -18: "a", -15: "f", -12: "p",
+    -9: "n", -6: "µ", -3: "m", 0: "",
+    3: "k", 6: "M", 9: "G", 12: "T", 15: "P", 18: "E",
+}
+
+
+def _eng_tick_string(value: float) -> str:
+    """Format a tick value with an SI prefix but no unit (e.g. 1.2e-6 → "1.2µ").
+
+    Axis labels keep the unit — putting it on every tick clutters the plot.
+    """
+    import math
+    if not np.isfinite(value):
+        return ""
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    mag = abs(value)
+    exp = int(math.floor(math.log10(mag) / 3) * 3)
+    exp = max(-24, min(18, exp))
+    prefix = _ENG_PREFIX_BY_EXP.get(exp, f"e{exp}")
+    scaled = mag / (10.0 ** exp)
+    # 3 sig figs max, trim trailing zeros
+    if scaled >= 100:
+        txt = f"{scaled:.0f}"
+    elif scaled >= 10:
+        txt = f"{scaled:.1f}"
+    else:
+        txt = f"{scaled:.2f}"
+    if "." in txt:
+        txt = txt.rstrip("0").rstrip(".")
+    return f"{sign}{txt}{prefix}" if prefix else f"{sign}{txt}"
+
+
+class EngineeringAxisItem(pg.AxisItem):
+    """AxisItem whose tick labels use SI prefixes in both linear and log10 mode.
+
+    In log mode pyqtgraph passes log10(value) to tickStrings; we exponentiate
+    back so "-6" becomes "1µ" (= 10⁻⁶). enableAutoSIPrefix is turned off so
+    pyqtgraph doesn't also append a global "(x1e-06)" factor to the axis title.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enableAutoSIPrefix(False)
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
+        out = []
+        for v in values:
+            if getattr(self, "logMode", False):
+                try:
+                    lin = 10.0 ** float(v)
+                except (OverflowError, ValueError):
+                    out.append("")
+                    continue
+            else:
+                lin = float(v) * float(scale)
+            out.append(_eng_tick_string(lin))
+        return out
+
+
 def _format_result(result) -> str:
     lines = []
     r_name = "Rho" if result.uses_sample_length else "R"
     r_unit = "Ω/cm" if result.uses_sample_length else "Ω"
     v_name = "Ec" if result.uses_sample_length else "Vc"
     v_unit = "V/cm" if result.uses_sample_length else "V"
+    is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
+    method_label = "Log E vs log I (IEC 61788)" if is_loglog else "Non-linear V-I"
+    lines.append(f"method        = {method_label}")
     lines.append(f"di/dt         = {_format_engineering(result.di_dt, 'A/s', 2)}")
     lines.append(f"L             = {_format_engineering(result.inductance_L, 'H', 2)}  (= V0 / di_dt)")
     lines.append(f"V0            = {_format_engineering(result.V0, v_unit, 2)}")
@@ -1441,10 +1987,23 @@ def _format_result(result) -> str:
     lines.append(f"n-value       = {result.n_value:.2f}")
     lines.append(f"{v_name:<13} = {_format_engineering(result.criterion, v_unit, 2)}")
     lines.append(f"chi-squared   = {result.chi_sqr:.3g}")
-    lines.append(f"iterations    = {result.iterations}")
-    lines.append(f"Ic history    = [{', '.join(f'{v:.4g}' for v in result.ic_history)}]")
+    if is_loglog:
+        lines.append(
+            f"n window      = [Ec1={_format_engineering(result.ec1, v_unit, 2)}, "
+            f"Ec2={_format_engineering(result.ec2, v_unit, 2)}]"
+        )
+        lines.append(
+            f"I window      = [{result.n_window_I[0]:.4g}, {result.n_window_I[1]:.4g}] A, "
+            f"N={result.n_points_used}"
+        )
+    else:
+        lines.append(f"iterations    = {result.iterations}")
+        lines.append(f"Ic history    = [{', '.join(f'{v:.4g}' for v in result.ic_history)}]")
+        lines.append(
+            f"power window  = [{result.power_fit_window[0]:.4g}, "
+            f"{result.power_fit_window[1]:.4g}]"
+        )
     lines.append(f"linear window = [{result.linear_fit_window[0]:.4g}, {result.linear_fit_window[1]:.4g}]")
-    lines.append(f"power window  = [{result.power_fit_window[0]:.4g}, {result.power_fit_window[1]:.4g}]")
     return "\n".join(lines)
 
 
@@ -1567,6 +2126,8 @@ def run_fit(app):
 def _hide_fit_overlays(app) -> None:
     app.data_fit_ic_line.setVisible(False)
     app.data_fit_criterion_line.setVisible(False)
+    # Ec1/Ec2 lines stay driven by _update_fit_bands (they reflect the Step 3
+    # editors, not a fit result), so we don't force them off here.
     app.data_fit_resid_plot.setVisible(False)
     app.data_fit_resid_curve.setData([], [])
     if hasattr(app, "data_fit_param_table"):
@@ -1585,11 +2146,12 @@ def _show_fit_overlays(
     crit_unit = "V/cm" if result.uses_sample_length else "V"
     crit_name = "Ec" if result.uses_sample_length else "Vc"
     crit_label = f"{crit_name} = {_format_engineering(result.criterion, crit_unit, 2)}"
-    app.data_fit_ic_line.setValue(result.Ic)
+    is_loglog = _plot_is_loglog(app)
+    app.data_fit_ic_line.setValue(_xform_for_view(result.Ic, is_loglog))
     app.data_fit_ic_line.label.setText(ic_label)
     app.data_fit_ic_line.setVisible(bool(show_ic))
     y_level = result.V0 + result.R * result.Ic + result.criterion
-    app.data_fit_criterion_line.setValue(y_level)
+    app.data_fit_criterion_line.setValue(_xform_for_view(y_level, is_loglog))
     app.data_fit_criterion_line.label.setText(crit_label)
     app.data_fit_criterion_line.setVisible(bool(show_criterion))
     # Parameter table overlay.
