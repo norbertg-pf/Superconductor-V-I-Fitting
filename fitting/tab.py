@@ -865,7 +865,13 @@ def setup_data_fitting_tab_layout(app):
 
     right.addLayout(header)
 
-    app.data_fit_plot = pg.PlotWidget(title="V-I preview")
+    app.data_fit_plot = pg.PlotWidget(
+        title="V-I preview",
+        axisItems={
+            "bottom": EngineeringAxisItem(orientation="bottom"),
+            "left": EngineeringAxisItem(orientation="left"),
+        },
+    )
     app.data_fit_plot.setLabel("bottom", "Current (A)")
     app.data_fit_plot.setLabel("left", "Voltage (V)")
     app.data_fit_plot.showGrid(x=True, y=True)
@@ -911,6 +917,20 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_criterion_line.setVisible(False)
     app.data_fit_plot.addItem(app.data_fit_criterion_line, ignoreBounds=True)
 
+    # IEC 61788 decade lines (Ec1, Ec2) — visible only in the log-log method.
+    app.data_fit_ec1_line = pg.InfiniteLine(
+        angle=0, pen=pg.mkPen(230, 120, 0, 200, style=Qt.DashLine, width=1.2),
+        label="Ec1", labelOpts={"position": 0.02, "color": (230, 120, 0)},
+    )
+    app.data_fit_ec1_line.setVisible(False)
+    app.data_fit_plot.addItem(app.data_fit_ec1_line, ignoreBounds=True)
+    app.data_fit_ec2_line = pg.InfiniteLine(
+        angle=0, pen=pg.mkPen(230, 120, 0, 200, style=Qt.DashLine, width=1.2),
+        label="Ec2", labelOpts={"position": 0.02, "color": (230, 120, 0)},
+    )
+    app.data_fit_ec2_line.setVisible(False)
+    app.data_fit_plot.addItem(app.data_fit_ec2_line, ignoreBounds=True)
+
     # Draggable parameter-table overlay (visible after a successful fit).
     app.data_fit_param_table = _FitParamTable()
     app.data_fit_param_table.setVisible(False)
@@ -919,7 +939,13 @@ def setup_data_fitting_tab_layout(app):
     right.addWidget(app.data_fit_plot, stretch=3)
 
     # Residuals sub-plot, shown after a fit.
-    app.data_fit_resid_plot = pg.PlotWidget(title="Residuals (data − model)")
+    app.data_fit_resid_plot = pg.PlotWidget(
+        title="Residuals (data − model)",
+        axisItems={
+            "bottom": EngineeringAxisItem(orientation="bottom"),
+            "left": EngineeringAxisItem(orientation="left"),
+        },
+    )
     app.data_fit_resid_plot.setLabel("bottom", "Current (A)")
     app.data_fit_resid_plot.setLabel("left", "Residual")
     app.data_fit_resid_plot.showGrid(x=True, y=True)
@@ -1158,7 +1184,7 @@ def _update_y_axis_label(app):
     """
     desired = _Y_TITLE_E_FIELD if app.data_fit_use_length_cb.isChecked() else _Y_TITLE_VOLTAGE
     if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
-        app.data_fit_plot.setLabel("left", f"log₁₀({desired})")
+        app.data_fit_plot.setLabel("left", f"{desired}  [log scale]")
     else:
         app.data_fit_plot.setLabel("left", desired)
     settings = getattr(app, "data_fit_graph_settings", None)
@@ -1384,10 +1410,20 @@ def _toggle_plot_scale(app) -> None:
         return
     plot_item = plot_widget.getPlotItem()
     plot_item.setLogMode(x=to_loglog, y=to_loglog)
+    # Keep the linked residuals plot on a matching log x-axis so tick labels
+    # match up with the main plot. Y stays linear — residuals are signed.
+    resid_plot = getattr(app, "data_fit_resid_plot", None)
+    if resid_plot is not None:
+        resid_plot.getPlotItem().setLogMode(x=to_loglog, y=False)
     _apply_axis_labels_for_scale(app, to_loglog)
     vb = plot_item.getViewBox()
     vb.enableAutoRange(axis="x")
     vb.enableAutoRange(axis="y")
+    # Re-render the step bands / Ec1-Ec2 lines in the new coordinate system.
+    try:
+        refresh_preview(app)
+    except Exception:
+        pass
     if not to_loglog:
         # Back to linear: restore the robust, outlier-trimmed view.
         try:
@@ -1397,33 +1433,24 @@ def _toggle_plot_scale(app) -> None:
 
 
 def _apply_axis_labels_for_scale(app, to_loglog: bool) -> None:
-    """Relabel axes and disable the SI auto-prefix when in log mode.
+    """Rewrite axis titles to make the log transform explicit.
 
-    In log mode pyqtgraph shows log10(value) as tick labels (e.g. -6 for
-    10⁻⁶ V). The default auto-SI-prefix ("(x1e-06)") is meaningless there
-    and makes the axis look like it's still in linear volts. Turning off
-    enableAutoSIPrefix and rewriting the title to make the log explicit
-    keeps the axis unambiguous.
+    Tick labels are handled by EngineeringAxisItem (which shows SI-prefixed
+    values in both linear and log mode), so here we only adjust the title.
     """
     plot_widget = getattr(app, "data_fit_plot", None)
     if plot_widget is None:
         return
     plot_item = plot_widget.getPlotItem()
-    bottom = plot_item.getAxis("bottom")
-    left = plot_item.getAxis("left")
     use_length = (
         getattr(app, "data_fit_use_length_cb", None)
         and app.data_fit_use_length_cb.isChecked()
     )
     y_base = _Y_TITLE_E_FIELD if use_length else _Y_TITLE_VOLTAGE
     if to_loglog:
-        bottom.enableAutoSIPrefix(False)
-        left.enableAutoSIPrefix(False)
-        plot_item.setLabel("bottom", "log₁₀(Current / A)")
-        plot_item.setLabel("left", f"log₁₀({y_base})")
+        plot_item.setLabel("bottom", "Current (A)  [log scale]")
+        plot_item.setLabel("left", f"{y_base}  [log scale]")
     else:
-        bottom.enableAutoSIPrefix(True)
-        left.enableAutoSIPrefix(True)
         plot_item.setLabel("bottom", "Current (A)")
         plot_item.setLabel("left", y_base)
 
@@ -1492,8 +1519,35 @@ def refresh_preview(app):
     app.data_fit_xrange_label.setText(f"X window: [{x_min_full:.6g}, {x_max_full:.6g}]")
 
 
+def _plot_is_loglog(app) -> bool:
+    return _current_plot_scale(app) == _PLOT_SCALE_LOGLOG
+
+
+def _xform_for_view(val: float, is_log: bool) -> float:
+    """Linear data value → plot view coordinate (log10 when in log mode)."""
+    if not is_log:
+        return float(val)
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return float("nan")
+    return float(np.log10(v)) if v > 0 else float("nan")
+
+
+def _xform_from_view(val: float, is_log: bool) -> float:
+    """Plot view coordinate → linear data value."""
+    if not is_log:
+        return float(val)
+    return float(10.0 ** float(val))
+
+
 def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
-    """Update the three semi-transparent bands that show the configured windows."""
+    """Update the three semi-transparent bands that show the configured windows.
+
+    LinearRegionItem values are in plot view coordinates, which in log-log
+    mode are log10(data). We transform once here so the bands line up with
+    the underlying curve regardless of axis scale.
+    """
     if x is None or x.size == 0:
         return
     x_min = float(np.min(x))
@@ -1514,6 +1568,8 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         (app.data_fit_band_linear, (lin_lo, lin_hi)),
     ]
 
+    is_loglog = _plot_is_loglog(app)
+    ec1 = ec2 = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         # The Step 3 editors hold Ec1/Ec2 (µV/cm or µV). A full band would
         # require baseline-subtracted E_sc = y − V0 − R·I which the user
@@ -1544,11 +1600,36 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
 
     for band, pair in band_pairs:
+        lo, hi = pair
+        view_pair = (_xform_for_view(lo, is_loglog), _xform_for_view(hi, is_loglog))
+        if not (np.isfinite(view_pair[0]) and np.isfinite(view_pair[1])):
+            continue
         band.blockSignals(True)
         try:
-            band.setRegion(pair)
+            band.setRegion(view_pair)
         finally:
             band.blockSignals(False)
+
+    # Horizontal Ec1/Ec2 guide lines (IEC decade). Only meaningful in the
+    # log-log method; hide otherwise.
+    ec1_line = getattr(app, "data_fit_ec1_line", None)
+    ec2_line = getattr(app, "data_fit_ec2_line", None)
+    if ec1_line is not None and ec2_line is not None:
+        show = (
+            _active_fit_method(app) == FIT_METHOD_LOG_LOG
+            and bool(getattr(app, "data_fit_show_power", None)
+                     and app.data_fit_show_power.isChecked())
+            and ec1 is not None and ec2 is not None
+        )
+        if show:
+            has_length = app.data_fit_use_length_cb.isChecked()
+            unit = "V/cm" if has_length else "V"
+            ec1_line.setValue(_xform_for_view(ec1, is_loglog))
+            ec2_line.setValue(_xform_for_view(ec2, is_loglog))
+            ec1_line.label.setText(f"Ec1 = {_format_engineering(ec1, unit, 2)}")
+            ec2_line.label.setText(f"Ec2 = {_format_engineering(ec2, unit, 2)}")
+        ec1_line.setVisible(show)
+        ec2_line.setVisible(show)
 
 
 def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
@@ -1625,6 +1706,10 @@ def _on_band_dragged(app, window: str) -> None:
     if not bool(getattr(band, "movable", False)):
         return
     lo, hi = band.getRegion()
+    # Region values are in view coordinates — in log mode that means log10(I).
+    is_loglog = _plot_is_loglog(app)
+    lo = _xform_from_view(lo, is_loglog)
+    hi = _xform_from_view(hi, is_loglog)
     ctx = _data_ctx(app)
     if ctx is None:
         return
@@ -1820,6 +1905,67 @@ def _format_engineering(value: float, unit: str, decimals: int = 2) -> str:
     return f"{scaled:.{decimals}f} {prefix}{unit}".strip()
 
 
+_ENG_PREFIX_BY_EXP = {
+    -24: "y", -21: "z", -18: "a", -15: "f", -12: "p",
+    -9: "n", -6: "µ", -3: "m", 0: "",
+    3: "k", 6: "M", 9: "G", 12: "T", 15: "P", 18: "E",
+}
+
+
+def _eng_tick_string(value: float) -> str:
+    """Format a tick value with an SI prefix but no unit (e.g. 1.2e-6 → "1.2µ").
+
+    Axis labels keep the unit — putting it on every tick clutters the plot.
+    """
+    import math
+    if not np.isfinite(value):
+        return ""
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    mag = abs(value)
+    exp = int(math.floor(math.log10(mag) / 3) * 3)
+    exp = max(-24, min(18, exp))
+    prefix = _ENG_PREFIX_BY_EXP.get(exp, f"e{exp}")
+    scaled = mag / (10.0 ** exp)
+    # 3 sig figs max, trim trailing zeros
+    if scaled >= 100:
+        txt = f"{scaled:.0f}"
+    elif scaled >= 10:
+        txt = f"{scaled:.1f}"
+    else:
+        txt = f"{scaled:.2f}"
+    if "." in txt:
+        txt = txt.rstrip("0").rstrip(".")
+    return f"{sign}{txt}{prefix}" if prefix else f"{sign}{txt}"
+
+
+class EngineeringAxisItem(pg.AxisItem):
+    """AxisItem whose tick labels use SI prefixes in both linear and log10 mode.
+
+    In log mode pyqtgraph passes log10(value) to tickStrings; we exponentiate
+    back so "-6" becomes "1µ" (= 10⁻⁶). enableAutoSIPrefix is turned off so
+    pyqtgraph doesn't also append a global "(x1e-06)" factor to the axis title.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enableAutoSIPrefix(False)
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
+        out = []
+        for v in values:
+            if getattr(self, "logMode", False):
+                try:
+                    lin = 10.0 ** float(v)
+                except (OverflowError, ValueError):
+                    out.append("")
+                    continue
+            else:
+                lin = float(v) * float(scale)
+            out.append(_eng_tick_string(lin))
+        return out
+
+
 def _format_result(result) -> str:
     lines = []
     r_name = "Rho" if result.uses_sample_length else "R"
@@ -1976,6 +2122,8 @@ def run_fit(app):
 def _hide_fit_overlays(app) -> None:
     app.data_fit_ic_line.setVisible(False)
     app.data_fit_criterion_line.setVisible(False)
+    # Ec1/Ec2 lines stay driven by _update_fit_bands (they reflect the Step 3
+    # editors, not a fit result), so we don't force them off here.
     app.data_fit_resid_plot.setVisible(False)
     app.data_fit_resid_curve.setData([], [])
     if hasattr(app, "data_fit_param_table"):
@@ -1994,11 +2142,12 @@ def _show_fit_overlays(
     crit_unit = "V/cm" if result.uses_sample_length else "V"
     crit_name = "Ec" if result.uses_sample_length else "Vc"
     crit_label = f"{crit_name} = {_format_engineering(result.criterion, crit_unit, 2)}"
-    app.data_fit_ic_line.setValue(result.Ic)
+    is_loglog = _plot_is_loglog(app)
+    app.data_fit_ic_line.setValue(_xform_for_view(result.Ic, is_loglog))
     app.data_fit_ic_line.label.setText(ic_label)
     app.data_fit_ic_line.setVisible(bool(show_ic))
     y_level = result.V0 + result.R * result.Ic + result.criterion
-    app.data_fit_criterion_line.setValue(y_level)
+    app.data_fit_criterion_line.setValue(_xform_for_view(y_level, is_loglog))
     app.data_fit_criterion_line.label.setText(crit_label)
     app.data_fit_criterion_line.setVisible(bool(show_criterion))
     # Parameter table overlay.
