@@ -2966,7 +2966,7 @@ def _open_plot_summary(app) -> None:
         rate_item = QLabel("—")
         tap = QLineEdit("—")
         tap.setMaximumWidth(85)
-        src = entry.get("source") or {}
+        src = entry.setdefault("source", {})
         tap_value = src.get("length_cm")
         if tap_value is not None:
             tap.setText(f"{float(tap_value):g}")
