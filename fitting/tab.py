@@ -1157,7 +1157,10 @@ def _update_y_axis_label(app):
     auto values, we leave it alone.
     """
     desired = _Y_TITLE_E_FIELD if app.data_fit_use_length_cb.isChecked() else _Y_TITLE_VOLTAGE
-    app.data_fit_plot.setLabel("left", desired)
+    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
+        app.data_fit_plot.setLabel("left", f"log₁₀({desired})")
+    else:
+        app.data_fit_plot.setLabel("left", desired)
     settings = getattr(app, "data_fit_graph_settings", None)
     if settings is not None and settings.title_left.text in ("", _Y_TITLE_VOLTAGE, _Y_TITLE_E_FIELD):
         settings.title_left.text = desired
@@ -1381,6 +1384,7 @@ def _toggle_plot_scale(app) -> None:
         return
     plot_item = plot_widget.getPlotItem()
     plot_item.setLogMode(x=to_loglog, y=to_loglog)
+    _apply_axis_labels_for_scale(app, to_loglog)
     vb = plot_item.getViewBox()
     vb.enableAutoRange(axis="x")
     vb.enableAutoRange(axis="y")
@@ -1390,6 +1394,38 @@ def _toggle_plot_scale(app) -> None:
             robust_view(app)
         except Exception:
             pass
+
+
+def _apply_axis_labels_for_scale(app, to_loglog: bool) -> None:
+    """Relabel axes and disable the SI auto-prefix when in log mode.
+
+    In log mode pyqtgraph shows log10(value) as tick labels (e.g. -6 for
+    10⁻⁶ V). The default auto-SI-prefix ("(x1e-06)") is meaningless there
+    and makes the axis look like it's still in linear volts. Turning off
+    enableAutoSIPrefix and rewriting the title to make the log explicit
+    keeps the axis unambiguous.
+    """
+    plot_widget = getattr(app, "data_fit_plot", None)
+    if plot_widget is None:
+        return
+    plot_item = plot_widget.getPlotItem()
+    bottom = plot_item.getAxis("bottom")
+    left = plot_item.getAxis("left")
+    use_length = (
+        getattr(app, "data_fit_use_length_cb", None)
+        and app.data_fit_use_length_cb.isChecked()
+    )
+    y_base = _Y_TITLE_E_FIELD if use_length else _Y_TITLE_VOLTAGE
+    if to_loglog:
+        bottom.enableAutoSIPrefix(False)
+        left.enableAutoSIPrefix(False)
+        plot_item.setLabel("bottom", "log₁₀(Current / A)")
+        plot_item.setLabel("left", f"log₁₀({y_base})")
+    else:
+        bottom.enableAutoSIPrefix(True)
+        left.enableAutoSIPrefix(True)
+        plot_item.setLabel("bottom", "Current (A)")
+        plot_item.setLabel("left", y_base)
 
 
 def _on_use_length_changed(app):
