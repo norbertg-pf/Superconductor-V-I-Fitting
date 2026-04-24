@@ -588,7 +588,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
     ch_grid = QGridLayout(app.data_fit_channels_group)
     ch_grid.setContentsMargins(9, 6, 9, 9)
-    ch_grid.setVerticalSpacing(4)
+    ch_grid.setVerticalSpacing(2)
     ch_grid.setAlignment(Qt.AlignTop)
     app.data_fit_time_cb = QComboBox()
     app.data_fit_x_cb = QComboBox()
@@ -620,7 +620,7 @@ def setup_data_fitting_tab_layout(app):
     )
     app.data_fit_avg_rate_label = QLabel("Effective rate: —")
     app.data_fit_avg_rate_label.setStyleSheet("color: gray;")
-    app.data_fit_load_metadata_btn = QPushButton("Load TDMS")
+    app.data_fit_load_metadata_btn = QPushButton("Load metadata from TDMS")
     app.data_fit_load_metadata_btn.setToolTip(
         "Populate scale and offset fields with the Scale_Factor and Offset properties "
         "saved alongside each channel in the TDMS file."
@@ -904,17 +904,15 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_result_text = QTextEdit()
     app.data_fit_result_text.setReadOnly(True)
     app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
-    app.data_fit_result_text.setMinimumHeight(90)
-    app.data_fit_result_text.setMaximumHeight(120)
+    app.data_fit_result_text.setMinimumHeight(60)
+    app.data_fit_result_text.setMaximumHeight(80)
     left_header.addWidget(app.data_fit_result_text)
-
-    left_header.addStretch()
     header.addLayout(left_header, stretch=1)
 
     # Channels (displayed = raw * scale - offset) — moved from left panel.
     header.addWidget(app.data_fit_channels_group, stretch=2)
 
-    right.addLayout(header)
+    right.addLayout(header, stretch=0)
 
     app.data_fit_plot = pg.PlotWidget(
         title="V-I preview",
