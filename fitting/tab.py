@@ -589,6 +589,7 @@ def setup_data_fitting_tab_layout(app):
     ch_grid = QGridLayout(app.data_fit_channels_group)
     ch_grid.setContentsMargins(9, 6, 9, 9)
     ch_grid.setVerticalSpacing(4)
+    ch_grid.setAlignment(Qt.AlignTop)
     app.data_fit_time_cb = QComboBox()
     app.data_fit_x_cb = QComboBox()
     app.data_fit_y_cb = QComboBox()
