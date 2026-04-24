@@ -9,6 +9,7 @@ work with just PyQt5, pyqtgraph, numpy, scipy and nptdms as dependencies.
 from __future__ import annotations
 
 import json
+import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -232,8 +233,30 @@ def _parse_color(value: str, fallback: str = "#1f77ff") -> QColor:
 # Applying settings to a PlotWidget
 # ----------------------------------------------------------------------------
 
+def _range_in_view_coords(from_val: float, to_val: float, is_log: bool):
+    """Convert user-entered linear range bounds into pyqtgraph view coordinates.
+
+    pyqtgraph's setXRange/setYRange interprets values in *view* space, which
+    is log10(data) when the axis is in log mode. The dialog asks the user for
+    linear values (e.g. ``1e-6`` to ``1e0``); in log mode we have to convert
+    those before handing them to pyqtgraph, otherwise the range is wildly off.
+    Returns ``None`` if the bounds can't be expressed in the current view.
+    """
+    if not is_log:
+        return float(from_val), float(to_val)
+    if from_val <= 0 or to_val <= 0:
+        return None
+    return math.log10(float(from_val)), math.log10(float(to_val))
+
+
 def apply_graph_settings(plot_widget, raw_curve, x, y, settings: GraphSettings) -> None:
-    """Update raw curve data + plot styling from settings."""
+    """Update raw curve data + plot styling from settings.
+
+    ``raw_curve``, ``x`` and ``y`` may be ``None`` (or ``x``/``y`` may be empty).
+    In that case the curve data is left untouched and only the plot styling is
+    applied — this is what lets the Graph-settings dialog reconfigure the plot
+    even before the user has loaded any data.
+    """
 
     curve = settings.curve
     line_color = _parse_color(curve.line_color)
@@ -241,39 +264,49 @@ def apply_graph_settings(plot_widget, raw_curve, x, y, settings: GraphSettings) 
     line_color.setAlpha(max(0, min(255, int(curve.alpha))))
     point_color.setAlpha(max(0, min(255, int(curve.alpha))))
 
-    if curve.draw_mode == "Points only":
-        raw_curve.setData(
-            x, y, pen=None, symbol="o", symbolSize=curve.point_size,
-            symbolBrush=point_color, symbolPen=point_color,
-        )
-    elif curve.draw_mode == "Lines only":
-        raw_curve.setData(x, y, pen=pg.mkPen(line_color, width=curve.line_width), symbol=None)
-    else:
-        raw_curve.setData(
-            x, y,
-            pen=pg.mkPen(line_color, width=curve.line_width),
-            symbol="o", symbolSize=curve.point_size,
-            symbolBrush=point_color, symbolPen=point_color,
-        )
+    has_curve_data = (
+        raw_curve is not None
+        and x is not None and y is not None
+        and len(x) > 0 and len(y) > 0
+    )
+    if has_curve_data:
+        if curve.draw_mode == "Points only":
+            raw_curve.setData(
+                x, y, pen=None, symbol="o", symbolSize=curve.point_size,
+                symbolBrush=point_color, symbolPen=point_color,
+            )
+        elif curve.draw_mode == "Lines only":
+            raw_curve.setData(x, y, pen=pg.mkPen(line_color, width=curve.line_width), symbol=None)
+        else:
+            raw_curve.setData(
+                x, y,
+                pen=pg.mkPen(line_color, width=curve.line_width),
+                symbol="o", symbolSize=curve.point_size,
+                symbolBrush=point_color, symbolPen=point_color,
+            )
 
     plot_item = plot_widget.getPlotItem()
 
     # Log / linear.
-    plot_item.setLogMode(
-        x=(settings.scale_h.scale_type == "Log10"),
-        y=(settings.scale_v.scale_type == "Log10"),
-    )
+    is_log_x = settings.scale_h.scale_type == "Log10"
+    is_log_y = settings.scale_v.scale_type == "Log10"
+    plot_item.setLogMode(x=is_log_x, y=is_log_y)
 
-    # Range.
+    # Range. setXRange/setYRange take values in view coordinates (log10 when
+    # the axis is in log mode); the dialog stores user-entered linear bounds.
     vb = plot_item.getViewBox()
     if settings.scale_h.auto_range:
         vb.enableAutoRange(axis="x")
     else:
-        vb.setXRange(settings.scale_h.from_val, settings.scale_h.to_val, padding=0)
+        bounds = _range_in_view_coords(settings.scale_h.from_val, settings.scale_h.to_val, is_log_x)
+        if bounds is not None:
+            vb.setXRange(bounds[0], bounds[1], padding=0)
     if settings.scale_v.auto_range:
         vb.enableAutoRange(axis="y")
     else:
-        vb.setYRange(settings.scale_v.from_val, settings.scale_v.to_val, padding=0)
+        bounds = _range_in_view_coords(settings.scale_v.from_val, settings.scale_v.to_val, is_log_y)
+        if bounds is not None:
+            vb.setYRange(bounds[0], bounds[1], padding=0)
     vb.invertX(settings.scale_h.reverse)
     vb.invertY(settings.scale_v.reverse)
 

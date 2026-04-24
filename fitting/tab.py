@@ -1543,6 +1543,11 @@ def refresh_preview(app):
     _hide_fit_overlays(app)
     if x is None or y is None or x.size == 0 or y.size == 0:
         app.data_fit_raw_curve.setData([], [])
+        # Apply styling-only so the Graph-settings dialog still affects the
+        # plot before the user has loaded data.
+        apply_graph_settings(
+            app.data_fit_plot, None, None, None, app.data_fit_graph_settings,
+        )
         app.data_fit_xrange_label.setText("X window: full")
         return
     n = min(len(x), len(y))
@@ -1565,6 +1570,10 @@ def refresh_preview(app):
         _refresh_curve_item(preview_entry)
     else:
         app.data_fit_raw_curve.setData([], [])
+        # Preview hidden — still apply the dialog's styling.
+        apply_graph_settings(
+            app.data_fit_plot, None, None, None, app.data_fit_graph_settings,
+        )
     x_min_full = float(np.min(x[:n]))
     x_max_full = float(np.max(x[:n]))
     _apply_robust_view(app, x[:n], y[:n])
@@ -1673,19 +1682,63 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         ec2_line.setVisible(False)
 
 
+def _robust_log_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
+                           margin: float = 0.1):
+    """Robust percentile bounds in log10 space, for axes in log mode.
+
+    Negative / zero / non-finite values are dropped (log10 is undefined). The
+    percentiles are taken on the log10-transformed data so the trim is
+    decade-aware, and the margin is also in log space so the padding is a
+    fixed fraction of decades rather than blowing up to many decades.
+    Returns ``(None, None)`` if there's no usable data.
+    """
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return None, None
+    arr = arr[np.isfinite(arr) & (arr > 0)]
+    if arr.size == 0:
+        return None, None
+    log_arr = np.log10(arr)
+    lo = float(np.percentile(log_arr, low_pct))
+    hi = float(np.percentile(log_arr, high_pct))
+    if hi <= lo:
+        lo = float(np.min(log_arr))
+        hi = float(np.max(log_arr))
+    if hi <= lo:
+        hi = lo + 1.0
+    pad = (hi - lo) * margin
+    return lo - pad, hi + pad
+
+
 def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
     plot_item = app.data_fit_plot.getPlotItem()
     view_box = plot_item.getViewBox()
-    # Robust-view is a linear-space percentile range — meaningless once the
-    # axes are in log10 mode (pyqtgraph would interpret the numbers as
-    # log-space bounds). Fall back to autoRange in log mode.
-    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
-        view_box.enableAutoRange(axis="x")
-        view_box.enableAutoRange(axis="y")
-        return
-    x_lo, x_hi = robust_view_range(x)
-    y_lo, y_hi = robust_view_range(y)
-    view_box.setRange(xRange=(x_lo, x_hi), yRange=(y_lo, y_hi), padding=0.0)
+    settings = getattr(app, "data_fit_graph_settings", None)
+    is_log_x = settings is not None and settings.scale_h.scale_type == "Log10"
+    is_log_y = settings is not None and settings.scale_v.scale_type == "Log10"
+    auto_x = settings is None or settings.scale_h.auto_range
+    auto_y = settings is None or settings.scale_v.auto_range
+
+    # Honour user-specified ranges from the Graph-settings dialog: when
+    # auto-range is off for an axis, leave whatever apply_graph_settings set.
+    if auto_x:
+        if is_log_x:
+            x_lo, x_hi = _robust_log_view_range(x)
+        else:
+            x_lo, x_hi = robust_view_range(x)
+        if x_lo is not None and x_hi is not None:
+            view_box.setXRange(x_lo, x_hi, padding=0.0)
+        else:
+            view_box.enableAutoRange(axis="x")
+    if auto_y:
+        if is_log_y:
+            y_lo, y_hi = _robust_log_view_range(y)
+        else:
+            y_lo, y_hi = robust_view_range(y)
+        if y_lo is not None and y_hi is not None:
+            view_box.setYRange(y_lo, y_hi, padding=0.0)
+        else:
+            view_box.enableAutoRange(axis="y")
 
 
 def robust_view(app):
