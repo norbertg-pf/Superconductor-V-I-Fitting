@@ -32,7 +32,7 @@ hiddenimports = collect_submodules("pyqtgraph")
 
 
 a = Analysis(
-    ["fitting/standalone.py"],
+    ["run_fitting.py"],
     pathex=[],
     binaries=[],
     datas=[],

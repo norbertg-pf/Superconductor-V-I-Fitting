@@ -35,12 +35,12 @@ The app now shows a gray version label at the bottom-right:
 
 ```powershell
 pip install pyinstaller
-pyinstaller --clean --noconfirm superconductorfit.spec
+pyinstaller --clean --noconfirm --distpath build superconductorfit.spec
 ```
 
 Output file:
 
-- `dist\Superconductor fitting v1.0 build N.exe` (single-file executable)
+- `build\Superconductor fitting v1.0 build N.exe` (single-file executable)
 
 Copy this `.exe` to any Windows machine and run it directly.
 
