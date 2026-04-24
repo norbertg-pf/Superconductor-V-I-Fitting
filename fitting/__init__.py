@@ -23,12 +23,47 @@ The math layer (``service``) has no Qt dependency and can be imported in
 headless scripts: ``from src.fitting.service import run_full_fit``.
 """
 
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
 from .service import (
     FitResult,
     FitSettings,
     robust_view_range,
     run_full_fit,
 )
+
+BASE_VERSION = "v1.0"
+# Keep this fallback in sync with repo commit count when shipping artifacts
+# outside a git checkout (e.g., PyInstaller one-file EXE).
+FALLBACK_BUILD_NUMBER = 29
+
+
+def _git_build_number() -> int | None:
+    """Return `git rev-list --count HEAD` when the repo metadata exists."""
+    repo_root = Path(__file__).resolve().parents[1]
+    if not (repo_root / ".git").exists():
+        return None
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return int(out)
+    except Exception:
+        return None
+
+
+def get_app_version_label() -> str:
+    build = _git_build_number() or FALLBACK_BUILD_NUMBER
+    return f"{BASE_VERSION} (build {build})"
+
+
+__version__ = get_app_version_label()
 
 # Tab-layer symbols require PyQt5 / pyqtgraph — exposed lazily via __getattr__
 # so that plain ``from src.fitting.service import ...`` works without Qt.
@@ -55,9 +90,13 @@ def __getattr__(name):
 
 
 __all__ = [
+    "BASE_VERSION",
     "FitResult",
     "FitSettings",
+    "FALLBACK_BUILD_NUMBER",
+    "get_app_version_label",
     "robust_view_range",
     "run_full_fit",
+    "__version__",
     *sorted(_LAZY_TAB),
 ]

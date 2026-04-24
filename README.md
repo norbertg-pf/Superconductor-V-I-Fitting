@@ -21,11 +21,28 @@ cd "D:\Superconductor V-I Fitting"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --upgrade pip
-pip install -e .```
+pip install -e .
+```
 
-## Run Standalon
+## Run Standalone
 
 python -m fitting
+
+The app now shows a gray version label at the bottom-right:
+`v1.0 (build N)` where `N` follows the git commit count.
+
+## Build one-file Windows EXE (standalone, no install)
+
+```powershell
+pip install pyinstaller
+pyinstaller --clean --noconfirm --distpath build superconductorfit.spec
+```
+
+Output file:
+
+- `build\Superconductor fitting v1.0 build N.exe` (single-file executable)
+
+Copy this `.exe` to any Windows machine and run it directly.
 
 ## Embedding in another Qt app
 

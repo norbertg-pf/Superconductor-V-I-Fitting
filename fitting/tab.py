@@ -71,6 +71,7 @@ from .extras import (
     load_preset_from_file,
     save_preset_to_file,
 )
+from . import get_app_version_label
 
 
 class _FitParamTable(pg.TextItem):
@@ -1011,6 +1012,11 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_xrange_label = QLabel("X window: full")
     app.data_fit_xrange_label.setStyleSheet("color: gray;")
     right.addWidget(app.data_fit_xrange_label)
+
+    app.data_fit_version_label = QLabel(get_app_version_label())
+    app.data_fit_version_label.setStyleSheet("color: #8a8a8a; font-size: 11px;")
+    app.data_fit_version_label.setAlignment(Qt.AlignRight)
+    right.addWidget(app.data_fit_version_label)
 
     root.addWidget(right_widget, stretch=1)
 
