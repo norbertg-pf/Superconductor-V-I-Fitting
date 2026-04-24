@@ -1334,9 +1334,8 @@ def _update_method_mode_ui(app) -> None:
     ):
         if widget is not None:
             widget.setEnabled(not is_loglog)
-    # In log-log mode the Show checkbox still works (it controls the Ec1/Ec2
-    # guide lines); only dragging the band is meaningless since the Step 3
-    # editors hold Ec values, not a draggable current range.
+    # In log-log mode the Show checkbox controls the Step 3 shaded region and
+    # dragging it updates Ec1/Ec2 directly.
     app.data_fit_show_power.setEnabled(True)
     _save_active_curve_profile(app)
 
@@ -1615,26 +1614,12 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         finally:
             band.blockSignals(False)
 
-    # Horizontal Ec1/Ec2 guide lines (IEC decade). Only meaningful in the
-    # log-log method; hide otherwise.
+    # Keep Ec1/Ec2 guide lines hidden to avoid extra dashed overlays/text.
     ec1_line = getattr(app, "data_fit_ec1_line", None)
     ec2_line = getattr(app, "data_fit_ec2_line", None)
     if ec1_line is not None and ec2_line is not None:
-        show = (
-            _active_fit_method(app) == FIT_METHOD_LOG_LOG
-            and bool(getattr(app, "data_fit_show_power", None)
-                     and app.data_fit_show_power.isChecked())
-            and ec1 is not None and ec2 is not None
-        )
-        if show:
-            has_length = app.data_fit_use_length_cb.isChecked()
-            unit = "V/cm" if has_length else "V"
-            ec1_line.setValue(_xform_for_view(ec1, is_loglog))
-            ec2_line.setValue(_xform_for_view(ec2, is_loglog))
-            ec1_line.label.setText(f"Ec1 = {_format_engineering(ec1, unit, 2)}")
-            ec2_line.label.setText(f"Ec2 = {_format_engineering(ec2, unit, 2)}")
-        ec1_line.setVisible(show)
-        ec2_line.setVisible(show)
+        ec1_line.setVisible(False)
+        ec2_line.setVisible(False)
 
 
 def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
@@ -1692,18 +1677,15 @@ def toggle_zoom(app, checked: bool):
 def _update_band_states(app) -> None:
     """Show and allow dragging for every window whose Show checkbox is enabled.
 
-    In log-log mode the power band is shown but not draggable (the Step 3
-    editors hold Ec values, not a draggable current range).
+    In log-log mode the power band remains draggable and updates Ec1/Ec2.
     """
-    is_loglog = _plot_is_loglog(app)
     for window, band, show_cb in (
         ("didt", app.data_fit_band_didt, app.data_fit_show_didt),
         ("linear", app.data_fit_band_linear, app.data_fit_show_linear),
         ("power", app.data_fit_band_power, app.data_fit_show_power),
     ):
         checked = bool(show_cb.isChecked())
-        draggable = checked and not (window == "power" and is_loglog)
-        band.setMovable(draggable)
+        band.setMovable(checked)
         band.setVisible(checked)
 
 
@@ -1725,6 +1707,22 @@ def _on_band_dragged(app, window: str) -> None:
     if ctx is None:
         return
     x_min, x_max, x, y, y_max = ctx
+    if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        lo, hi = sorted((lo, hi))
+        if y is None or y.size == 0:
+            return
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
+        idx_lo = int(np.argmin(np.abs(x_arr - lo)))
+        idx_hi = int(np.argmin(np.abs(x_arr - hi)))
+        ec1 = max(float(y_arr[idx_lo]), 1.0e-30)
+        ec2 = max(float(y_arr[idx_hi]), ec1 * 1.000001)
+        from_si = 1.0e6 if app.data_fit_use_length_cb.isChecked() else 1.0e3
+        _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
+        _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
+        app.data_fit_xrange_label.setText(f"power (Ec): [{ec1 * from_si:.6g}, {ec2 * from_si:.6g}]")
+        _save_active_curve_profile(app)
+        return
     low_pct_widget, low_x_widget, _ = app.data_fit_window_inputs[(window, "low")]
     high_pct_widget, high_x_widget, high_axis = app.data_fit_window_inputs[(window, "high")]
     _set_silently(low_pct_widget, f"{_x_to_pct(lo, x_min, x_max):.4f}")
