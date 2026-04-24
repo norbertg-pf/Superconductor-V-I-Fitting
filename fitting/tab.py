@@ -2100,6 +2100,7 @@ def _fit_result_properties(result) -> dict:
     is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
     props = {
         "method": "IEC 61788 log-log (decade n-value)" if is_loglog else "Non-linear V-I",
+        "method_compliant": "IEC 61788-3" if is_loglog else "legacy",
         "fit_timestamp": datetime.now().isoformat(timespec="seconds"),
         # Primary outputs per IEC 61788 / user request.
         "Ic_A": float(result.Ic),
