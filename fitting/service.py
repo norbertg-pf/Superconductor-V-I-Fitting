@@ -22,9 +22,9 @@ DEFAULT_MAX_ITERATIONS = 10
 DEFAULT_IC_TOLERANCE = 0.001    # 0.1 %
 DEFAULT_CHI_SQR_TOL = 1.0e-9    # OriginLab-style tolerance on the fitter cost function
 DEFAULT_VC_VOLTS = 1.0e-3
-DEFAULT_EC_V_PER_CM = 1.0e-4    # 1 uV/cm = 100 uV/m, IEC 61788-3/-21 default for HTS at 77 K
-DEFAULT_EC1_V_PER_CM = 1.0e-5   # 0.1 uV/cm, lower end of IEC decade n-value window
-DEFAULT_EC2_V_PER_CM = 1.0e-4   # 1 uV/cm, upper end (= the Ic criterion)
+DEFAULT_EC_V_PER_CM = 1.0e-6    # 1 uV/cm = 100 uV/m, IEC 61788-3/-21 default for HTS at 77 K
+DEFAULT_EC1_V_PER_CM = 1.0e-7   # 0.1 uV/cm, lower end of IEC decade n-value window
+DEFAULT_EC2_V_PER_CM = 1.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
 
 # Fit method identifiers.
 FIT_METHOD_LOG_LOG = "log_log"          # linear fit of log10(E_sc) vs log10(I), IEC 61788
@@ -186,39 +186,67 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         Ec1: float, Ec2: float) -> tuple[float, float, float, int, tuple[float, float]]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
 
-    E_sc = y - V0 - R*x is the baseline-subtracted signal. Points with
-    E_sc in [Ec1, Ec2] and I > 0 are used. The slope of log10(E_sc) vs
-    log10(I) is the n-index; Ic is reported at E = Ec2 (the higher
-    criterion, which IEC takes as the Ic criterion for HTS).
+    E_sc = y - V0 - R*x is the baseline-subtracted signal. The fit uses
+    only points from the MONOTONIC transition segment: data is sorted by
+    current, the last point where E_sc < Ec2 is taken as the transition
+    onset, and points earlier than that where E_sc < Ec1 bound the low
+    end. This prevents sub-Ic noise excursions with E_sc randomly in
+    [Ec1, Ec2] from contaminating the fit — a typical failure mode when
+    the baseline (V0, R) absorbs a residual thermal/inductive offset.
+
+    The slope of log10(E_sc) vs log10(I) on this segment is the n-index;
+    Ic is reported at E = Ec2 (the IEC criterion for HTS at 77 K).
 
     Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi)).
     """
     x, y = _clean_arrays(x, y)
     if Ec2 <= Ec1 or Ec1 <= 0:
         raise ValueError("Ec1 must be > 0 and strictly less than Ec2.")
-    e_sc = y - V0 - R * x
-    mask = (x > 0) & (e_sc >= Ec1) & (e_sc <= Ec2) & np.isfinite(e_sc)
+    # Sort by current so "transition segment" is a contiguous index range.
+    order = np.argsort(x)
+    xs = x[order]
+    e_sc = y[order] - V0 - R * xs
+    pos = xs > 0
+    if not np.any(pos):
+        raise ValueError("No points with I > 0; cannot fit on a log axis.")
+    xs = xs[pos]
+    e_sc = e_sc[pos]
+    # Transition onset: the last index where E_sc is still below Ec2
+    # (i.e. just before the curve crosses the Ic criterion). We then
+    # require points used in the fit to lie at or after the last sub-Ec1
+    # point before this onset — i.e. within the monotonic rise.
+    above_Ec2 = np.where(e_sc >= Ec2)[0]
+    if above_Ec2.size == 0:
+        raise ValueError(
+            f"Data never reaches Ec2 = {Ec2:.3g} after baseline subtraction; "
+            "ramp further or lower Ec2."
+        )
+    idx_Ec2 = int(above_Ec2[0])
+    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
+    idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
+    seg = slice(idx_lo, idx_Ec2 + 1)
+    e_sc_seg = e_sc[seg]
+    x_seg = xs[seg]
+    mask = (e_sc_seg >= Ec1) & (e_sc_seg <= Ec2) & np.isfinite(e_sc_seg)
     n_pts = int(np.count_nonzero(mask))
     if n_pts < 4:
         raise ValueError(
             f"Only {n_pts} points fall inside the IEC n-value window "
-            f"[{Ec1:.3g}, {Ec2:.3g}]. Need at least 4; increase ramp range, "
-            "reduce averaging, or widen the decade."
+            f"[{Ec1:.3g}, {Ec2:.3g}] on the monotonic transition. "
+            "Slow the ramp, reduce averaging, or widen the decade."
         )
-    log_I = np.log10(x[mask])
-    log_E = np.log10(e_sc[mask])
+    log_I = np.log10(x_seg[mask])
+    log_E = np.log10(e_sc_seg[mask])
     slope, intercept = np.polyfit(log_I, log_E, 1)
     n_val = float(slope)
-    # Ic defined at E = Ec2 (= the main IEC criterion; Ec1 is only there to
-    # anchor the low end of the n fit). log10(Ec2) = intercept + n*log10(Ic)
     if abs(n_val) < 1e-12:
         raise ValueError("Power-law slope collapsed to zero; cannot solve for Ic.")
     log_Ic = (np.log10(Ec2) - intercept) / n_val
     Ic_at_Ec2 = float(10.0 ** log_Ic)
     model_log_E = intercept + n_val * log_I
     chi_sqr = float(np.sum((log_E - model_log_E) ** 2))
-    I_lo = float(np.min(x[mask]))
-    I_hi = float(np.max(x[mask]))
+    I_lo = float(np.min(x_seg[mask]))
+    I_hi = float(np.max(x_seg[mask]))
     return Ic_at_Ec2, n_val, chi_sqr, n_pts, (I_lo, I_hi)
 
 

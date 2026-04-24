@@ -1358,24 +1358,38 @@ def _toggle_plot_scale(app) -> None:
     """Switch the V-I plot between linear/linear and log/log axes.
 
     Writes the choice into ``data_fit_graph_settings`` so the graph-settings
-    dialog reflects it (both X and Y Scale tabs show Log10 when active).
+    dialog reflects it, then applies it directly to the plot and lets
+    pyqtgraph auto-range in log space. (Going through refresh_preview would
+    re-impose a linear-space robust-view range on top of the log transform,
+    which pushes the data off screen.)
     """
     settings = getattr(app, "data_fit_graph_settings", None)
     if settings is None:
         return
-    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
-        settings.scale_h.scale_type = "Linear"
-        settings.scale_v.scale_type = "Linear"
-    else:
+    to_loglog = _current_plot_scale(app) != _PLOT_SCALE_LOGLOG
+    if to_loglog:
         settings.scale_h.scale_type = "Log10"
         settings.scale_v.scale_type = "Log10"
+        settings.scale_h.auto_range = True
+        settings.scale_v.auto_range = True
+    else:
+        settings.scale_h.scale_type = "Linear"
+        settings.scale_v.scale_type = "Linear"
     _update_plot_scale_button_text(app)
-    # Re-render the preview (refresh_preview re-applies graph settings).
-    try:
-        refresh_preview(app)
-    except Exception:
-        # Some call sites (tests) may not have a full plot wired up.
-        pass
+    plot_widget = getattr(app, "data_fit_plot", None)
+    if plot_widget is None:
+        return
+    plot_item = plot_widget.getPlotItem()
+    plot_item.setLogMode(x=to_loglog, y=to_loglog)
+    vb = plot_item.getViewBox()
+    vb.enableAutoRange(axis="x")
+    vb.enableAutoRange(axis="y")
+    if not to_loglog:
+        # Back to linear: restore the robust, outlier-trimmed view.
+        try:
+            robust_view(app)
+        except Exception:
+            pass
 
 
 def _on_use_length_changed(app):
@@ -1502,9 +1516,17 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
 
 
 def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
+    plot_item = app.data_fit_plot.getPlotItem()
+    view_box = plot_item.getViewBox()
+    # Robust-view is a linear-space percentile range — meaningless once the
+    # axes are in log10 mode (pyqtgraph would interpret the numbers as
+    # log-space bounds). Fall back to autoRange in log mode.
+    if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
+        view_box.enableAutoRange(axis="x")
+        view_box.enableAutoRange(axis="y")
+        return
     x_lo, x_hi = robust_view_range(x)
     y_lo, y_hi = robust_view_range(y)
-    view_box = app.data_fit_plot.getPlotItem().getViewBox()
     view_box.setRange(xRange=(x_lo, x_hi), yRange=(y_lo, y_hi), padding=0.0)
 
 
