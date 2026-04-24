@@ -341,6 +341,19 @@ def apply_graph_settings(plot_widget, raw_curve, x, y, settings: GraphSettings) 
 
 def _install_tick_formatter(axis, labels: TickLabels) -> None:
     """Override ``tickStrings`` on ``axis`` to apply divide-by-factor, prefix/suffix."""
+    if not hasattr(axis, "_base_tick_strings"):
+        axis._base_tick_strings = axis.tickStrings
+
+    use_default_labels = (
+        (labels.divide_factor == 1.0 or labels.divide_factor == 0.0)
+        and not labels.set_decimal
+        and labels.prefix == ""
+        and labels.suffix == ""
+    )
+    if use_default_labels:
+        axis.tickStrings = axis._base_tick_strings
+        return
+
     divisor = labels.divide_factor if labels.divide_factor and labels.divide_factor != 0 else 1.0
     decimals = labels.decimal_places if labels.set_decimal else None
 
@@ -348,9 +361,19 @@ def _install_tick_formatter(axis, labels: TickLabels) -> None:
         out = []
         for v in values:
             try:
-                val = float(v) / divisor
-            except Exception:
                 val = float(v)
+            except Exception:
+                out.append("")
+                continue
+            if getattr(axis, "logMode", False):
+                try:
+                    val = 10.0 ** val
+                except (OverflowError, ValueError):
+                    out.append("")
+                    continue
+            else:
+                val *= float(scale)
+            val /= divisor
             if decimals is not None:
                 out.append(f"{labels.prefix}{val:.{decimals}f}{labels.suffix}")
             else:
