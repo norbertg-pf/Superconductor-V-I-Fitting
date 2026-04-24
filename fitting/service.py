@@ -52,6 +52,9 @@ class FitResult:
     criterion: float = 0.0
     iterations: int = 0
     chi_sqr: float = 0.0
+    rmse: float = 0.0
+    r_squared: float = 0.0
+    n_points_power: int = 0
     ic_history: list[float] = field(default_factory=list)
     linear_fit_window: tuple[float, float] = (0.0, 0.0)
     power_fit_window: tuple[float, float] = (0.0, 0.0)
@@ -174,6 +177,25 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     if x_max <= x_min:
         return FitResult(ok=False, message="Current range is empty or degenerate.")
 
+    if settings.max_iterations < 1:
+        return FitResult(ok=False, message="max_iterations must be >= 1.")
+    if settings.criterion_voltage <= 0:
+        return FitResult(ok=False, message="Criterion (Vc/Ec) must be > 0.")
+    for name, value in (
+        ("didt_low_frac", settings.didt_low_frac),
+        ("didt_high_frac", settings.didt_high_frac),
+        ("linear_low_frac", settings.linear_low_frac),
+        ("linear_high_frac", settings.linear_high_frac),
+        ("power_low_frac", settings.power_low_frac),
+        ("power_v_frac", settings.power_v_frac),
+    ):
+        if not (0.0 <= float(value) <= 1.0):
+            return FitResult(ok=False, message=f"{name} must be in [0, 1].")
+    if settings.didt_low_frac >= settings.didt_high_frac:
+        return FitResult(ok=False, message="di/dt low fraction must be < high fraction.")
+    if settings.linear_low_frac >= settings.linear_high_frac:
+        return FitResult(ok=False, message="linear low fraction must be < high fraction.")
+
     Vc = float(settings.criterion_voltage)
     uses_length = settings.sample_length_cm is not None and settings.sample_length_cm > 0
 
@@ -230,6 +252,20 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     fit_x = np.linspace(power_lo, x_max, 400)
     fit_y = _power_law_model(fit_x, Ic, n_value, V0, R, Vc)
 
+    mask_power = (x >= power_lo) & (x <= power_hi) & (x > 0)
+    xm = x[mask_power]
+    ym = y[mask_power]
+    model_power = _power_law_model(xm, Ic, n_value, V0, R, Vc)
+    residuals = ym - model_power
+    n_points_power = int(xm.size)
+    rmse = float(np.sqrt(np.mean(residuals ** 2))) if n_points_power else 0.0
+    if n_points_power >= 2:
+        ss_res = float(np.sum(residuals ** 2))
+        ss_tot = float(np.sum((ym - np.mean(ym)) ** 2))
+        r_squared = (1.0 - ss_res / ss_tot) if ss_tot > 1e-30 else 1.0
+    else:
+        r_squared = 0.0
+
     return FitResult(
         ok=True,
         message="Fit succeeded.",
@@ -242,6 +278,9 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         criterion=Vc,
         iterations=iterations_used,
         chi_sqr=chi_sqr,
+        rmse=rmse,
+        r_squared=r_squared,
+        n_points_power=n_points_power,
         ic_history=ic_history,
         linear_fit_window=(lin_lo, lin_hi),
         power_fit_window=(power_lo, power_hi),

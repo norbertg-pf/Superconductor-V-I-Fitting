@@ -49,6 +49,24 @@ IEC 61788 power-law criterion:
 * With sample length `Ls`: `E = (L/Ls)·dI/dt + ρ·I + Ec·(I/Ic)^n`
   (the tab divides Y by `Ls` before fitting).
 
+## Cross-lab consistency checklist (recommended)
+
+To compare `Ic` and `n` against other labs, align these settings first:
+
+1. Same criterion definition (`Vc` in V, or `Ec` in µV/cm with same sample length).
+2. Same current ramp region for `dI/dt` estimate.
+3. Same linear window for `R`/`ρ` baseline.
+4. Same power-law window (`I` low limit and high `V` fraction).
+5. Same preprocessing (averaging/windowing, scale/offset handling).
+6. Report fit quality together with `Ic`/`n`:
+   - chi-squared
+   - RMSE
+   - R²
+   - number of samples used in the power-law window
+
+The service now returns these quality metrics in `FitResult` so they can be
+logged and compared across laboratories.
+
 ## Public API
 
 ```python
