@@ -15,7 +15,7 @@ from scipy.optimize import curve_fit
 DEFAULT_DIDT_LOW_FRAC = 0.40
 DEFAULT_DIDT_HIGH_FRAC = 0.60
 DEFAULT_LINEAR_LOW_FRAC = 0.05
-DEFAULT_LINEAR_HIGH_FRAC = 0.40
+DEFAULT_LINEAR_HIGH_FRAC = 0.30
 DEFAULT_POWER_LOW_FRAC = 0.05
 DEFAULT_POWER_V_FRAC = 0.80
 DEFAULT_MAX_ITERATIONS = 10
@@ -25,6 +25,13 @@ DEFAULT_VC_VOLTS = 1.0e-3
 DEFAULT_EC_V_PER_CM = 1.0e-6    # 1 uV/cm = 100 uV/m, IEC 61788-3/-21 default for HTS at 77 K
 DEFAULT_EC1_V_PER_CM = 1.0e-7   # 0.1 uV/cm, lower end of IEC decade n-value window
 DEFAULT_EC2_V_PER_CM = 1.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
+
+# Fraction of Imax below which samples are considered part of the quiescent
+# "I = 0" segment used to estimate the thermal offset V_ofs (Step 1).
+DEFAULT_ZERO_I_FRAC = 0.02      # 2 %
+# Post-fit warning thresholds.
+RAMP_INDUCTIVE_WARN_RATIO = 0.10   # |L·dI/dt| / (Ec·L_v) above this → quasi-static assumption violated
+MIN_N_WINDOW_POINTS = 50           # IEC decade fit becomes noisy with too few samples
 
 # Fit method identifiers.
 FIT_METHOD_LOG_LOG = "log_log"          # linear fit of log10(E_sc) vs log10(I), IEC 61788
@@ -51,6 +58,9 @@ class FitSettings:
     fit_method: str = DEFAULT_FIT_METHOD
     ec1: float = DEFAULT_EC1_V_PER_CM
     ec2: float = DEFAULT_EC2_V_PER_CM
+    # Step 1 — thermal offset subtraction.
+    subtract_thermal_offset: bool = True
+    zero_i_frac: float = DEFAULT_ZERO_I_FRAC
 
 
 @dataclass
@@ -59,6 +69,7 @@ class FitResult:
     message: str = ""
     di_dt: float = 0.0
     inductance_L: float = 0.0
+    V_ofs: float = 0.0
     V0: float = 0.0
     R: float = 0.0
     Ic: float = 0.0
@@ -78,6 +89,18 @@ class FitResult:
     ec2: float = 0.0
     n_window_I: tuple[float, float] = (0.0, 0.0)
     n_points_used: int = 0
+    # Parameter uncertainties (standard errors) and goodness of fit.
+    sigma_Ic: float = 0.0
+    sigma_n: float = 0.0
+    r_squared: float = 0.0
+    # Ramp-rate diagnostic: |L·dI/dt| / (Ec·L_v) — ratio of inductive
+    # voltage drop to the Ic criterion voltage. IEC expects the
+    # measurement to be effectively quasi-static; ratios above ~0.1
+    # indicate the ramp is too fast.
+    ramp_inductive_ratio: float = 0.0
+    ramp_too_fast: bool = False
+    insufficient_n_points: bool = False
+    thermal_offset_applied: bool = False
 
 
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
@@ -110,6 +133,32 @@ def _clean_arrays(*arrs):
     for a in trimmed:
         mask &= np.isfinite(a)
     return [a[mask] for a in trimmed]
+
+
+def estimate_thermal_offset(x: np.ndarray, y: np.ndarray,
+                            zero_i_frac: float = DEFAULT_ZERO_I_FRAC) -> tuple[float, int]:
+    """Estimate V_ofs (thermal offset) from the quiescent I = 0 segment.
+
+    Points with |I| ≤ zero_i_frac · max|I| are treated as the I = 0 baseline.
+    V_ofs is their median Y value (median is robust to the occasional outlier
+    and to any remaining slow drift). Returns (V_ofs, n_points).
+
+    If no points lie below the threshold (e.g. the recording starts after the
+    ramp begins), V_ofs is returned as 0.0 with n_points = 0 so callers can
+    skip the subtraction.
+    """
+    x, y = _clean_arrays(x, y)
+    if x.size == 0:
+        return 0.0, 0
+    x_abs_max = float(np.max(np.abs(x)))
+    if x_abs_max <= 0:
+        return 0.0, 0
+    threshold = max(zero_i_frac, 0.0) * x_abs_max
+    mask = np.abs(x) <= threshold
+    n = int(np.count_nonzero(mask))
+    if n == 0:
+        return 0.0, 0
+    return float(np.median(y[mask])), n
 
 
 def estimate_di_dt(t: np.ndarray, x: np.ndarray, low_frac: float = DEFAULT_DIDT_LOW_FRAC,
@@ -149,10 +198,13 @@ def fit_power_law(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float,
                   V0: float, R: float, Vc: float,
                   initial_Ic: Optional[float] = None,
                   initial_n: float = 20.0,
-                  chi_sqr_tol: float = DEFAULT_CHI_SQR_TOL) -> tuple[float, float, float]:
+                  chi_sqr_tol: float = DEFAULT_CHI_SQR_TOL
+                  ) -> tuple[float, float, float, float, float, float]:
     """Fit Ic, n in y = V0 + R*x + Vc*(x/Ic)^n on [x_lo, x_hi] with V0, R, Vc fixed.
 
-    Returns (Ic, n, chi_sqr) where chi_sqr = sum((y - model)**2) over the window.
+    Returns (Ic, n, chi_sqr, sigma_Ic, sigma_n, r_squared).
+    Uncertainties come from the scaled covariance reported by ``curve_fit``;
+    R² is 1 − SS_res/SS_tot over the fit window.
     """
     x, y = _clean_arrays(x, y)
     mask = (x >= x_lo) & (x <= x_hi) & (x > 0)
@@ -170,20 +222,37 @@ def fit_power_law(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float,
     def model(x_, Ic_, n_):
         return _power_law_model(x_, Ic_, n_, V0, R, Vc)
 
-    popt, _ = curve_fit(
+    popt, pcov = curve_fit(
         model, xm, ym, p0=p0, bounds=bounds, maxfev=10000,
         ftol=chi_sqr_tol, xtol=chi_sqr_tol, gtol=chi_sqr_tol,
     )
     Ic = float(popt[0])
     n_val = float(popt[1])
-    residuals = ym - model(xm, Ic, n_val)
+    model_y = model(xm, Ic, n_val)
+    residuals = ym - model_y
     chi_sqr = float(np.sum(residuals ** 2))
-    return Ic, n_val, chi_sqr
+    # Standard errors from the covariance diagonal (curve_fit has already
+    # scaled it by the residual variance unless absolute_sigma=True).
+    try:
+        sigma_Ic = float(np.sqrt(max(0.0, pcov[0, 0])))
+        sigma_n = float(np.sqrt(max(0.0, pcov[1, 1])))
+        if not np.isfinite(sigma_Ic):
+            sigma_Ic = 0.0
+        if not np.isfinite(sigma_n):
+            sigma_n = 0.0
+    except Exception:
+        sigma_Ic = 0.0
+        sigma_n = 0.0
+    ss_tot = float(np.sum((ym - np.mean(ym)) ** 2))
+    r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
+    return Ic, n_val, chi_sqr, sigma_Ic, sigma_n, r_squared
 
 
 def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         V0: float, R: float,
-                        Ec1: float, Ec2: float) -> tuple[float, float, float, int, tuple[float, float]]:
+                        Ec1: float, Ec2: float
+                        ) -> tuple[float, float, float, int, tuple[float, float],
+                                   float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
 
     E_sc = y - V0 - R*x is the baseline-subtracted signal. The fit uses
@@ -197,7 +266,10 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     The slope of log10(E_sc) vs log10(I) on this segment is the n-index;
     Ic is reported at E = Ec2 (the IEC criterion for HTS at 77 K).
 
-    Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi)).
+    Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi),
+             sigma_Ic, sigma_n, r_squared).
+    Standard errors are derived from the log-space polyfit covariance;
+    R² is computed on log10(E_sc) vs the linear model.
     """
     x, y = _clean_arrays(x, y)
     if Ec2 <= Ec1 or Ec1 <= 0:
@@ -237,27 +309,71 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
         )
     log_I = np.log10(x_seg[mask])
     log_E = np.log10(e_sc_seg[mask])
-    slope, intercept = np.polyfit(log_I, log_E, 1)
-    n_val = float(slope)
+    # polyfit with cov=True scales the covariance by the residual variance,
+    # giving the standard 1σ parameter uncertainties reported by most tools.
+    try:
+        coeffs, cov = np.polyfit(log_I, log_E, 1, cov=True)
+        slope, intercept = float(coeffs[0]), float(coeffs[1])
+        sigma_slope = float(np.sqrt(max(0.0, cov[0, 0])))
+        sigma_intercept = float(np.sqrt(max(0.0, cov[1, 1])))
+        cov_slope_intercept = float(cov[0, 1])
+    except (ValueError, np.linalg.LinAlgError):
+        # Too few points for covariance; fall back to a plain fit.
+        slope, intercept = (float(c) for c in np.polyfit(log_I, log_E, 1))
+        sigma_slope = sigma_intercept = cov_slope_intercept = 0.0
+    n_val = slope
     if abs(n_val) < 1e-12:
         raise ValueError("Power-law slope collapsed to zero; cannot solve for Ic.")
-    log_Ic = (np.log10(Ec2) - intercept) / n_val
+    log_Ec2 = float(np.log10(Ec2))
+    log_Ic = (log_Ec2 - intercept) / n_val
     Ic_at_Ec2 = float(10.0 ** log_Ic)
     model_log_E = intercept + n_val * log_I
     chi_sqr = float(np.sum((log_E - model_log_E) ** 2))
+    ss_tot = float(np.sum((log_E - np.mean(log_E)) ** 2))
+    r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
+    # Uncertainty in log10(Ic) from propagation through
+    # log_Ic = (log_Ec2 - intercept) / slope.
+    d_by_intercept = -1.0 / n_val
+    d_by_slope = -(log_Ec2 - intercept) / (n_val ** 2)
+    var_log_Ic = (
+        d_by_intercept ** 2 * sigma_intercept ** 2
+        + d_by_slope ** 2 * sigma_slope ** 2
+        + 2.0 * d_by_intercept * d_by_slope * cov_slope_intercept
+    )
+    sigma_log_Ic = float(np.sqrt(max(0.0, var_log_Ic)))
+    # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
+    sigma_Ic = float(Ic_at_Ec2 * np.log(10.0) * sigma_log_Ic)
+    sigma_n = float(sigma_slope)
     I_lo = float(np.min(x_seg[mask]))
     I_hi = float(np.max(x_seg[mask]))
-    return Ic_at_Ec2, n_val, chi_sqr, n_pts, (I_lo, I_hi)
+    return (Ic_at_Ec2, n_val, chi_sqr, n_pts, (I_lo, I_hi),
+            sigma_Ic, sigma_n, r_squared)
+
+
+def _ramp_ratio(V0: float, criterion: float) -> float:
+    """|L·dI/dt| expressed as a fraction of the Ic criterion voltage.
+
+    After the thermal offset has been removed, V0 (the intercept from
+    the linear baseline fit) is exactly L·dI/dt in the same Y-units as
+    the criterion (V or V/cm), so the ratio is |V0| / criterion.
+    """
+    if criterion is None or criterion == 0 or not np.isfinite(criterion):
+        return 0.0
+    return float(abs(V0) / abs(criterion))
 
 
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                  settings: Optional[FitSettings] = None) -> FitResult:
-    """Step 1 di/dt, step 2 linear baseline -> V0, R, L, step 3 Ic/n.
+    """Step 1 V_ofs, Step 2 di/dt, Step 3 baseline → V0, R, L, Step 4 Ic/n.
 
-    Step 3 uses the IEC 61788 log-log decade method by default
-    (``settings.fit_method == FIT_METHOD_LOG_LOG``): n from the slope of
-    log10(E_sc) vs log10(I) on [Ec1, Ec2], Ic at E = Ec2. The legacy
-    non-linear fit of V = V0 + R*I + Vc*(I/Ic)^n remains available as
+    Step 1 (optional): estimate V_ofs from the I = 0 segment and subtract
+    it from y so the downstream baseline fit isolates the inductive term
+    (V0 = L·dI/dt) cleanly from the thermal offset.
+    Step 2 estimates dI/dt from the linear ramp.
+    Step 3 fits y - V_ofs = V0 + R·I on the low-current baseline window.
+    Step 4 fits Ic and n; default is the IEC 61788 log-log decade method
+    (``settings.fit_method == FIT_METHOD_LOG_LOG``). The legacy coupled
+    non-linear fit of V = V0 + R·I + Vc·(I/Ic)^n remains available as
     ``FIT_METHOD_NONLINEAR``.
     """
     settings = settings or FitSettings()
@@ -273,8 +389,23 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     Vc = float(settings.criterion_voltage)
     uses_length = settings.sample_length_cm is not None and settings.sample_length_cm > 0
 
+    # Step 1: subtract the thermal offset measured on the quiescent I = 0
+    # segment. Without this, the baseline fit lumps V_ofs into V0 and the
+    # inductive-ratio diagnostic (|L·dI/dt| / (Ec·L_v)) is wrong.
+    V_ofs = 0.0
+    thermal_applied = False
+    if getattr(settings, "subtract_thermal_offset", True):
+        V_ofs, n_zero = estimate_thermal_offset(x, y, settings.zero_i_frac)
+        if n_zero > 0:
+            y = y - V_ofs
+            thermal_applied = True
+        else:
+            V_ofs = 0.0
+
+    # Step 2: di/dt on the linear-ramp window.
     di_dt = estimate_di_dt(t, x, settings.didt_low_frac, settings.didt_high_frac)
 
+    # Step 3: linear baseline → V0 (= L·dI/dt in Y-units after Step 1) and R.
     lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
     lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
     try:
@@ -282,9 +413,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     except ValueError as exc:
         return FitResult(ok=False, message=f"Linear baseline fit failed: {exc}")
 
-    # Step 2 result: V0 is the constant inductive offset (L*di/dt) in Y-units.
-    # When the caller has divided Y by sample length, V0 is in V/cm, so the
-    # real voltage offset is V0 * Ls_cm and inductance = (V0 * Ls_cm) / di_dt.
+    # V0 is in Y-units. With sample-length normalisation, Y is in V/cm, so
+    # the full inductive voltage is V0 * L_v and L = (V0 * L_v) / di_dt.
     v0_voltage = V0 * float(settings.sample_length_cm) if uses_length else V0
     inductance_L = v0_voltage / di_dt if abs(di_dt) > 1e-30 else 0.0
 
@@ -292,7 +422,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
 
     if method == FIT_METHOD_LOG_LOG:
         try:
-            Ic, n_value, chi_sqr, n_pts, n_window = fit_n_value_log_log(
+            (Ic, n_value, chi_sqr, n_pts, n_window,
+             sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
             )
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
@@ -302,11 +433,17 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         fit_y = V0 + R * fit_x + settings.ec2 * np.power(
             np.clip(fit_x / Ic, 1e-30, None), n_value
         )
+        # Add the thermal offset back so the model curve aligns with the
+        # raw (unshifted) data the user still sees on screen.
+        if thermal_applied:
+            fit_y = fit_y + V_ofs
+        ratio = _ramp_ratio(V0, settings.ec2)
         return FitResult(
             ok=True,
             message="IEC 61788 log-log n-value fit succeeded.",
             di_dt=di_dt,
             inductance_L=inductance_L,
+            V_ofs=V_ofs,
             V0=V0,
             R=R,
             Ic=Ic,
@@ -325,6 +462,13 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             ec2=settings.ec2,
             n_window_I=n_window,
             n_points_used=n_pts,
+            sigma_Ic=sigma_Ic,
+            sigma_n=sigma_n,
+            r_squared=r_squared,
+            ramp_inductive_ratio=ratio,
+            ramp_too_fast=ratio > RAMP_INDUCTIVE_WARN_RATIO,
+            insufficient_n_points=n_pts < MIN_N_WINDOW_POINTS,
+            thermal_offset_applied=thermal_applied,
         )
 
     y_max = float(np.max(y))
@@ -336,13 +480,16 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     Ic = float("nan")
     n_value = float("nan")
     chi_sqr = 0.0
+    sigma_Ic = 0.0
+    sigma_n = 0.0
+    r_squared = 0.0
     ic_history: list[float] = []
     last_Ic = None
     iterations_used = 0
     for iteration in range(1, max(1, settings.max_iterations) + 1):
         iterations_used = iteration
         try:
-            Ic, n_value, chi_sqr = fit_power_law(
+            Ic, n_value, chi_sqr, sigma_Ic, sigma_n, r_squared = fit_power_law(
                 x, y, power_lo, power_hi,
                 V0=V0, R=R, Vc=Vc,
                 initial_Ic=last_Ic,
@@ -364,12 +511,17 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
 
     fit_x = np.linspace(power_lo, x_max, 400)
     fit_y = _power_law_model(fit_x, Ic, n_value, V0, R, Vc)
+    if thermal_applied:
+        fit_y = fit_y + V_ofs
+
+    ratio = _ramp_ratio(V0, Vc)
 
     return FitResult(
         ok=True,
         message="Fit succeeded.",
         di_dt=di_dt,
         inductance_L=inductance_L,
+        V_ofs=V_ofs,
         V0=V0,
         R=R,
         Ic=Ic,
@@ -388,4 +540,11 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         ec2=0.0,
         n_window_I=(power_lo, power_hi),
         n_points_used=0,
+        sigma_Ic=sigma_Ic,
+        sigma_n=sigma_n,
+        r_squared=r_squared,
+        ramp_inductive_ratio=ratio,
+        ramp_too_fast=ratio > RAMP_INDUCTIVE_WARN_RATIO,
+        insufficient_n_points=False,
+        thermal_offset_applied=thermal_applied,
     )

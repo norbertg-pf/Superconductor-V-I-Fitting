@@ -11,12 +11,13 @@ from __future__ import annotations
 import os
 import traceback
 from functools import partial
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from nptdms import TdmsFile
+from nptdms import ChannelObject, GroupObject, TdmsFile, TdmsWriter
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
@@ -52,9 +53,12 @@ from .service import (
     DEFAULT_POWER_LOW_FRAC,
     DEFAULT_POWER_V_FRAC,
     DEFAULT_VC_VOLTS,
+    DEFAULT_ZERO_I_FRAC,
     FIT_METHOD_LOG_LOG,
     FIT_METHOD_NONLINEAR,
     FitSettings,
+    MIN_N_WINDOW_POINTS,
+    RAMP_INDUCTIVE_WARN_RATIO,
     robust_view_range,
     run_full_fit,
 )
@@ -216,6 +220,16 @@ def _capture_fit_window_profile(app) -> dict:
         "ic_tol": app.data_fit_ic_tol.text(),
         "chi_tol": app.data_fit_chi_tol.text(),
         "vc": app.data_fit_vc_input.text(),
+        "subtract_vofs": (
+            app.data_fit_subtract_vofs_cb.isChecked()
+            if getattr(app, "data_fit_subtract_vofs_cb", None) is not None
+            else True
+        ),
+        "zero_i_frac": (
+            app.data_fit_zero_i_frac.text()
+            if getattr(app, "data_fit_zero_i_frac", None) is not None
+            else ""
+        ),
     }
 
 
@@ -236,6 +250,10 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
     ):
         if key in profile:
             _set_silently(widget, str(profile[key]))
+    if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
+        _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
+    if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
+        app.data_fit_subtract_vofs_cb.setChecked(bool(profile["subtract_vofs"]))
     sync_region_to_inputs(app)
 
 
@@ -458,6 +476,10 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_use_length_cb.setChecked(True)
     app.data_fit_length_input.setText("1.0")
     app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
+    if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
+        app.data_fit_subtract_vofs_cb.setChecked(True)
+    if getattr(app, "data_fit_zero_i_frac", None) is not None:
+        app.data_fit_zero_i_frac.setText(f"{DEFAULT_ZERO_I_FRAC * 100:.2f}")
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
@@ -645,7 +667,36 @@ def setup_data_fitting_tab_layout(app):
     profile_layout.addWidget(app.data_fit_curve_profile_cb, stretch=1)
     left.addWidget(profile_group)
 
-    didt_group = QGroupBox("Step 1: di/dt window (fraction of Imax)")
+    # --- Step 1: Thermal offset (V_ofs) subtraction from the I = 0 segment ---
+    offset_group = QGroupBox("Step 1: Subtract thermal offset from I = 0 segment")
+    offset_layout = QGridLayout(offset_group)
+    offset_goal = QLabel(
+        '<b>Goal:</b> remove the DC thermal offset <b>V<sub>ofs</sub></b> so the '
+        'baseline fit isolates the inductive term <b>L·dI/dt</b> cleanly.'
+    )
+    offset_goal.setTextFormat(Qt.RichText)
+    offset_layout.addWidget(offset_goal, 0, 0, 1, 4)
+    app.data_fit_subtract_vofs_cb = QCheckBox(
+        "Subtract Vₒƒₛ estimated from |I| ≤ threshold·|I|ₘₐₓ"
+    )
+    app.data_fit_subtract_vofs_cb.setChecked(True)
+    app.data_fit_subtract_vofs_cb.setToolTip(
+        "Step 1: median of Y on the quiescent I = 0 segment is used as the "
+        "thermal offset V_ofs and subtracted before Step 2 (dI/dt) and Step 3 "
+        "(baseline fit V0, R). This separates V_ofs, L·dI/dt and R·I in the "
+        "result."
+    )
+    offset_layout.addWidget(app.data_fit_subtract_vofs_cb, 1, 0, 1, 4)
+    offset_layout.addWidget(QLabel("Zero-I threshold (% of Imax):"), 2, 0)
+    app.data_fit_zero_i_frac = _percent_edit(DEFAULT_ZERO_I_FRAC)
+    app.data_fit_zero_i_frac.setToolTip(
+        "Samples with |I| below this fraction of max|I| are treated as the "
+        "I = 0 segment. Typical value: 2% (0.02)."
+    )
+    offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
+    left.addWidget(offset_group)
+
+    didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
     didt_layout = QGridLayout(didt_group)
     didt_goal = QLabel('<b>Goal:</b> estimate <b>dI/dt</b> from the linear current ramp.')
     didt_goal.setTextFormat(Qt.RichText)
@@ -664,7 +715,7 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(didt_group)
 
-    linear_group = QGroupBox("Step 2: Linear baseline window (fraction of Imax)")
+    linear_group = QGroupBox("Step 3: Linear baseline window (fraction of Imax)")
     linear_layout = QGridLayout(linear_group)
     app.data_fit_linear_goal = QLabel('<b>Goal:</b> fit the linear part to get <b>R</b> and <b>L</b>.')
     app.data_fit_linear_goal.setTextFormat(Qt.RichText)
@@ -683,7 +734,7 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(linear_group)
 
-    power_group = QGroupBox("Step 3: Ic and n-value")
+    power_group = QGroupBox("Step 4: Ic and n-value")
     power_goal = QLabel('<b>Goal:</b> fit the superconducting transition to get <b>Ic</b> and <b>n</b>.')
     power_goal.setTextFormat(Qt.RichText)
     power_layout = QGridLayout(power_group)
@@ -704,7 +755,7 @@ def setup_data_fitting_tab_layout(app):
     )
     app.data_fit_method_nonlinear_rb.setToolTip(
         "Legacy coupled non-linear fit. Uses the full voltage model with\n"
-        "V0, R frozen from Step 2 and Ic, n as free parameters. Not IEC\n"
+        "V0, R frozen from Step 3 and Ic, n as free parameters. Not IEC\n"
         "standardised — kept for backwards compatibility and cross-checks."
     )
     app.data_fit_method_group.addButton(app.data_fit_method_loglog_rb, 0)
@@ -727,7 +778,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_add_corrected_btn = QPushButton("Add corrected curve")
     app.data_fit_add_corrected_btn.setToolTip(
         "Add the baseline-corrected curve from the last successful fit:\n"
-        "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 3 window."
+        "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 4 window."
     )
     power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 3)
 
@@ -1077,7 +1128,7 @@ def _settings_from_inputs(app) -> FitSettings:
         criterion_value = vc_mv * 1.0e-3
 
     method = _active_fit_method(app)
-    # Ec1/Ec2 share the Step 3 Low/High editors when log-log is active.
+    # Ec1/Ec2 share the Step 4 Low/High editors when log-log is active.
     # Absolute units: V/cm when Y has been divided by L_v, V otherwise.
     to_si = 1.0e-6 if sample_length is not None else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
@@ -1100,6 +1151,15 @@ def _settings_from_inputs(app) -> FitSettings:
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        subtract_thermal_offset=bool(
+            getattr(app, "data_fit_subtract_vofs_cb", None) is None
+            or app.data_fit_subtract_vofs_cb.isChecked()
+        ),
+        zero_i_frac=_float_from(
+            getattr(app, "data_fit_zero_i_frac", None),
+            DEFAULT_ZERO_I_FRAC * 100,
+            as_fraction=True,
+        ),
     )
     return settings
 
@@ -1208,7 +1268,7 @@ def _update_equation_label(app):
     if method == FIT_METHOD_LOG_LOG:
         if has_length:
             eq = (
-                'Step 3 (IEC 61788, log E vs log I):<br>'
+                'Step 4 (IEC 61788, log E vs log I):<br>'
                 '<span style="font-size: 14pt;">'
                 '<b>log</b> E<sub>sc</sub> = <b>log</b> E<sub>c2</sub> + '
                 '<b>n · log</b> (I / I<sub>c</sub>)'
@@ -1219,7 +1279,7 @@ def _update_equation_label(app):
             )
         else:
             eq = (
-                'Step 3 (IEC 61788, log V vs log I):<br>'
+                'Step 4 (IEC 61788, log V vs log I):<br>'
                 '<span style="font-size: 14pt;">'
                 '<b>log</b> V<sub>sc</sub> = <b>log</b> V<sub>c2</sub> + '
                 '<b>n · log</b> (I / I<sub>c</sub>)'
@@ -1290,7 +1350,7 @@ def _active_fit_method(app) -> str:
 
 
 def _update_method_mode_ui(app) -> None:
-    """Relabel Step 3 editors and gray out widgets irrelevant to the IEC mode.
+    """Relabel Step 4 editors and gray out widgets irrelevant to the IEC mode.
 
     Log-log (IEC) mode: Low/High become Ec1/Ec2 in µV/cm; the Ic iteration
     knobs (max iterations, Ic stop tol, chi-sqr tol, Vc) are disabled — the
@@ -1320,11 +1380,11 @@ def _update_method_mode_ui(app) -> None:
         app.data_fit_chi_tol,
     ):
         widget.setEnabled(not is_loglog)
-    # Vc input: disabled in log-log mode (criterion is Ec2 from the Step 3
+    # Vc input: disabled in log-log mode (criterion is Ec2 from the Step 4
     # editors) and when the E-field path is active it is Ec not Vc anyway.
     app.data_fit_vc_input.setEnabled(not is_loglog)
     app.data_fit_vc_label.setEnabled(not is_loglog)
-    # The X-value editors in Step 3 map a percentage to a current, which is
+    # The X-value editors in Step 4 map a percentage to a current, which is
     # meaningless when the editors hold Ec1/Ec2. Disable them in log-log mode.
     for widget in (
         app.data_fit_power_low_x,
@@ -1334,7 +1394,7 @@ def _update_method_mode_ui(app) -> None:
     ):
         if widget is not None:
             widget.setEnabled(not is_loglog)
-    # In log-log mode the Show checkbox controls the Step 3 shaded region and
+    # In log-log mode the Show checkbox controls the Step 4 shaded region and
     # dragging it updates Ec1/Ec2 directly.
     app.data_fit_show_power.setEnabled(True)
     _save_active_curve_profile(app)
@@ -1575,9 +1635,9 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
     is_loglog = _plot_is_loglog(app)
     ec1 = ec2 = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        # The Step 3 editors hold Ec1/Ec2 (µV/cm or µV). A full band would
+        # The Step 4 editors hold Ec1/Ec2 (µV/cm or µV). A full band would
         # require baseline-subtracted E_sc = y − V0 − R·I which the user
-        # does not have until Step 2 has run. As a visual hint, shade the
+        # does not have until Step 3 has run. As a visual hint, shade the
         # current range where y alone exceeds Ec1·L_v / Ec1 and Ec2·L_v /
         # Ec2 — fine for coarse feedback, exact band is shown post-fit.
         has_length = app.data_fit_use_length_cb.isChecked()
@@ -1775,7 +1835,7 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
 
 
 def _refresh_x_from_pct(app, window: str, which: str) -> None:
-    # In log-log mode the Step 3 editors hold Ec1/Ec2 (µV/cm), not a
+    # In log-log mode the Step 4 editors hold Ec1/Ec2 (µV/cm), not a
     # percentage of Imax — no meaningful X mapping until a fit has run.
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         return
@@ -1985,13 +2045,35 @@ def _format_result(result) -> str:
     method_label = "Log E vs log I (IEC 61788)" if is_loglog else "Non-linear V-I"
     lines.append(f"method        = {method_label}")
     lines.append(f"di/dt         = {_format_engineering(result.di_dt, 'A/s', 2)}")
-    lines.append(f"L             = {_format_engineering(result.inductance_L, 'H', 2)}  (= V0 / di_dt)")
-    lines.append(f"V0            = {_format_engineering(result.V0, v_unit, 2)}")
+    # Split the constant baseline into its three physical contributions:
+    # V_ofs (thermal) + L·dI/dt (inductive) + R·I (resistive).
+    vofs = getattr(result, "V_ofs", 0.0)
+    vofs_note = "" if getattr(result, "thermal_offset_applied", False) else "  (not subtracted — no I = 0 segment)"
+    lines.append(f"V_ofs         = {_format_engineering(vofs, v_unit, 2)}{vofs_note}")
+    lines.append(f"L·di/dt       = {_format_engineering(result.V0, v_unit, 2)}  (= V0 from baseline fit)")
+    lines.append(f"L             = {_format_engineering(result.inductance_L, 'H', 2)}  (= L·dI/dt / di_dt)")
     lines.append(f"{r_name:<13} = {_format_engineering(result.R, r_unit, 2)}")
-    lines.append(f"Ic            = {result.Ic:.6g} A")
-    lines.append(f"n-value       = {result.n_value:.2f}")
+    lines.append(f"R·Ic          = {_format_engineering(result.R * result.Ic, v_unit, 2)}")
+    sigma_Ic = getattr(result, "sigma_Ic", 0.0)
+    sigma_n = getattr(result, "sigma_n", 0.0)
+    if sigma_Ic > 0:
+        lines.append(f"Ic            = {result.Ic:.6g} ± {sigma_Ic:.3g} A")
+    else:
+        lines.append(f"Ic            = {result.Ic:.6g} A")
+    if sigma_n > 0:
+        lines.append(f"n-value       = {result.n_value:.2f} ± {sigma_n:.2f}")
+    else:
+        lines.append(f"n-value       = {result.n_value:.2f}")
     lines.append(f"{v_name:<13} = {_format_engineering(result.criterion, v_unit, 2)}")
+    r_squared = getattr(result, "r_squared", 0.0)
+    if r_squared != 0.0:
+        lines.append(f"R²            = {r_squared:.6f}")
     lines.append(f"chi-squared   = {result.chi_sqr:.3g}")
+    ratio = getattr(result, "ramp_inductive_ratio", 0.0)
+    lines.append(
+        f"|L·dI/dt| / (Ec·L_v) = {ratio:.4f}"
+        + ("  (ramp too fast!)" if getattr(result, "ramp_too_fast", False) else "")
+    )
     if is_loglog:
         lines.append(
             f"n window      = [Ec1={_format_engineering(result.ec1, v_unit, 2)}, "
@@ -2000,6 +2082,7 @@ def _format_result(result) -> str:
         lines.append(
             f"I window      = [{result.n_window_I[0]:.4g}, {result.n_window_I[1]:.4g}] A, "
             f"N={result.n_points_used}"
+            + ("  (too few — noisy)" if getattr(result, "insufficient_n_points", False) else "")
         )
     else:
         lines.append(f"iterations    = {result.iterations}")
@@ -2010,6 +2093,105 @@ def _format_result(result) -> str:
         )
     lines.append(f"linear window = [{result.linear_fit_window[0]:.4g}, {result.linear_fit_window[1]:.4g}]")
     return "\n".join(lines)
+
+
+def _fit_result_properties(result) -> dict:
+    """Serialise a FitResult into a flat dict of TDMS-writable properties."""
+    is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
+    props = {
+        "method": "IEC 61788 log-log (decade n-value)" if is_loglog else "Non-linear V-I",
+        "fit_timestamp": datetime.now().isoformat(timespec="seconds"),
+        # Primary outputs per IEC 61788 / user request.
+        "Ic_A": float(result.Ic),
+        "sigma_Ic_A": float(getattr(result, "sigma_Ic", 0.0)),
+        "n_value": float(result.n_value),
+        "sigma_n": float(getattr(result, "sigma_n", 0.0)),
+        "r_squared": float(getattr(result, "r_squared", 0.0)),
+        "chi_squared": float(result.chi_sqr),
+        "di_dt_A_per_s": float(result.di_dt),
+        # Criterion: Ec (V/cm) when uses_sample_length, else Vc (V).
+        "criterion_value": float(result.criterion),
+        "criterion_unit": "V/cm" if result.uses_sample_length else "V",
+        "criterion_name": "Ec" if result.uses_sample_length else "Vc",
+        # IEC decade window (0 for non-linear fits).
+        "Ec1": float(getattr(result, "ec1", 0.0)),
+        "Ec2": float(getattr(result, "ec2", 0.0)),
+        "n_window_I_lo_A": float(result.n_window_I[0]),
+        "n_window_I_hi_A": float(result.n_window_I[1]),
+        "n_points_used": int(getattr(result, "n_points_used", 0)),
+        # Baseline decomposition: V_total = V_ofs + L·dI/dt + R·I + Vc·(I/Ic)^n.
+        "V_ofs": float(getattr(result, "V_ofs", 0.0)),
+        "V0_inductive": float(result.V0),
+        "inductance_L_H": float(result.inductance_L),
+        "R_or_rho": float(result.R),
+        "R_unit": "Ω/cm" if result.uses_sample_length else "Ω",
+        # Diagnostic flags the user asked to propagate to channel metadata.
+        "ramp_inductive_ratio": float(getattr(result, "ramp_inductive_ratio", 0.0)),
+        "ramp_too_fast": bool(getattr(result, "ramp_too_fast", False)),
+        "insufficient_n_points": bool(getattr(result, "insufficient_n_points", False)),
+        "thermal_offset_applied": bool(getattr(result, "thermal_offset_applied", False)),
+        "uses_sample_length": bool(result.uses_sample_length),
+    }
+    # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
+    # Origin) — keep human-readable "True"/"False" instead of raw bool.
+    for k in ("ramp_too_fast", "insufficient_n_points",
+              "thermal_offset_applied", "uses_sample_length"):
+        props[k] = "True" if props[k] else "False"
+    return props
+
+
+def _write_fit_report_tdms(app, results: list[tuple[str, object]]) -> Optional[str]:
+    """Write fit results to ``<source_stem>_fit_report.tdms`` next to the source.
+
+    Each OK ``FitResult`` becomes one channel in the ``FitResults`` group, with
+    the fit parameters (Ic, n, Ec, dI/dt, σ(Ic), σ(n), R², warnings, …) attached
+    as channel properties. Channels for the same label are overwritten; other
+    channels in an existing side-car are preserved.
+
+    Returns the path written (or ``None`` if no source file or no OK results).
+    Any I/O error is swallowed after logging — a failed report must not break
+    an otherwise successful fit.
+    """
+    controller = getattr(app, "data_fit_controller", None)
+    src_path = getattr(controller, "tdms_path", "") if controller is not None else ""
+    ok_results = [(lbl, r) for lbl, r in results if r is not None and getattr(r, "ok", False)]
+    if not src_path or not ok_results:
+        return None
+    src = Path(src_path)
+    report_path = src.with_name(f"{src.stem}_fit_report.tdms")
+
+    # Preserve channel entries from prior runs that this fit didn't touch.
+    existing: dict[str, dict] = {}
+    if report_path.exists():
+        try:
+            with TdmsFile.read(str(report_path)) as tfile:
+                for grp in tfile.groups():
+                    if grp.name != "FitResults":
+                        continue
+                    for ch in grp.channels():
+                        existing[ch.name] = dict(ch.properties)
+        except Exception as exc:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            existing = {}
+
+    new_entries = {lbl: _fit_result_properties(r) for lbl, r in ok_results}
+    merged = {**existing, **new_entries}
+
+    # nptdms' TdmsWriter takes a flat list of objects per segment. Empty
+    # channels aren't allowed by the spec, so we include a single NaN sample
+    # as a sentinel — consumers that only read properties ignore the data.
+    objects = [GroupObject("FitResults")]
+    for name, props in merged.items():
+        data = np.array([np.nan], dtype=np.float64)
+        objects.append(ChannelObject("FitResults", name, data, properties=props))
+
+    try:
+        with TdmsWriter(str(report_path)) as writer:
+            writer.write_segment(objects)
+    except Exception as exc:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        return None
+    return str(report_path)
 
 
 def run_fit(app):
@@ -2075,6 +2257,12 @@ def run_fit(app):
             )
             _plot_residuals(app, last_ok)
             _post_fit_warnings(app, last_ok, settings)
+            report_path = _write_fit_report_tdms(app, ok_results)
+            if report_path:
+                current = app.data_fit_result_text.toPlainText()
+                app.data_fit_result_text.setPlainText(
+                    current + f"\nFit report written to: {report_path}"
+                )
         else:
             _hide_fit_overlays(app)
             _show_warning(app, "No curve produced a successful fit.", severity="error")
@@ -2126,12 +2314,20 @@ def run_fit(app):
     )
     _plot_residuals(app, result)
     _post_fit_warnings(app, result, settings)
+    report_path = _write_fit_report_tdms(
+        app, [(app.data_fit_y_cb.currentText(), result)]
+    )
+    if report_path:
+        current = app.data_fit_result_text.toPlainText()
+        app.data_fit_result_text.setPlainText(
+            current + f"\nFit report written to: {report_path}"
+        )
 
 
 def _hide_fit_overlays(app) -> None:
     app.data_fit_ic_line.setVisible(False)
     app.data_fit_criterion_line.setVisible(False)
-    # Ec1/Ec2 lines stay driven by _update_fit_bands (they reflect the Step 3
+    # Ec1/Ec2 lines stay driven by _update_fit_bands (they reflect the Step 4
     # editors, not a fit result), so we don't force them off here.
     app.data_fit_resid_plot.setVisible(False)
     app.data_fit_resid_curve.setData([], [])
@@ -2220,22 +2416,42 @@ def _clear_warning(app) -> None:
 
 def _post_fit_warnings(app, result, settings) -> None:
     warnings = []
-    if result.iterations >= settings.max_iterations:
+    is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
+    if not is_loglog and result.iterations >= settings.max_iterations:
         warnings.append(
             f"Fit reached the iteration cap ({settings.max_iterations}) without "
             f"meeting the Ic tolerance ({settings.ic_tolerance * 100:.3g}%)."
         )
-    lo, hi = result.power_fit_window
-    transformed = _apply_transforms(app)
-    x = transformed["x"]
-    if x is not None and x.size:
-        mask = (x >= lo) & (x <= hi)
-        n_points = int(np.count_nonzero(mask))
-        if n_points < 30:
-            warnings.append(
-                f"Power-law window contains only {n_points} samples — consider "
-                f"widening it or lowering the averaging factor for a more reliable fit."
-            )
+    # IEC-specific point-count check (Step 4, log-log method).
+    if is_loglog and getattr(result, "insufficient_n_points", False):
+        warnings.append(
+            f"Only {result.n_points_used} samples fall inside the IEC n-value "
+            f"window [I(Ec1), I(Ec2)] — below the recommended minimum of "
+            f"{MIN_N_WINDOW_POINTS}. Slow the ramp or lower the averaging for a "
+            f"less noisy n estimate."
+        )
+    # Quasi-static ramp check (applies to both fit methods).
+    if getattr(result, "ramp_too_fast", False):
+        ratio = getattr(result, "ramp_inductive_ratio", 0.0)
+        warnings.append(
+            f"|L·dI/dt| / (Ec·L_v) = {ratio:.3f} > "
+            f"{RAMP_INDUCTIVE_WARN_RATIO:.2f}: the inductive voltage drop is "
+            f"more than 10 % of the Ic criterion voltage. IEC 61788 expects a "
+            f"quasi-static measurement — slow the ramp to reduce this ratio."
+        )
+    # Non-linear: fall back to generic too-few-samples warning on the power window.
+    if not is_loglog:
+        lo, hi = result.power_fit_window
+        transformed = _apply_transforms(app)
+        x = transformed["x"]
+        if x is not None and x.size:
+            mask = (x >= lo) & (x <= hi)
+            n_points = int(np.count_nonzero(mask))
+            if n_points < 30:
+                warnings.append(
+                    f"Power-law window contains only {n_points} samples — consider "
+                    f"widening it or lowering the averaging factor for a more reliable fit."
+                )
     if not warnings:
         _clear_warning(app)
         return
@@ -2856,6 +3072,12 @@ def _fit_single_curve(app, entry: dict) -> None:
         _show_fit_overlays(app, result)
         app.data_fit_result_text.setPlainText(f"[{entry['label']}]\n" + _format_result(result))
         _post_fit_warnings(app, result, settings)
+        report_path = _write_fit_report_tdms(app, [(entry["label"], result)])
+        if report_path:
+            current = app.data_fit_result_text.toPlainText()
+            app.data_fit_result_text.setPlainText(
+                current + f"\nFit report written to: {report_path}"
+            )
     else:
         _show_warning(app, result.message or "Fit failed.", severity="error")
 
