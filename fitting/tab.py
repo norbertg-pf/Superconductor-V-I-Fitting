@@ -416,6 +416,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_add_plot_btn.clicked.connect(lambda: (_add_plot_from_current(app), robust_view(app)))
+    app.data_fit_add_corrected_btn.clicked.connect(lambda: (_add_corrected_curve_from_last_fit(app), robust_view(app)))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
     app.data_fit_method_loglog_rb.toggled.connect(lambda _: _on_fit_method_changed(app))
@@ -723,6 +724,12 @@ def setup_data_fitting_tab_layout(app):
         "on both axes) so the setting persists when you re-open it."
     )
     power_layout.addWidget(app.data_fit_plot_scale_btn, 0, 3, 2, 1)
+    app.data_fit_add_corrected_btn = QPushButton("Add corrected curve")
+    app.data_fit_add_corrected_btn.setToolTip(
+        "Add the baseline-corrected curve from the last successful fit:\n"
+        "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 3 window."
+    )
+    power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 3)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
@@ -744,7 +751,7 @@ def setup_data_fitting_tab_layout(app):
         high_label="Ec2 (µV/cm)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
         base_row=2,
     )
-    power_layout.addWidget(power_goal, 5, 0, 1, 4)
+    power_layout.addWidget(power_goal, 5, 0, 1, 3)
     # Keep references to the text labels so the method-mode handler can
     # swap them when the user switches between IEC and non-linear modes.
     # (row 3 holds the Low/High value labels; row 4 holds the X-value row.)
@@ -2295,6 +2302,104 @@ def _entry_color_qcolor(entry: dict) -> QColor:
 
 def _button_bg_css(qcolor: QColor) -> str:
     return f"background: rgba({qcolor.red()}, {qcolor.green()}, {qcolor.blue()}, {qcolor.alpha()}); color:white;"
+
+
+def _add_corrected_curve_from_last_fit(app) -> None:
+    """Add Y_corrected = Y - (V0 + R*I) using the most relevant successful fit."""
+    result = None
+    parent_entry = None
+    active_key = _curve_profile_key_from_ui(app)
+    for entry in getattr(app, "data_fit_curves", []):
+        if str(entry.get("signature")) != str(active_key):
+            continue
+        fit_result = entry.get("fit_result")
+        if fit_result is not None and getattr(fit_result, "ok", False):
+            result = fit_result
+            parent_entry = entry
+            break
+
+    if result is None:
+        for entry in getattr(app, "data_fit_curves", []):
+            if bool(entry.get("is_fit_result", False)):
+                continue
+            fit_result = entry.get("fit_result")
+            if fit_result is not None and getattr(fit_result, "ok", False):
+                result = fit_result
+                parent_entry = entry
+                break
+
+    if result is None:
+        fit_result = getattr(getattr(app, "data_fit_controller", None), "last_result", None)
+        if fit_result is not None and getattr(fit_result, "ok", False):
+            result = fit_result
+
+    if result is None:
+        QMessageBox.warning(
+            app,
+            "Data Fitting",
+            "Run a successful fit first, then click 'Add corrected curve'.",
+        )
+        return
+
+    if parent_entry is not None:
+        x = np.asarray(parent_entry.get("x", []), dtype=float)
+        y = np.asarray(parent_entry.get("y", []), dtype=float)
+        t = np.asarray(parent_entry.get("t", []), dtype=float)
+        base_sig = parent_entry.get("signature", parent_entry.get("label", "curve"))
+        base_label = parent_entry.get("label", "Curve")
+    else:
+        transformed = _apply_transforms(app)
+        x = np.asarray(transformed.get("x", []), dtype=float)
+        y = np.asarray(transformed.get("y", []), dtype=float)
+        t = np.asarray(transformed.get("time", []), dtype=float)
+        base_sig = ("__preview__", app.data_fit_y_cb.currentText())
+        base_label = app.data_fit_y_cb.currentText() or "Preview"
+
+    n = int(min(x.size, y.size))
+    if n == 0:
+        QMessageBox.warning(app, "Data Fitting", "No points available to build corrected curve.")
+        return
+    x = x[:n]
+    y = y[:n]
+    t = t[:n] if t.size else np.asarray([])
+    y_corr = y - (float(result.V0) + float(result.R) * x)
+
+    sig = ("__corrected__", str(base_sig))
+    existing = None
+    for entry in getattr(app, "data_fit_curves", []):
+        if entry.get("signature") == sig:
+            existing = entry
+            break
+    if existing is None:
+        color = "#ff7f0e"
+        item = app.data_fit_plot.plot([], [], pen=pg.mkPen(color, width=1.8), symbol=None)
+        existing = {
+            "signature": sig,
+            "label": f"{base_label} corrected",
+            "color": color,
+            "alpha_pct": 100,
+            "skip_points": 1,
+            "include_in_fit": False,
+            "x": np.asarray([]),
+            "y": np.asarray([]),
+            "t": np.asarray([]),
+            "plot_item": item,
+            "fit_result": result,
+            "curve_style": {"draw_mode": "Lines only", "line_width": 1.8, "point_size": 3},
+            "avg_window": 1,
+            "show_criterion": False,
+            "show_ic": False,
+            "source": {},
+            "is_corrected_curve": True,
+        }
+        app.data_fit_curves.append(existing)
+    existing["x"] = x
+    existing["y"] = y_corr
+    existing["t"] = t
+    existing["fit_result"] = result
+    existing["label"] = f"{base_label} corrected"
+    _refresh_curve_item(existing)
+    _refresh_curve_profile_selector(app)
 
 
 def _add_plot_from_current(app) -> None:
