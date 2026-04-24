@@ -567,7 +567,7 @@ def setup_data_fitting_tab_layout(app):
 
     left_widget = QWidget()
     left = QVBoxLayout(left_widget)
-    left_widget.setMaximumWidth(420)
+    left_widget.setMaximumWidth(504)
 
     file_row = QHBoxLayout()
     app.data_fit_path_label = QLabel("No file loaded.")
@@ -587,6 +587,8 @@ def setup_data_fitting_tab_layout(app):
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
     ch_grid = QGridLayout(app.data_fit_channels_group)
+    ch_grid.setContentsMargins(9, 6, 9, 9)
+    ch_grid.setVerticalSpacing(4)
     app.data_fit_time_cb = QComboBox()
     app.data_fit_x_cb = QComboBox()
     app.data_fit_y_cb = QComboBox()
@@ -670,12 +672,6 @@ def setup_data_fitting_tab_layout(app):
     # --- Step 1: Thermal offset (V_ofs) subtraction from the I = 0 segment ---
     offset_group = QGroupBox("Step 1: Subtract thermal offset from I = 0 segment")
     offset_layout = QGridLayout(offset_group)
-    offset_goal = QLabel(
-        '<b>Goal:</b> remove the DC thermal offset <b>V<sub>ofs</sub></b> so the '
-        'baseline fit isolates the inductive term <b>L·dI/dt</b> cleanly.'
-    )
-    offset_goal.setTextFormat(Qt.RichText)
-    offset_layout.addWidget(offset_goal, 0, 0, 1, 4)
     app.data_fit_subtract_vofs_cb = QCheckBox(
         "Subtract Vₒƒₛ estimated from |I| ≤ threshold·|I|ₘₐₓ"
     )
@@ -698,9 +694,6 @@ def setup_data_fitting_tab_layout(app):
 
     didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
     didt_layout = QGridLayout(didt_group)
-    didt_goal = QLabel('<b>Goal:</b> estimate <b>dI/dt</b> from the linear current ramp.')
-    didt_goal.setTextFormat(Qt.RichText)
-    didt_layout.addWidget(didt_goal, 3, 0, 1, 4)
     app.data_fit_didt_low = _percent_edit(DEFAULT_DIDT_LOW_FRAC)
     app.data_fit_didt_high = _percent_edit(DEFAULT_DIDT_HIGH_FRAC)
     app.data_fit_didt_low_x = _xvalue_edit()
@@ -717,9 +710,6 @@ def setup_data_fitting_tab_layout(app):
 
     linear_group = QGroupBox("Step 3: Linear baseline window (fraction of Imax)")
     linear_layout = QGridLayout(linear_group)
-    app.data_fit_linear_goal = QLabel('<b>Goal:</b> fit the linear part to get <b>R</b> and <b>L</b>.')
-    app.data_fit_linear_goal.setTextFormat(Qt.RichText)
-    linear_layout.addWidget(app.data_fit_linear_goal, 3, 0, 1, 4)
     app.data_fit_linear_low = _percent_edit(DEFAULT_LINEAR_LOW_FRAC)
     app.data_fit_linear_high = _percent_edit(DEFAULT_LINEAR_HIGH_FRAC)
     app.data_fit_linear_low_x = _xvalue_edit()
@@ -735,8 +725,6 @@ def setup_data_fitting_tab_layout(app):
     left.addWidget(linear_group)
 
     power_group = QGroupBox("Step 4: Ic and n-value")
-    power_goal = QLabel('<b>Goal:</b> fit the superconducting transition to get <b>Ic</b> and <b>n</b>.')
-    power_goal.setTextFormat(Qt.RichText)
     power_layout = QGridLayout(power_group)
 
     # --- method selector (row 0) ---
@@ -802,7 +790,6 @@ def setup_data_fitting_tab_layout(app):
         high_label="Ec2 (µV/cm)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
         base_row=2,
     )
-    power_layout.addWidget(power_goal, 5, 0, 1, 3)
     # Keep references to the text labels so the method-mode handler can
     # swap them when the user switches between IEC and non-linear modes.
     # (row 3 holds the Low/High value labels; row 4 holds the X-value row.)
@@ -869,12 +856,6 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_warning_label.setVisible(False)
     left.addWidget(app.data_fit_warning_label)
 
-    app.data_fit_result_text = QTextEdit()
-    app.data_fit_result_text.setReadOnly(True)
-    app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
-    app.data_fit_result_text.setMaximumHeight(240)
-    left.addWidget(app.data_fit_result_text)
-
     left.addStretch()
     root.addWidget(left_widget)
 
@@ -915,6 +896,14 @@ def setup_data_fitting_tab_layout(app):
     toolbar.addWidget(app.data_fit_zoom_mode_btn, 1, 0)
     toolbar.addWidget(app.data_fit_reset_view_btn, 1, 1)
     left_header.addLayout(toolbar)
+
+    app.data_fit_result_text = QTextEdit()
+    app.data_fit_result_text.setReadOnly(True)
+    app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
+    app.data_fit_result_text.setMinimumHeight(90)
+    app.data_fit_result_text.setMaximumHeight(120)
+    left_header.addWidget(app.data_fit_result_text)
+
     left_header.addStretch()
     header.addLayout(left_header, stretch=1)
 
@@ -1527,15 +1516,9 @@ def _on_use_length_changed(app):
     if checked:
         app.data_fit_vc_label.setText("Ec (µV/cm):")
         app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
-        app.data_fit_linear_goal.setText(
-            '<b>Goal:</b> fit the linear part to get <b>Rho</b> and <b>L</b>.'
-        )
     else:
         app.data_fit_vc_label.setText("Vc (mV):")
         app.data_fit_vc_input.setText(f"{DEFAULT_VC_VOLTS * 1000:.6g}")
-        app.data_fit_linear_goal.setText(
-            '<b>Goal:</b> fit the linear part to get <b>R</b> and <b>L</b>.'
-        )
     _update_equation_label(app)
     _update_method_mode_ui(app)
     if hasattr(app, "data_fit_curve_profile_cb"):
