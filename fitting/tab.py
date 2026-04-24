@@ -854,12 +854,6 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_warning_label.setVisible(False)
     left.addWidget(app.data_fit_warning_label)
 
-    app.data_fit_result_text = QTextEdit()
-    app.data_fit_result_text.setReadOnly(True)
-    app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
-    app.data_fit_result_text.setMaximumHeight(240)
-    left.addWidget(app.data_fit_result_text)
-
     left.addStretch()
     root.addWidget(left_widget)
 
@@ -900,6 +894,14 @@ def setup_data_fitting_tab_layout(app):
     toolbar.addWidget(app.data_fit_zoom_mode_btn, 1, 0)
     toolbar.addWidget(app.data_fit_reset_view_btn, 1, 1)
     left_header.addLayout(toolbar)
+
+    app.data_fit_result_text = QTextEdit()
+    app.data_fit_result_text.setReadOnly(True)
+    app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
+    app.data_fit_result_text.setMinimumHeight(130)
+    app.data_fit_result_text.setMaximumHeight(180)
+    left_header.addWidget(app.data_fit_result_text)
+
     left_header.addStretch()
     header.addLayout(left_header, stretch=1)
 
