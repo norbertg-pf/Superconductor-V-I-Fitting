@@ -619,7 +619,7 @@ def setup_data_fitting_tab_layout(app):
     )
     app.data_fit_avg_rate_label = QLabel("Effective rate: —")
     app.data_fit_avg_rate_label.setStyleSheet("color: gray;")
-    app.data_fit_load_metadata_btn = QPushButton("Load TDMS scale/offset")
+    app.data_fit_load_metadata_btn = QPushButton("Load TDMS")
     app.data_fit_load_metadata_btn.setToolTip(
         "Populate scale and offset fields with the Scale_Factor and Offset properties "
         "saved alongside each channel in the TDMS file."
@@ -632,8 +632,12 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot_summary_btn.setToolTip(
         "Show all plotted curves: color, label, skip points, include-in-fit, remove."
     )
-    ch_grid.addWidget(app.data_fit_add_plot_btn, 6, 0, 1, 2)
-    ch_grid.addWidget(app.data_fit_plot_summary_btn, 6, 2, 1, 2)
+    for compact_btn in (app.data_fit_load_metadata_btn, app.data_fit_add_plot_btn, app.data_fit_plot_summary_btn):
+        compact_btn.setMinimumHeight(24)
+        compact_btn.setStyleSheet("padding:2px 8px; font-size:11px;")
+    ch_grid.addWidget(app.data_fit_load_metadata_btn, 5, 0)
+    ch_grid.addWidget(app.data_fit_add_plot_btn, 5, 1)
+    ch_grid.addWidget(app.data_fit_plot_summary_btn, 5, 2, 1, 2)
 
     # Voltage-tap separation + criterion widgets.
     # When checked, Y is divided by the tap distance so the fit is in V/cm
@@ -658,7 +662,6 @@ def setup_data_fitting_tab_layout(app):
     ch_grid.addWidget(app.data_fit_use_length_cb, 4, 0, 1, 2)
     ch_grid.addWidget(app.data_fit_length_label, 4, 2)
     ch_grid.addWidget(app.data_fit_length_input, 4, 3)
-    ch_grid.addWidget(app.data_fit_load_metadata_btn, 5, 0, 1, 2)
     app.data_fit_avg_rate_label.setVisible(False)
 
     profile_group = QGroupBox("Active fitting settings")
@@ -2904,16 +2907,17 @@ def _open_plot_summary(app) -> None:
     dialog.setWindowTitle("Plot summary")
     dialog.resize(1080, 360)
     root = QVBoxLayout(dialog)
-    table = QTableWidget(len(curves), 7)
-    table.setHorizontalHeaderLabels(["Color", "Label", "Skip pts", "Avg", "Effective rate", "Include", "Actions"])
+    table = QTableWidget(len(curves), 8)
+    table.setHorizontalHeaderLabels(["Color", "Label", "Skip pts", "Avg", "Tap dist (cm)", "Effective rate", "Include", "Actions"])
     table.horizontalHeader().setStretchLastSection(False)
     table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
     table.setColumnWidth(0, 90)
     table.setColumnWidth(2, 72)
     table.setColumnWidth(3, 70)
-    table.setColumnWidth(4, 130)
-    table.setColumnWidth(5, 70)
-    table.setColumnWidth(6, 250)
+    table.setColumnWidth(4, 100)
+    table.setColumnWidth(5, 130)
+    table.setColumnWidth(6, 70)
+    table.setColumnWidth(7, 250)
 
     def row_widgets(entry, row):
         is_preview = bool(entry.get("is_preview", False))
@@ -2955,6 +2959,14 @@ def _open_plot_summary(app) -> None:
         avg = QLineEdit(str(entry.get("avg_window", 1)))
         avg.setMaximumWidth(60)
         rate_item = QLabel("—")
+        tap = QLineEdit("—")
+        tap.setMaximumWidth(85)
+        src = entry.get("source") or {}
+        tap_value = src.get("length_cm")
+        if tap_value is not None:
+            tap.setText(f"{float(tap_value):g}")
+        if bool(entry.get("is_fit_result", False)):
+            tap.setEnabled(False)
 
         def _rate_text_for_entry() -> str:
             t_local = entry.get("t")
@@ -2981,15 +2993,38 @@ def _open_plot_summary(app) -> None:
             rate_item.setText(_rate_text_for_entry())
         avg.editingFinished.connect(on_avg)
         table.setCellWidget(row, 3, avg)
+        def on_tap():
+            if bool(entry.get("is_fit_result", False)):
+                tap.setText("—")
+                return
+            previous = src.get("length_cm", 1.0)
+            try:
+                updated = float(tap.text())
+                if updated <= 0:
+                    raise ValueError
+            except ValueError:
+                tap.setText(f"{float(previous):g}")
+                return
+            if is_preview:
+                app.data_fit_use_length_cb.setChecked(True)
+                _set_silently(app.data_fit_length_input, f"{updated:g}")
+                refresh_preview(app)
+                return
+            src["use_length"] = True
+            src["length_cm"] = updated
+            _recompute_curve_from_source(app, entry)
+            _refresh_curve_item(entry)
+        tap.editingFinished.connect(on_tap)
+        table.setCellWidget(row, 4, tap)
         rate_item.setText(_rate_text_for_entry())
-        table.setCellWidget(row, 4, rate_item)
+        table.setCellWidget(row, 5, rate_item)
         include = QCheckBox()
         include.setChecked(entry.get("include_in_fit", True))
         if is_preview:
             include.toggled.connect(lambda v: setattr(app, "data_fit_preview_include_in_fit", bool(v)))
         else:
             include.toggled.connect(lambda v: entry.update(include_in_fit=bool(v)))
-        table.setCellWidget(row, 5, include)
+        table.setCellWidget(row, 6, include)
         actions = QHBoxLayout()
         actions_widget = QWidget()
         actions_widget.setLayout(actions)
@@ -3012,7 +3047,7 @@ def _open_plot_summary(app) -> None:
         actions.setContentsMargins(0, 0, 0, 0)
         actions.addWidget(settings_btn)
         actions.addWidget(remove_btn)
-        table.setCellWidget(row, 6, actions_widget)
+        table.setCellWidget(row, 7, actions_widget)
 
     for i, entry in enumerate(curves):
         row_widgets(entry, i)
