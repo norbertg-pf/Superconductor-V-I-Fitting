@@ -413,7 +413,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
-    app.data_fit_show_power.toggled.connect(lambda _: _update_band_states(app))
+    app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_add_plot_btn.clicked.connect(lambda: (_add_plot_from_current(app), robust_view(app)))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
@@ -1327,12 +1327,10 @@ def _update_method_mode_ui(app) -> None:
     ):
         if widget is not None:
             widget.setEnabled(not is_loglog)
-    # Draggable band is I-based — keep it for non-linear only.
-    if is_loglog:
-        app.data_fit_show_power.setEnabled(False)
-        app.data_fit_show_power.setChecked(False)
-    else:
-        app.data_fit_show_power.setEnabled(True)
+    # In log-log mode the Show checkbox still works (it controls the Ec1/Ec2
+    # guide lines); only dragging the band is meaningless since the Step 3
+    # editors hold Ec values, not a draggable current range.
+    app.data_fit_show_power.setEnabled(True)
     _save_active_curve_profile(app)
 
 
@@ -1685,15 +1683,21 @@ def toggle_zoom(app, checked: bool):
 
 
 def _update_band_states(app) -> None:
-    """Show and allow dragging for every window whose Show checkbox is enabled."""
+    """Show and allow dragging for every window whose Show checkbox is enabled.
+
+    In log-log mode the power band is shown but not draggable (the Step 3
+    editors hold Ec values, not a draggable current range).
+    """
+    is_loglog = _plot_is_loglog(app)
     for window, band, show_cb in (
         ("didt", app.data_fit_band_didt, app.data_fit_show_didt),
         ("linear", app.data_fit_band_linear, app.data_fit_show_linear),
         ("power", app.data_fit_band_power, app.data_fit_show_power),
     ):
-        enabled = bool(show_cb.isChecked())
-        band.setMovable(enabled)
-        band.setVisible(enabled)
+        checked = bool(show_cb.isChecked())
+        draggable = checked and not (window == "power" and is_loglog)
+        band.setMovable(draggable)
+        band.setVisible(checked)
 
 
 def _on_band_dragged(app, window: str) -> None:
