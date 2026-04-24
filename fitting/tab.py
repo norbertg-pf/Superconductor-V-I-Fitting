@@ -587,6 +587,8 @@ def setup_data_fitting_tab_layout(app):
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
     ch_grid = QGridLayout(app.data_fit_channels_group)
+    ch_grid.setContentsMargins(9, 6, 9, 9)
+    ch_grid.setVerticalSpacing(4)
     app.data_fit_time_cb = QComboBox()
     app.data_fit_x_cb = QComboBox()
     app.data_fit_y_cb = QComboBox()
@@ -898,8 +900,8 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_result_text = QTextEdit()
     app.data_fit_result_text.setReadOnly(True)
     app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
-    app.data_fit_result_text.setMinimumHeight(130)
-    app.data_fit_result_text.setMaximumHeight(180)
+    app.data_fit_result_text.setMinimumHeight(90)
+    app.data_fit_result_text.setMaximumHeight(120)
     left_header.addWidget(app.data_fit_result_text)
 
     left_header.addStretch()
