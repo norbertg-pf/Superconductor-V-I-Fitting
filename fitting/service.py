@@ -84,7 +84,7 @@ class FitResult:
     fit_x: Optional[np.ndarray] = None
     fit_y: Optional[np.ndarray] = None
     # IEC decade n-value extras (populated when fit_method == FIT_METHOD_LOG_LOG).
-    fit_method: str = FIT_METHOD_NONLINEAR
+    fit_method: str = DEFAULT_FIT_METHOD
     ec1: float = 0.0
     ec2: float = 0.0
     n_window_I: tuple[float, float] = (0.0, 0.0)

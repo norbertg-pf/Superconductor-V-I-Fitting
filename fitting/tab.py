@@ -1484,13 +1484,13 @@ def _toggle_plot_scale(app) -> None:
     try:
         refresh_preview(app)
     except Exception:
-        pass
+        traceback.print_exc()
     if not to_loglog:
         # Back to linear: restore the robust, outlier-trimmed view.
         try:
             robust_view(app)
         except Exception:
-            pass
+            traceback.print_exc()
 
 
 def _apply_axis_labels_for_scale(app, to_loglog: bool) -> None:
@@ -2772,7 +2772,7 @@ def _upsert_fit_curve_entry(app, source_entry: dict, result) -> None:
     existing["alpha_pct"] = fit_alpha_pct
     existing["x"] = np.asarray(result.fit_x if result.fit_x is not None else [])
     existing["y"] = np.asarray(result.fit_y if result.fit_y is not None else [])
-    existing["t"] = np.asarray(result.fit_x if result.fit_x is not None else [])
+    existing["t"] = np.asarray([])
     existing["fit_result"] = result
     _refresh_curve_item(existing)
 
