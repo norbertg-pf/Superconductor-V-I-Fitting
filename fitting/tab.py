@@ -954,7 +954,11 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot.setLabel("bottom", "Current (A)")
     app.data_fit_plot.setLabel("left", "Voltage (V)")
     app.data_fit_plot.showGrid(x=True, y=True)
-    plot_view_box = app.data_fit_plot.getPlotItem().getViewBox()
+    plot_item = app.data_fit_plot.getPlotItem()
+    # Reserve a little space on the right so right-edge labels are visible.
+    plot_item.layout.setContentsMargins(0, 0, 24, 0)
+    plot_item.getAxis("right").setWidth(58)
+    plot_view_box = plot_item.getViewBox()
     # Leave extra headroom around data so right-edge labels/markers are easier
     # to read and do not sit on the window border.
     plot_view_box.setDefaultPadding(0.08)
@@ -1032,6 +1036,9 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_resid_plot.setLabel("bottom", "Current (A)")
     app.data_fit_resid_plot.setLabel("left", "Residual")
     app.data_fit_resid_plot.showGrid(x=True, y=True)
+    resid_item = app.data_fit_resid_plot.getPlotItem()
+    resid_item.layout.setContentsMargins(0, 0, 24, 0)
+    resid_item.getAxis("right").setWidth(58)
     app.data_fit_resid_plot.setXLink(app.data_fit_plot)
     app.data_fit_resid_curve = app.data_fit_resid_plot.plot(
         pen=None, symbol="o", symbolSize=3,
