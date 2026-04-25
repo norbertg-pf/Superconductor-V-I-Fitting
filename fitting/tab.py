@@ -24,10 +24,12 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QTabWidget,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -430,6 +432,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
+    app.data_fit_help_btn.clicked.connect(lambda: _open_fitting_help_dialog(app))
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
@@ -849,8 +852,13 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_save_preset_btn.setToolTip("Save the current fit-window preset to a JSON file.")
     app.data_fit_load_preset_btn = QPushButton("Load preset…")
     app.data_fit_load_preset_btn.setToolTip("Load a fit-window preset from a JSON file.")
+    app.data_fit_help_btn = QPushButton("Help")
+    app.data_fit_help_btn.setToolTip("Open a compact guide for fitting workflow, equation, and metadata outputs.")
+    app.data_fit_help_btn.setMinimumHeight(34)
+    app.data_fit_help_btn.setStyleSheet("font-size: 14px; font-weight: 600; padding: 6px 12px;")
     preset_row.addWidget(app.data_fit_save_preset_btn)
     preset_row.addWidget(app.data_fit_load_preset_btn)
+    preset_row.addWidget(app.data_fit_help_btn)
     left.addLayout(preset_row)
 
     app.data_fit_warning_label = QLabel("")
@@ -3129,6 +3137,115 @@ def _open_plot_summary(app) -> None:
     close.clicked.connect(dialog.accept)
     root.addWidget(close)
 
+    dialog.exec_()
+
+
+def _open_fitting_help_dialog(app) -> None:
+    """Open a compact but complete guide for the V-I fitting workflow."""
+    dialog = QDialog(app)
+    dialog.setWindowTitle("Data Fitting Help")
+    dialog.resize(980, 700)
+    root = QVBoxLayout(dialog)
+
+    title = QLabel(
+        "<h2 style='margin-bottom:2px;'>V-I Fitting Guide</h2>"
+        "<div style='color:#555;'>Simple workflow, equation meaning, and exported metadata.</div>"
+    )
+    title.setTextFormat(Qt.RichText)
+    root.addWidget(title)
+
+    tabs = QTabWidget(dialog)
+    root.addWidget(tabs)
+
+    overview = QTextEdit()
+    overview.setReadOnly(True)
+    overview.setHtml(
+        """
+        <h3>What this tool does</h3>
+        <ul>
+          <li>Fits your measured superconducting <b>V-I curve</b> with a model that combines:
+            <ul>
+              <li>Residual linear part (<b>R·I</b>),</li>
+              <li>Non-linear transition (<b>power law</b>),</li>
+              <li>Offset (<b>V0</b>).</li>
+            </ul>
+          </li>
+          <li>Extracts engineering values: <b>Ic</b>, <b>n-value</b>, <b>R (or ρ)</b>, and <b>criterion voltage</b>.</li>
+          <li>Shows these values directly on plot and stores them into TDMS metadata.</li>
+        </ul>
+        <h3>Model expression and each term</h3>
+        <p style='font-size:15px;'><b>V(I) = V0 + R·I + Vc·(I / Ic)<sup>n</sup></b></p>
+        <ul>
+          <li><b>V0</b>: baseline voltage offset (instrument offset, thermal emf, etc.).</li>
+          <li><b>R·I</b>: linear background (ohmic contribution, leads/joints/residual resistance).</li>
+          <li><b>Vc·(I/Ic)<sup>n</sup></b>: superconducting transition region.</li>
+          <li><b>Ic</b>: current at the selected criterion (<b>Vc</b> or <b>Ec·L</b>).</li>
+          <li><b>n</b>: transition steepness. Larger n = sharper rise near Ic.</li>
+        </ul>
+        <p><b>How to see this on the plot:</b> low-current region tends to look linear; around the transition
+        the curve bends up quickly and n controls that sharpness.</p>
+        """
+    )
+    tabs.addTab(overview, "Overview")
+
+    workflow = QTextEdit()
+    workflow.setReadOnly(True)
+    workflow.setHtml(
+        """
+        <h3>How to make a proper fit (recommended checklist)</h3>
+        <ol>
+          <li><b>Load file</b> and choose correct <b>Time / Current / Voltage</b> channels.</li>
+          <li>Apply scale/offset only if needed (displayed = raw * scale - offset).</li>
+          <li>Enable useful windows:
+            <ul>
+              <li><b>dI/dt window</b>: stable current-ramp section.</li>
+              <li><b>Linear window</b>: low-current region before transition.</li>
+              <li><b>Power window</b>: transition region (Ec1/Ec2 for log-log mode).</li>
+            </ul>
+          </li>
+          <li>Press <b>Run Fit</b> and verify parameter stability.</li>
+          <li>If unstable (large jumps in Ic/n), adjust windows and repeat.</li>
+          <li>When results are good and repeatable, save the setup as <b>preset</b>.</li>
+        </ol>
+        <h3>Quality tips</h3>
+        <ul>
+          <li>Keep windows in physically meaningful ramp sections.</li>
+          <li>Avoid noisy edges/outliers; use Robust Auto-Range for quick visual check.</li>
+          <li>For tape/cable samples, enable sample length so criterion is handled as <b>Ec (V/cm)</b>.</li>
+        </ul>
+        """
+    )
+    tabs.addTab(workflow, "Fit workflow")
+
+    metadata = QTextEdit()
+    metadata.setReadOnly(True)
+    metadata.setHtml(
+        """
+        <h3>Values saved to metadata</h3>
+        <ul>
+          <li><b>Ic</b> (A): critical current at selected criterion.</li>
+          <li><b>n-value</b>: steepness of transition.</li>
+          <li><b>R or ρ</b>: linear resistance term (or per-length value when sample length is used).</li>
+          <li><b>V0</b>: baseline voltage offset term from fit.</li>
+          <li><b>Criterion</b>: Vc (V) or Ec (V/cm), depending on mode.</li>
+          <li>Selected windows, method, tolerances, and relevant fit settings.</li>
+        </ul>
+        <h3>Custom settings quick reference</h3>
+        <ul>
+          <li><b>Fit method</b>: log-log (IEC style) or non-linear power-law.</li>
+          <li><b>Ic stop tol</b> + <b>max iterations</b>: convergence controls.</li>
+          <li><b>Chi-sqr tol</b>: optimizer relative stop threshold.</li>
+          <li><b>Edit visually</b>: drag window bands directly on the plot.</li>
+          <li><b>Load metadata from TDMS</b>: pulls scale/offset and tap distance when available.</li>
+        </ul>
+        <p><b>Rule of thumb:</b> a proper fit is physically plausible and insensitive to small window tweaks.</p>
+        """
+    )
+    tabs.addTab(metadata, "Fit outputs & metadata")
+
+    close = QPushButton("Close")
+    close.clicked.connect(dialog.accept)
+    root.addWidget(close, alignment=Qt.AlignRight)
     dialog.exec_()
 
 
