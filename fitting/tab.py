@@ -1248,7 +1248,12 @@ def open_file_dialog(app):
 
 
 def refresh_current_recording(app):
+    # Prefer the currently-running file; fall back to the last completed
+    # recording so "Use current recording" still works after Stop Read.
     path = getattr(app, "current_tdms_filepath", "") or ""
+    if not path:
+        runtime_state = getattr(app, "runtime_state", None)
+        path = getattr(runtime_state, "last_tdms_filepath", "") or ""
     ok, msg = app.data_fit_controller.load_recording(path)
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
