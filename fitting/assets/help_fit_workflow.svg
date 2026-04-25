@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+  <rect width="1200" height="420" fill="#f6f8fb"/>
+  <text x="40" y="45" font-size="30" font-family="Arial" fill="#1f2a44" font-weight="700">V-I Fitting Workflow</text>
+  <rect x="40" y="80" width="220" height="110" rx="12" fill="#d9ecff" stroke="#2f73c9"/>
+  <text x="60" y="120" font-size="22" font-family="Arial" fill="#123">Load signals</text>
+  <text x="60" y="150" font-size="18" font-family="Arial" fill="#123">Time / I / V</text>
+
+  <rect x="300" y="80" width="240" height="110" rx="12" fill="#e3f7e8" stroke="#2f9f51"/>
+  <text x="320" y="120" font-size="22" font-family="Arial" fill="#123">Preprocess</text>
+  <text x="320" y="150" font-size="18" font-family="Arial" fill="#123">Scale, offset, averaging</text>
+
+  <rect x="580" y="80" width="240" height="110" rx="12" fill="#fff2d9" stroke="#c78a1f"/>
+  <text x="600" y="120" font-size="22" font-family="Arial" fill="#123">Window setup</text>
+  <text x="600" y="150" font-size="18" font-family="Arial" fill="#123">dI/dt, baseline, power</text>
+
+  <rect x="860" y="80" width="300" height="110" rx="12" fill="#f4e2ff" stroke="#8a42bf"/>
+  <text x="880" y="120" font-size="22" font-family="Arial" fill="#123">Run fit &amp; review</text>
+  <text x="880" y="150" font-size="18" font-family="Arial" fill="#123">Ic, n, R, V0 + quality check</text>
+
+  <line x1="260" y1="135" x2="300" y2="135" stroke="#555" stroke-width="4"/>
+  <polygon points="300,135 285,127 285,143" fill="#555"/>
+  <line x1="540" y1="135" x2="580" y2="135" stroke="#555" stroke-width="4"/>
+  <polygon points="580,135 565,127 565,143" fill="#555"/>
+  <line x1="820" y1="135" x2="860" y2="135" stroke="#555" stroke-width="4"/>
+  <polygon points="860,135 845,127 845,143" fill="#555"/>
+
+  <rect x="40" y="235" width="1120" height="150" rx="12" fill="#ffffff" stroke="#ccd3e0"/>
+  <text x="65" y="270" font-size="23" font-family="Arial" fill="#1f2a44" font-weight="700">Good-fit indicators</text>
+  <text x="65" y="305" font-size="19" font-family="Arial" fill="#223">• Stable Ic and n when windows are tuned slightly</text>
+  <text x="65" y="332" font-size="19" font-family="Arial" fill="#223">• Fitted model overlays measured curve without obvious bias</text>
+  <text x="65" y="359" font-size="19" font-family="Arial" fill="#223">• Baseline terms (V0, R) are physically plausible</text>
+</svg>
