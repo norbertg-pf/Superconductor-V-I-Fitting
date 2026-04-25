@@ -907,6 +907,30 @@ def setup_data_fitting_tab_layout(app):
 
     app.data_fit_graph_settings = GraphSettings()
 
+    toolbar = QGridLayout()
+    app.data_fit_graph_btn = QPushButton("Graph settings…")
+    app.data_fit_graph_btn.setToolTip(
+        "Open graph settings for scale, title, grids, and combined line/ticks/labels."
+    )
+    app.data_fit_zoom_mode_btn = QPushButton("Zoom Mode")
+    app.data_fit_zoom_mode_btn.setCheckable(True)
+    app.data_fit_zoom_mode_btn.setToolTip(
+        "When on: left-drag on the plot draws a rectangle to zoom in.\n"
+        "When off: left-drag pans the view (pyqtgraph default)."
+    )
+    app.data_fit_robust_view_btn = QPushButton("Robust Auto-Range")
+    app.data_fit_robust_view_btn.setToolTip(
+        "Set the view to the 1st-99th percentile of the data with a 10% margin, "
+        "ignoring extreme outliers (common at the edges of V-I curves)."
+    )
+    app.data_fit_reset_view_btn = QPushButton("Full View")
+    app.data_fit_reset_view_btn.setToolTip("Show the complete data range (includes outliers).")
+    toolbar.addWidget(app.data_fit_graph_btn, 0, 0)
+    toolbar.addWidget(app.data_fit_robust_view_btn, 0, 1)
+    toolbar.addWidget(app.data_fit_zoom_mode_btn, 1, 0)
+    toolbar.addWidget(app.data_fit_reset_view_btn, 1, 1)
+    left_header.addLayout(toolbar)
+
     app.data_fit_result_text = QTextEdit()
     app.data_fit_result_text.setReadOnly(True)
     app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
@@ -2525,7 +2549,11 @@ def _post_fit_warnings(app, result, settings) -> None:
 
 
 def _open_graph_settings(app) -> None:
-    dialog = GraphSettingsDialog(app.data_fit_graph_settings, app)
+    def _apply_live(settings: GraphSettings) -> None:
+        app.data_fit_graph_settings = settings
+        refresh_preview(app)
+
+    dialog = GraphSettingsDialog(app.data_fit_graph_settings, app, on_apply=_apply_live)
     if dialog.exec_() == dialog.Accepted:
         app.data_fit_graph_settings = dialog.result_settings()
         refresh_preview(app)
