@@ -1080,6 +1080,8 @@ class FitPreset:
     x_channel: str = ""
     y_channel: str = ""
     time_channel: str = "Time"
+    fit_method: str = "log_log"
+    save_to_separate_tdms: bool = False
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:

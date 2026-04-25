@@ -250,7 +250,8 @@ def fit_power_law(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float,
 
 def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         V0: float, R: float,
-                        Ec1: float, Ec2: float
+                        Ec1: float, Ec2: float,
+                        criterion_E: Optional[float] = None,
                         ) -> tuple[float, float, float, int, tuple[float, float],
                                    float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
@@ -324,17 +325,18 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     n_val = slope
     if abs(n_val) < 1e-12:
         raise ValueError("Power-law slope collapsed to zero; cannot solve for Ic.")
-    log_Ec2 = float(np.log10(Ec2))
-    log_Ic = (log_Ec2 - intercept) / n_val
-    Ic_at_Ec2 = float(10.0 ** log_Ic)
+    crit_E = float(Ec2 if (criterion_E is None or criterion_E <= 0) else criterion_E)
+    log_crit = float(np.log10(crit_E))
+    log_Ic = (log_crit - intercept) / n_val
+    Ic_at_crit = float(10.0 ** log_Ic)
     model_log_E = intercept + n_val * log_I
     chi_sqr = float(np.sum((log_E - model_log_E) ** 2))
     ss_tot = float(np.sum((log_E - np.mean(log_E)) ** 2))
     r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
     # Uncertainty in log10(Ic) from propagation through
-    # log_Ic = (log_Ec2 - intercept) / slope.
+    # log_Ic = (log_crit - intercept) / slope.
     d_by_intercept = -1.0 / n_val
-    d_by_slope = -(log_Ec2 - intercept) / (n_val ** 2)
+    d_by_slope = -(log_crit - intercept) / (n_val ** 2)
     var_log_Ic = (
         d_by_intercept ** 2 * sigma_intercept ** 2
         + d_by_slope ** 2 * sigma_slope ** 2
@@ -342,11 +344,11 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     )
     sigma_log_Ic = float(np.sqrt(max(0.0, var_log_Ic)))
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
-    sigma_Ic = float(Ic_at_Ec2 * np.log(10.0) * sigma_log_Ic)
+    sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
     I_lo = float(np.min(x_seg[mask]))
     I_hi = float(np.max(x_seg[mask]))
-    return (Ic_at_Ec2, n_val, chi_sqr, n_pts, (I_lo, I_hi),
+    return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
 
@@ -421,23 +423,28 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     method = getattr(settings, "fit_method", DEFAULT_FIT_METHOD)
 
     if method == FIT_METHOD_LOG_LOG:
+        # Use the user-entered Ec/Vc as the criterion for Ic if provided;
+        # fall back to Ec2 (the legacy default) when criterion_voltage is
+        # not set or non-positive.
+        crit_for_ic = Vc if (Vc is not None and Vc > 0) else settings.ec2
         try:
             (Ic, n_value, chi_sqr, n_pts, n_window,
              sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
+                criterion_E=crit_for_ic,
             )
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
             return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
-        # Rebuild a smooth model curve for plotting. Use Ec2 as the criterion.
+        # Rebuild a smooth model curve for plotting using the user's criterion.
         fit_x = np.linspace(max(x_min, 1e-12), x_max, 400)
-        fit_y = V0 + R * fit_x + settings.ec2 * np.power(
+        fit_y = V0 + R * fit_x + crit_for_ic * np.power(
             np.clip(fit_x / Ic, 1e-30, None), n_value
         )
         # Add the thermal offset back so the model curve aligns with the
         # raw (unshifted) data the user still sees on screen.
         if thermal_applied:
             fit_y = fit_y + V_ofs
-        ratio = _ramp_ratio(V0, settings.ec2)
+        ratio = _ramp_ratio(V0, crit_for_ic)
         return FitResult(
             ok=True,
             message="IEC 61788 log-log n-value fit succeeded.",
@@ -448,7 +455,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             R=R,
             Ic=Ic,
             n_value=n_value,
-            criterion=settings.ec2,
+            criterion=crit_for_ic,
             iterations=1,
             chi_sqr=chi_sqr,
             ic_history=[Ic],

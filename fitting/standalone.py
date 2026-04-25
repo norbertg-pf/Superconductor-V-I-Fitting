@@ -6,12 +6,31 @@ Run with ``python -m src.fitting`` from the project root.
 from __future__ import annotations
 
 import sys
+import traceback
+from pathlib import Path
 from types import SimpleNamespace
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget
 import pyqtgraph as pg
 
 from . import tab as _tab
+from .extras import load_preset_from_file
+
+
+# Default preset file co-located with the standalone package. When present it
+# is loaded on startup so users get their saved Data Fitting parameters back
+# without having to click "Load preset…" each time.
+PRESET_FILENAME = "data_fit_preset.json"
+
+
+def _candidate_preset_paths() -> list[Path]:
+    """Return preset locations to try in order for the standalone app."""
+    here = Path(__file__).resolve().parent
+    return [
+        here / PRESET_FILENAME,
+        here.parent / PRESET_FILENAME,
+        Path.cwd() / PRESET_FILENAME,
+    ]
 
 
 class DataFittingWindow(QMainWindow):
@@ -44,7 +63,23 @@ class DataFittingWindow(QMainWindow):
         self.data_fitting_sync_region_to_inputs = lambda *_: _tab.sync_region_to_inputs(self)
 
         _tab.setup_data_fitting_tab_layout(self)
+        self._load_default_preset()
         self.resize(1500, 950)
+
+    def _load_default_preset(self) -> None:
+        for path in _candidate_preset_paths():
+            if not path.exists():
+                continue
+            try:
+                preset = load_preset_from_file(path)
+            except Exception:
+                traceback.print_exc()
+                continue
+            try:
+                _tab._apply_preset(self, preset)
+            except Exception:
+                traceback.print_exc()
+            return
 
 
 def main() -> int:
