@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+  <rect width="1200" height="420" fill="#f7f8fc"/>
+  <text x="40" y="45" font-size="30" font-family="Arial" fill="#1f2a44" font-weight="700">Fit Result Metadata Map</text>
+
+  <rect x="40" y="80" width="360" height="300" rx="14" fill="#ffffff" stroke="#cfd6e3"/>
+  <text x="65" y="120" font-size="24" font-family="Arial" fill="#1f2a44" font-weight="700">Core values</text>
+  <text x="65" y="160" font-size="20" font-family="Arial" fill="#223">Ic (A): criterion current</text>
+  <text x="65" y="195" font-size="20" font-family="Arial" fill="#223">n-value: transition sharpness</text>
+  <text x="65" y="230" font-size="20" font-family="Arial" fill="#223">R or ρ-slope: baseline slope</text>
+  <text x="65" y="265" font-size="20" font-family="Arial" fill="#223">V0: baseline intercept</text>
+  <text x="65" y="300" font-size="20" font-family="Arial" fill="#223">Ec/Vc: selected criterion</text>
+
+  <rect x="450" y="100" width="320" height="130" rx="14" fill="#e9f2ff" stroke="#76a6e8"/>
+  <text x="470" y="145" font-size="22" font-family="Arial" fill="#123">Process context</text>
+  <text x="470" y="178" font-size="18" font-family="Arial" fill="#123">Window boundaries</text>
+  <text x="470" y="205" font-size="18" font-family="Arial" fill="#123">Method (IEC / non-linear)</text>
+
+  <rect x="450" y="250" width="320" height="130" rx="14" fill="#e6f8ec" stroke="#6cbc87"/>
+  <text x="470" y="295" font-size="22" font-family="Arial" fill="#123">Data context</text>
+  <text x="470" y="328" font-size="18" font-family="Arial" fill="#123">Channel scaling + offsets</text>
+  <text x="470" y="355" font-size="18" font-family="Arial" fill="#123">Tap distance and units</text>
+
+  <rect x="830" y="140" width="330" height="180" rx="14" fill="#fff3de" stroke="#d4a44f"/>
+  <text x="850" y="185" font-size="22" font-family="Arial" fill="#123">Engineering outcome</text>
+  <text x="850" y="218" font-size="18" font-family="Arial" fill="#123">Acceptance / reject decisions</text>
+  <text x="850" y="245" font-size="18" font-family="Arial" fill="#123">Trend monitoring</text>
+  <text x="850" y="272" font-size="18" font-family="Arial" fill="#123">Protection thresholds</text>
+
+  <line x1="400" y1="220" x2="450" y2="165" stroke="#667" stroke-width="4"/>
+  <line x1="400" y1="240" x2="450" y2="315" stroke="#667" stroke-width="4"/>
+  <line x1="770" y1="165" x2="830" y2="200" stroke="#667" stroke-width="4"/>
+  <line x1="770" y1="315" x2="830" y2="260" stroke="#667" stroke-width="4"/>
+</svg>

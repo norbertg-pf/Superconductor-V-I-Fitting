@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -33,6 +34,8 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -161,6 +164,115 @@ class _FitParamTable(pg.TextItem):
         )
         if ok:
             self.setHtml(text)
+
+
+class FitHelpDialog(QDialog):
+    """Compact multi-tab help window for the Data Fitting workflow."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Data Fitting Help")
+        self.resize(940, 660)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("<h2>V-I Fitting Guide</h2><p><b>Simple, practical steps for reliable superconducting curve fitting.</b></p>")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._make_overview_tab(), "Overview")
+        tabs.addTab(self._make_workflow_tab(), "How to fit properly")
+        tabs.addTab(self._make_metadata_tab(), "Metadata values")
+        layout.addWidget(tabs)
+
+    @staticmethod
+    def _asset_uri(name: str) -> str:
+        path = Path(__file__).resolve().parent / "assets" / name
+        return path.as_uri()
+
+    def _build_browser(self, html: str) -> QTextBrowser:
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(html)
+        return browser
+
+    def _make_overview_tab(self) -> QWidget:
+        fig = self._asset_uri("help_fit_workflow.svg")
+        html = f"""
+        <h3>What this fitting does</h3>
+        <ul>
+          <li>Loads Time, Current (X), and Voltage (Y) signals from TDMS.</li>
+          <li>Applies transforms: <b>displayed = raw × scale − offset</b>.</li>
+          <li>Optionally converts voltage to electric field: <b>E = V / L<sub>v</sub></b> (V/cm).</li>
+          <li>Extracts engineering parameters: <b>Ic</b>, <b>n-value</b>, <b>R or ρ</b>, <b>V0</b>.</li>
+        </ul>
+        <p><img src="{fig}" width="820"></p>
+        <h3>Why this matters</h3>
+        <ul>
+          <li>Separates thermal offset, inductive part, and resistive/power-law behavior.</li>
+          <li>Produces consistent values for quality checks and protection thresholds.</li>
+          <li>Stores key results in metadata for traceability and later analysis.</li>
+        </ul>
+        """
+        return self._build_browser(html)
+
+    def _make_workflow_tab(self) -> QWidget:
+        html = """
+        <h3>How a proper fit should be done</h3>
+        <ol>
+          <li><b>Pick correct channels:</b> Time, Current, Voltage.</li>
+          <li><b>Validate scale/offset:</b> confirm units and polarity before fitting.</li>
+          <li><b>Use metadata when available:</b> click <b>Load metadata from TDMS</b>.</li>
+          <li><b>Set tap distance</b> if using E-field mode (V/cm).</li>
+          <li><b>Run Step windows carefully:</b> dI/dt, linear baseline, then power-law window.</li>
+          <li><b>Run fit</b> and inspect residual behavior/curve shape.</li>
+        </ol>
+
+        <h3>Quick checklist for reliable results</h3>
+        <ul>
+          <li><b>Zero-I segment present:</b> needed to estimate and remove thermal offset.</li>
+          <li><b>Ramp region clean:</b> avoid clipped, saturated, or noisy points.</li>
+          <li><b>Window limits reasonable:</b> not too narrow, not crossing unstable regions.</li>
+          <li><b>Ec / Vc criterion correct:</b> match your test procedure.</li>
+          <li><b>Compare fit vs measured curve:</b> no obvious systematic mismatch.</li>
+        </ul>
+
+        <h3>Custom settings/options explained</h3>
+        <ul>
+          <li><b>Average window:</b> reduces noise by block averaging.</li>
+          <li><b>Subtract Vofs:</b> removes thermal DC offset from near-zero current segment.</li>
+          <li><b>dI/dt window:</b> estimates inductive contribution region.</li>
+          <li><b>Linear baseline window:</b> determines V0 and linear R part.</li>
+          <li><b>Method:</b> IEC log-log fit or non-linear full model.</li>
+          <li><b>Ic stop tol / max iter / chi tol:</b> solver convergence controls.</li>
+          <li><b>Save/Load preset:</b> reuse validated settings across measurements.</li>
+        </ul>
+        <p><b>Tip:</b> if fit changes a lot from small window edits, data quality or window placement likely needs review.</p>
+        """
+        return self._build_browser(html)
+
+    def _make_metadata_tab(self) -> QWidget:
+        fig = self._asset_uri("help_fit_metadata.svg")
+        html = f"""
+        <h3>Values produced by fitting (and kept in metadata)</h3>
+        <ul>
+          <li><b>Ic</b> (A): current at selected criterion (Ec or Vc).</li>
+          <li><b>n-value</b>: steepness of the superconducting transition.</li>
+          <li><b>R</b> (Ω) or <b>ρ-like slope</b> (Ω/cm): linear baseline term.</li>
+          <li><b>V0</b> (V or V/cm): baseline voltage/electric-field intercept.</li>
+          <li><b>Criterion</b> (Vc or Ec): threshold used to define Ic.</li>
+          <li><b>Quality context</b>: selected windows and method mode.</li>
+        </ul>
+        <p><img src="{fig}" width="820"></p>
+        <h3>Interpreting outcomes</h3>
+        <ul>
+          <li>Higher <b>Ic</b> generally means better current-carrying capability.</li>
+          <li>Higher <b>n</b> usually indicates a sharper superconducting transition.</li>
+          <li>Large baseline <b>R</b> or <b>V0</b> may indicate contact/heating/offset issues.</li>
+        </ul>
+        <p><b>Engineering practice:</b> always compare new runs against known-good baselines and test conditions.</p>
+        """
+        return self._build_browser(html)
 
 
 def _percent_edit(value_fraction: float) -> QLineEdit:
@@ -430,6 +542,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
+    app.data_fit_help_btn.clicked.connect(lambda: _open_fit_help(app))
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
@@ -451,6 +564,16 @@ def _on_transform_inputs_changed(app) -> None:
     if ctx is not None:
         _, _, x_arr, y_arr, _ = ctx
         _update_fit_bands(app, x_arr, y_arr)
+
+
+def _open_fit_help(app) -> None:
+    dialog = getattr(app, "data_fit_help_dialog", None)
+    if dialog is None:
+        dialog = FitHelpDialog(app)
+        app.data_fit_help_dialog = dialog
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
 
 
 def _reset_data_fitting_defaults(app) -> None:
@@ -849,8 +972,13 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_save_preset_btn.setToolTip("Save the current fit-window preset to a JSON file.")
     app.data_fit_load_preset_btn = QPushButton("Load preset…")
     app.data_fit_load_preset_btn.setToolTip("Load a fit-window preset from a JSON file.")
+    app.data_fit_help_btn = QPushButton("HELP / FIT GUIDE")
+    app.data_fit_help_btn.setToolTip("Open a compact guide for how the fitting workflow works and how to get a proper fit.")
+    app.data_fit_help_btn.setMinimumHeight(36)
+    app.data_fit_help_btn.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 12px;")
     preset_row.addWidget(app.data_fit_save_preset_btn)
     preset_row.addWidget(app.data_fit_load_preset_btn)
+    preset_row.addWidget(app.data_fit_help_btn)
     left.addLayout(preset_row)
 
     app.data_fit_warning_label = QLabel("")
