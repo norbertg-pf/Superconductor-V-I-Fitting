@@ -430,6 +430,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
+    app.data_fit_help_btn.clicked.connect(lambda: _open_help_dialog(app))
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
@@ -878,8 +879,12 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_save_preset_btn.setToolTip("Save the current fit-window preset to a JSON file.")
     app.data_fit_load_preset_btn = QPushButton("Load preset…")
     app.data_fit_load_preset_btn.setToolTip("Load a fit-window preset from a JSON file.")
+    app.data_fit_help_btn = QPushButton("?  Help")
+    app.data_fit_help_btn.setToolTip("Open the help window with a full overview of the fitting workflow.")
+    app.data_fit_help_btn.setStyleSheet("font-weight: bold; background-color: #e6f2ff; color: #003a75; padding: 6px;")
     preset_row.addWidget(app.data_fit_save_preset_btn)
     preset_row.addWidget(app.data_fit_load_preset_btn)
+    preset_row.addWidget(app.data_fit_help_btn)
     left.addLayout(preset_row)
 
     app.data_fit_warning_label = QLabel("")
@@ -3273,3 +3278,318 @@ def _load_preset(app) -> None:
         return
     _apply_preset(app, preset)
     _show_warning(app, f"Loaded preset from {path_str}", severity="warning")
+
+
+def _open_help_dialog(app) -> None:
+    """Open a sizable, tabbed help window explaining the fitting workflow."""
+    from PyQt5.QtWidgets import (
+        QDialog, QTabWidget, QTextBrowser, QVBoxLayout, QHBoxLayout,
+        QPushButton, QSizePolicy,
+    )
+
+    existing = getattr(app, "_data_fit_help_dialog", None)
+    if existing is not None:
+        try:
+            existing.raise_()
+            existing.activateWindow()
+            existing.show()
+            return
+        except RuntimeError:
+            pass
+
+    dialog = QDialog(app)
+    dialog.setWindowTitle("Data Fitting — Help & Overview")
+    dialog.setModal(False)
+    dialog.resize(960, 720)
+    dialog.setSizeGripEnabled(True)
+
+    layout = QVBoxLayout(dialog)
+    tabs = QTabWidget()
+    tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    base_css = """
+        <style>
+            body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt;
+                   color: #1c2733; line-height: 1.45; }
+            h1 { font-size: 18pt; color: #003a75; margin: 0 0 6px 0; }
+            h2 { font-size: 14pt; color: #0a4a8c; margin: 14px 0 4px 0;
+                 border-bottom: 1px solid #cfd8e3; padding-bottom: 2px; }
+            h3 { font-size: 12pt; color: #1a4f7a; margin: 12px 0 2px 0; }
+            p  { margin: 4px 0 6px 0; }
+            ul, ol { margin: 2px 0 8px 18px; }
+            li { margin: 2px 0; }
+            code, .mono { font-family: Consolas, 'Courier New', monospace;
+                          background: #f1f4f8; padding: 1px 4px; border-radius: 3px; }
+            .pill { display: inline-block; padding: 1px 8px; border-radius: 10px;
+                    background: #e6f2ff; color: #003a75; font-weight: bold;
+                    font-size: 10pt; }
+            .warn { background: #fff7c2; border: 1px solid #e6cc00;
+                    padding: 8px 10px; border-radius: 4px; color: #5b4a00; }
+            .tip  { background: #e8f7ee; border: 1px solid #58b56a;
+                    padding: 8px 10px; border-radius: 4px; color: #1f5b2c; }
+            table { border-collapse: collapse; margin: 6px 0 10px 0;
+                    width: 100%; }
+            th, td { border: 1px solid #cfd8e3; padding: 5px 8px;
+                     text-align: left; vertical-align: top; }
+            th { background: #eef3f8; color: #003a75; }
+            .key { color: #0a4a8c; font-weight: bold; }
+        </style>
+    """
+
+    overview_html = base_css + """
+    <h1>Superconductor V&ndash;I Fitting</h1>
+    <p>This tool extracts the <b>critical current <span class="mono">Iₒ</span></b>,
+    the <b>n&#8209;value</span></b> and the <b>resistive baseline</b> from a recorded
+    voltage&ndash;current ramp using the IEC 61788 power&#8209;law criterion.</p>
+
+    <h2>The model</h2>
+    <p>Without a sample length the fitted relation is:</p>
+    <p style="font-size:13pt;"><code>V(I, dI/dt) = V<sub>ofs</sub> + L · dI/dt + R · I + V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
+    <p>If a sample length <span class="mono">Lₛ</span> is provided, voltages are
+    converted to electric field and the equivalent equation is fit:</p>
+    <p style="font-size:13pt;"><code>E(I, dI/dt) = (L / L<sub>s</sub>) · dI/dt + ρ · I + E<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
+
+    <h2>Three&#8209;step procedure</h2>
+    <ol>
+      <li><b>dI/dt window</b> &mdash; a slope is extracted from the rising part of the
+        current to estimate the inductive offset <code>L · dI/dt</code>.</li>
+      <li><b>Linear baseline</b> &mdash; in a low&#8209;current window the residual
+        voltage is fit to <code>V<sub>ofs</sub> + R · I</code> (or ρ · I).</li>
+      <li><b>Power&#8209;law fit</b> &mdash; in the high&#8209;current window the
+        residual is fit to <code>V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code>
+        to extract <span class="mono">Iₒ</span> and <span class="mono">n</span>.</li>
+    </ol>
+
+    <h2>What's on the tab</h2>
+    <ul>
+      <li><span class="pill">Left panel</span> data source, channel transforms,
+        fit windows, iteration knobs, presets and <b>Run Fit</b>.</li>
+      <li><span class="pill">Right panel</span> equation reminder, channels,
+        the live preview plot, fit results and curve management.</li>
+    </ul>
+
+    <div class="tip"><b>Tip:</b> Hover any field to see a tooltip. Each curve can
+    be saved as a profile so its window settings persist between sessions.</div>
+    """
+
+    workflow_html = base_css + """
+    <h1>How to fit a curve properly</h1>
+
+    <h2>Step&#8209;by&#8209;step</h2>
+    <ol>
+      <li><b>Load a TDMS recording</b> via <i>Load TDMS…</i> and (optionally)
+        <i>Load metadata from TDMS</i> to pull the per&#8209;channel
+        scale/offset and voltage&#8209;tap distance.</li>
+      <li><b>Pick the channels</b>:
+        <ul>
+          <li><span class="key">Time</span> &mdash; usually <code>t (s)</code>.</li>
+          <li><span class="key">Current X</span> &mdash; the ramped current, in&nbsp;A.</li>
+          <li><span class="key">Voltage Y</span> &mdash; the tap voltage, in&nbsp;V.</li>
+        </ul>
+      </li>
+      <li><b>Set scale &amp; offset</b> for each channel so the displayed values
+        are in physical units (<code>shown = raw · scale &minus; offset</code>).</li>
+      <li><b>Provide the sample length</b> <code>Lₛ</code> if you want
+        E&#8209;field results (ρ, E<sub>c</sub>); leave it blank for V&#8209;based
+        results (R, V<sub>c</sub>).</li>
+      <li><b>Inspect the preview plot</b> &mdash; the three coloured bands show
+        the dI/dt, linear and power&#8209;law fit windows. Drag their handles or
+        edit the percentages so each window covers a clean part of the curve.</li>
+      <li><b>Choose the criterion</b> <code>V<sub>c</sub></code> /
+        <code>E<sub>c</sub></code> (1&nbsp;µV/cm is the IEC default for HTS at 77&nbsp;K).</li>
+      <li><b>Press <span class="pill">Run Fit</span></b> and read the result block
+        on the right. The fit overlay shows <span class="mono">Iₒ</span>, the
+        criterion line and the n&#8209;window points actually used.</li>
+    </ol>
+
+    <h2>Choosing fit windows well</h2>
+    <ul>
+      <li><b>dI/dt window</b> &mdash; pick a region where the current ramps
+        linearly (typically <b>40&nbsp;%&ndash;60&nbsp;%</b> of the trace). Avoid the
+        switch&#8209;on transient and the transition region.</li>
+      <li><b>Linear baseline window</b> &mdash; well below
+        <span class="mono">Iₒ</span> (default <b>5&nbsp;%&ndash;30&nbsp;%</b>), where
+        <code>V</code> is dominated by the resistive baseline and noise.</li>
+      <li><b>Power&#8209;law window</b> &mdash; from a low fraction of
+        <span class="mono">Iₒ</span> up to the largest voltage you trust
+        (<b>≤&nbsp;80&nbsp;%</b> of <code>V<sub>max</sub></code> by default), so the
+        transition is captured but flux&#8209;flow / runaway is excluded.</li>
+    </ul>
+
+    <h2>Reading the result</h2>
+    <ul>
+      <li><b>Iₒ</b> &mdash; current at which V reaches V<sub>c</sub>
+        (or E<sub>c</sub> · L<sub>s</sub>).</li>
+      <li><b>n</b> &mdash; sharpness of the transition; larger ⇒ sharper.</li>
+      <li><b>R / ρ</b> &mdash; resistive baseline (joints, leads, contact).</li>
+      <li><b>L</b> &mdash; inductive offset coefficient from the dI/dt step.</li>
+      <li><b>R²</b> and <b>σ(Iₒ), σ(n)</b> &mdash; goodness of the power&#8209;law fit.</li>
+    </ul>
+
+    <div class="warn"><b>Watch out:</b>
+      <ul>
+        <li>If the warning bar lights up <i>“ramp too fast”</i> the inductive
+          term swamps the n&#8209;value &mdash; lower <code>dI/dt</code> on the
+          measurement.</li>
+        <li><i>“Insufficient n&#8209;window points”</i> means the power&#8209;law
+          window contains too few samples; widen it or sample faster.</li>
+        <li>If R&sup2; is &lt;&nbsp;0.99 or σ(n)/n is &gt;&nbsp;5&nbsp;%, recheck
+          your windows.</li>
+      </ul>
+    </div>
+    """
+
+    options_html = base_css + """
+    <h1>Custom settings &amp; options</h1>
+
+    <h2>Fit method</h2>
+    <ul>
+      <li><b>log&ndash;log linear</b> (default) &mdash; fits <code>log V</code>
+        vs <code>log I</code> after baseline subtraction. Fast and very robust;
+        recommended for most measurements.</li>
+      <li><b>Non&#8209;linear (Levenberg&ndash;Marquardt)</b> &mdash; fits the full
+        model directly. Useful when the baseline is non&#8209;trivial or when
+        you need true σ on every parameter.</li>
+    </ul>
+
+    <h2>Iteration knobs</h2>
+    <table>
+      <tr><th>Field</th><th>Meaning</th><th>Default</th></tr>
+      <tr><td><code>Max iterations</code></td><td>Outer&#8209;loop cap for the
+        self&#8209;consistent <span class="mono">Iₒ</span> refinement.</td><td>20</td></tr>
+      <tr><td><code>Iₒ stop tol (%)</code></td><td>Stop when
+        |ΔIₒ|/Iₒ falls below this.</td><td>0.1&nbsp;%</td></tr>
+      <tr><td><code>Chi&#8209;sqr tol</code></td><td>Convergence threshold for the
+        non&#8209;linear residual.</td><td>1e&minus;6</td></tr>
+      <tr><td><code>V<sub>c</sub></code> / <code>E<sub>c</sub></code></td>
+        <td>Criterion voltage / electric field used to define
+          <span class="mono">Iₒ</span>.</td>
+        <td>1&nbsp;mV (no L<sub>s</sub>) / 1&nbsp;µV/cm</td></tr>
+    </table>
+
+    <h2>Window fractions</h2>
+    <ul>
+      <li><b>dI/dt low/high</b> &mdash; defaults <b>0.40&ndash;0.60</b> of the
+        time axis.</li>
+      <li><b>Linear low/high</b> &mdash; defaults <b>0.05&ndash;0.30</b> of
+        I<sub>max</sub>.</li>
+      <li><b>Power low</b> &mdash; default <b>0.05</b> of I<sub>max</sub>.
+        Power high is governed by <b>Power&nbsp;V&nbsp;frac</b> (default
+        <b>0.80</b> of V<sub>max</sub>).</li>
+      <li><b>Zero&#8209;I fraction</b> &mdash; default <b>2&nbsp;%</b>; used to
+        pin the thermal offset away from any switch&#8209;on glitch.</li>
+    </ul>
+
+    <h2>Presets &amp; profiles</h2>
+    <ul>
+      <li><span class="pill">Save preset…</span> writes every numeric setting,
+        the criterion, and the chosen fit method to a JSON file.</li>
+      <li><span class="pill">Load preset…</span> restores them in one click —
+        ideal for sharing reproducible recipes between operators.</li>
+      <li><b>Per&#8209;curve profiles</b> remember each curve's individual
+        windows so you can fit several samples sequentially without
+        re&#8209;adjusting.</li>
+    </ul>
+
+    <h2>Plot &amp; export</h2>
+    <ul>
+      <li><b>Show dI/dt / Linear / Power bands</b> toggle the coloured overlays
+        on the preview plot.</li>
+      <li><b>Add plot</b> stores the active curve in the curve list,
+        <b>Add corrected curve</b> stores the baseline&#8209;subtracted version
+        of the last fit.</li>
+      <li><b>Plot scale</b> switches between linear and log&#8209;log axes
+        without changing the underlying fit.</li>
+      <li><b>Export…</b> writes a publication&#8209;quality PNG/PDF and a
+        TDMS side&#8209;car (<code>*_fit_report.tdms</code>) with all metadata.</li>
+    </ul>
+    """
+
+    metadata_html = base_css + """
+    <h1>Fit results stored in metadata</h1>
+    <p>Every successful fit is written as a channel under the
+    <code>FitResults</code> group of the side&#8209;car
+    <code>&lt;source&gt;_fit_report.tdms</code>. Each channel has the parameters
+    below attached as TDMS properties, so they survive round&#8209;trips through
+    LabVIEW, OriginLab and Python consumers.</p>
+
+    <h2>Primary parameters</h2>
+    <table>
+      <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
+      <tr><td><code>Ic</code></td><td>A</td><td>Critical current at the chosen criterion.</td></tr>
+      <tr><td><code>n</code></td><td>&mdash;</td><td>n&#8209;value (transition sharpness).</td></tr>
+      <tr><td><code>sigma_Ic</code> / <code>sigma_n</code></td><td>A / &mdash;</td><td>1&#8209;σ uncertainties from the covariance matrix.</td></tr>
+      <tr><td><code>R_squared</code></td><td>&mdash;</td><td>Coefficient of determination of the power&#8209;law fit.</td></tr>
+    </table>
+
+    <h2>Criterion &amp; n&#8209;window</h2>
+    <table>
+      <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
+      <tr><td><code>criterion_value</code></td><td>V or V/cm</td>
+        <td>The applied <span class="mono">V<sub>c</sub></span> /
+          <span class="mono">E<sub>c</sub></span>.</td></tr>
+      <tr><td><code>criterion_name</code> / <code>criterion_unit</code></td><td>&mdash;</td>
+        <td>Human&#8209;readable label and unit.</td></tr>
+      <tr><td><code>Ec1</code>, <code>Ec2</code></td><td>V/cm</td>
+        <td>IEC decade window (only set for log&ndash;log fits).</td></tr>
+      <tr><td><code>n_window_I_lo_A</code>, <code>n_window_I_hi_A</code></td><td>A</td>
+        <td>Current bounds of the n&#8209;value window actually used.</td></tr>
+      <tr><td><code>n_points_used</code></td><td>&mdash;</td>
+        <td>Number of samples that entered the power&#8209;law fit.</td></tr>
+    </table>
+
+    <h2>Baseline decomposition</h2>
+    <p><code>V<sub>total</sub> = V<sub>ofs</sub> + L · dI/dt + R · I +
+       V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
+    <table>
+      <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
+      <tr><td><code>V_ofs</code></td><td>V</td><td>Thermal/instrumental offset.</td></tr>
+      <tr><td><code>V0_inductive</code></td><td>V</td><td>Inductive voltage at the dI/dt&nbsp;window center.</td></tr>
+      <tr><td><code>inductance_L_H</code></td><td>H</td><td>Effective lead/sample inductance.</td></tr>
+      <tr><td><code>R_or_rho</code></td><td>Ω or Ω/cm</td><td>Resistive baseline; unit follows <code>R_unit</code>.</td></tr>
+    </table>
+
+    <h2>Diagnostic flags</h2>
+    <table>
+      <tr><th>Property</th><th>Type</th><th>Meaning</th></tr>
+      <tr><td><code>ramp_inductive_ratio</code></td><td>float</td>
+        <td>Inductive&nbsp;voltage / criterion&nbsp;voltage.</td></tr>
+      <tr><td><code>ramp_too_fast</code></td><td>True/False</td>
+        <td>Set if the inductive term dominates &mdash; lower dI/dt.</td></tr>
+      <tr><td><code>insufficient_n_points</code></td><td>True/False</td>
+        <td>Set if the power&#8209;law window has too few samples.</td></tr>
+      <tr><td><code>thermal_offset_applied</code></td><td>True/False</td>
+        <td>Set if a non&#8209;zero <code>V<sub>ofs</sub></code> was subtracted.</td></tr>
+      <tr><td><code>uses_sample_length</code></td><td>True/False</td>
+        <td>True for E&#8209;field fits (with L<sub>s</sub>), False for V&#8209;based fits.</td></tr>
+    </table>
+
+    <div class="tip"><b>Note:</b> Booleans are stored as the strings
+    <code>"True"</code>/<code>"False"</code> for round&#8209;trip safety with
+    LabVIEW and Origin readers.</div>
+    """
+
+    for title, html in (
+        ("Overview", overview_html),
+        ("How to fit", workflow_html),
+        ("Settings & options", options_html),
+        ("Metadata fields", metadata_html),
+    ):
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(html)
+        tabs.addTab(browser, title)
+
+    layout.addWidget(tabs)
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    close_btn = QPushButton("Close")
+    close_btn.clicked.connect(dialog.accept)
+    btn_row.addWidget(close_btn)
+    layout.addLayout(btn_row)
+
+    app._data_fit_help_dialog = dialog
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
