@@ -163,18 +163,18 @@ class GridLine:
 @dataclass
 class GridConfig:
     major: GridLine = field(default_factory=lambda: GridLine(
-        show=True, style="Solid", color="#c8c8c8", thickness=0.4,
+        show=True, style="Solid", color="#d0d0d0", thickness=0.7,
     ))
     minor: GridLine = field(default_factory=lambda: GridLine(
-        show=True, style="Dash", color="#e0e0e0", thickness=0.3,
+        show=False, style="Dot", color="#ececec", thickness=0.4,
     ))
 
 
 @dataclass
 class LineAndTicks:
     show: bool = True
-    line_color: str = "#000000"
-    line_thickness: float = 1.0
+    line_color: str = "#1f1f1f"
+    line_thickness: float = 1.2
     major_length: int = 6
     minor_length: int = 3
 
@@ -182,11 +182,11 @@ class LineAndTicks:
 @dataclass
 class RawCurveStyle:
     draw_mode: str = "Lines + points"     # "Lines + points" | "Points only" | "Lines only"
-    line_color: str = "#0057b8"            # scientific-paper blue
-    point_color: str = "#0057b8"
-    line_width: float = 1.2
-    point_size: int = 3
-    alpha: int = 255
+    line_color: str = "#0b4f8a"            # deep publication blue
+    point_color: str = "#0b4f8a"
+    line_width: float = 1.8
+    point_size: int = 4
+    alpha: int = 235
 
 
 @dataclass
@@ -216,9 +216,9 @@ class GraphSettings:
     line_left: LineAndTicks = field(default_factory=LineAndTicks)
     line_right: LineAndTicks = field(default_factory=lambda: LineAndTicks(show=False))
     # Plot title.
-    plot_title_text: str = "V-I preview"
-    plot_title_size: int = 13
-    plot_title_color: str = "#000000"
+    plot_title_text: str = "V-I characteristic"
+    plot_title_size: int = 12
+    plot_title_color: str = "#1f1f1f"
     plot_title_font_family: str = ""
     # Residuals sub-plot toggle (off by default — user enables via graph settings).
     show_residuals: bool = False

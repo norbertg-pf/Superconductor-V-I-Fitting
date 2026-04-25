@@ -506,7 +506,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_curves = []
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
-    app.data_fit_preview_color = "#1f77b4"
+    app.data_fit_preview_color = "#0b4f8a"
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
@@ -916,29 +916,30 @@ def setup_data_fitting_tab_layout(app):
     right.addLayout(header, stretch=0)
 
     app.data_fit_plot = pg.PlotWidget(
-        title="V-I preview",
+        title="V-I characteristic",
         axisItems={
             "bottom": EngineeringAxisItem(orientation="bottom"),
             "left": EngineeringAxisItem(orientation="left"),
         },
     )
+    app.data_fit_plot.setBackground("w")
     app.data_fit_plot.setLabel("bottom", "Current (A)")
     app.data_fit_plot.setLabel("left", "Voltage (V)")
     app.data_fit_plot.showGrid(x=True, y=True)
     app.data_fit_plot.getPlotItem().getViewBox().setMouseMode(pg.ViewBox.PanMode)
-    app.data_fit_raw_curve = app.data_fit_plot.plot(pen=pg.mkPen("b", width=1.5), name="Raw")
-    app.data_fit_model_curve = app.data_fit_plot.plot(pen=pg.mkPen("r", width=2), name="Fit")
+    app.data_fit_raw_curve = app.data_fit_plot.plot(pen=pg.mkPen("#0b4f8a", width=1.8), name="Raw")
+    app.data_fit_model_curve = app.data_fit_plot.plot(pen=pg.mkPen("#a11d2f", width=2.2), name="Fit")
 
     # One band per step. It is BOTH the colored tint and the draggable editor
     # for that step (when "Edit visually" is selected). No separate gray region.
     app.data_fit_band_didt = pg.LinearRegionItem(
-        brush=pg.mkBrush(0, 150, 255, 45), pen=pg.mkPen(0, 150, 255, 180), movable=False,
+        brush=pg.mkBrush(56, 126, 200, 35), pen=pg.mkPen(56, 126, 200, 150), movable=False,
     )
     app.data_fit_band_linear = pg.LinearRegionItem(
-        brush=pg.mkBrush(0, 200, 120, 45), pen=pg.mkPen(0, 200, 120, 180), movable=False,
+        brush=pg.mkBrush(46, 125, 50, 35), pen=pg.mkPen(46, 125, 50, 150), movable=False,
     )
     app.data_fit_band_power = pg.LinearRegionItem(
-        brush=pg.mkBrush(230, 120, 0, 45), pen=pg.mkPen(230, 120, 0, 180), movable=False,
+        brush=pg.mkBrush(245, 124, 0, 35), pen=pg.mkPen(245, 124, 0, 150), movable=False,
     )
     for band in (app.data_fit_band_didt, app.data_fit_band_linear, app.data_fit_band_power):
         band.setZValue(5)
@@ -955,14 +956,14 @@ def setup_data_fitting_tab_layout(app):
 
     # Ic marker + criterion line shown after a successful fit.
     app.data_fit_ic_line = pg.InfiniteLine(
-        angle=90, pen=pg.mkPen("m", style=Qt.DashLine, width=2),
-        label="Ic", labelOpts={"position": 0.9, "color": "m", "movable": True},
+        angle=90, pen=pg.mkPen("#6a1b9a", style=Qt.DashLine, width=1.8),
+        label="Ic", labelOpts={"position": 0.9, "color": "#6a1b9a", "movable": True},
     )
     app.data_fit_ic_line.setVisible(False)
     app.data_fit_plot.addItem(app.data_fit_ic_line, ignoreBounds=True)
     app.data_fit_criterion_line = pg.InfiniteLine(
-        angle=0, pen=pg.mkPen("m", style=Qt.DashDotLine, width=1.5),
-        label="Vc", labelOpts={"position": 0.05, "color": "m"},
+        angle=0, pen=pg.mkPen("#6a1b9a", style=Qt.DashDotLine, width=1.3),
+        label="Vc", labelOpts={"position": 0.05, "color": "#6a1b9a"},
     )
     app.data_fit_criterion_line.setVisible(False)
     app.data_fit_plot.addItem(app.data_fit_criterion_line, ignoreBounds=True)
@@ -996,13 +997,14 @@ def setup_data_fitting_tab_layout(app):
             "left": EngineeringAxisItem(orientation="left"),
         },
     )
+    app.data_fit_resid_plot.setBackground("w")
     app.data_fit_resid_plot.setLabel("bottom", "Current (A)")
     app.data_fit_resid_plot.setLabel("left", "Residual")
     app.data_fit_resid_plot.showGrid(x=True, y=True)
     app.data_fit_resid_plot.setXLink(app.data_fit_plot)
     app.data_fit_resid_curve = app.data_fit_resid_plot.plot(
         pen=None, symbol="o", symbolSize=3,
-        symbolBrush=pg.mkBrush(120, 50, 180, 200), symbolPen=None,
+        symbolBrush=pg.mkBrush(117, 117, 117, 170), symbolPen=None,
     )
     zero_line = pg.InfiniteLine(angle=0, pos=0, pen=pg.mkPen("k", style=Qt.DashLine, width=1))
     app.data_fit_resid_plot.addItem(zero_line)
@@ -1023,7 +1025,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_controller = DataFittingController(app)
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
-    app.data_fit_preview_color = "#1f77b4"
+    app.data_fit_preview_color = "#0b4f8a"
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
@@ -1576,7 +1578,7 @@ def refresh_preview(app):
         preview_entry = {
             "x": x[:n:step],
             "y": y[:n:step],
-            "color": getattr(app, "data_fit_preview_color", "#1f77b4"),
+            "color": getattr(app, "data_fit_preview_color", "#0b4f8a"),
             "alpha_pct": int(getattr(app, "data_fit_preview_alpha_pct", 100)),
             "label": "Preview",
             "plot_item": app.data_fit_raw_curve,
@@ -2568,7 +2570,7 @@ def _next_pastel_color(app) -> str:
 
 
 def _entry_color_qcolor(entry: dict) -> QColor:
-    base = pg.mkColor(entry.get("color", "#1f77b4"))
+    base = pg.mkColor(entry.get("color", "#0b4f8a"))
     alpha_pct = int(entry.get("alpha_pct", 100) or 100)
     alpha_pct = max(0, min(100, alpha_pct))
     base.setAlpha(int(round((alpha_pct / 100.0) * 255.0)))
@@ -2886,17 +2888,17 @@ def _open_curve_settings_dialog(app, entry: dict, parent) -> None:
     point_sb = QSpinBox()
     point_sb.setRange(1, 20)
     point_sb.setValue(int(style.get("point_size", 4)))
-    color_btn = QPushButton(entry.get("color", "#1f77b4"))
+    color_btn = QPushButton(entry.get("color", "#0b4f8a"))
     color_btn.setStyleSheet(_button_bg_css(_entry_color_qcolor(entry)))
     alpha_sb = QSpinBox()
     alpha_sb.setRange(0, 100)
     alpha_sb.setSuffix(" %")
-    initial_color = pg.mkColor(entry.get("color", "#1f77b4"))
+    initial_color = pg.mkColor(entry.get("color", "#0b4f8a"))
     alpha_sb.setValue(int(entry.get("alpha_pct", int(round((initial_color.alpha() / 255.0) * 100.0)))))
 
     def pick_color():
         c = QColorDialog.getColor(
-            pg.mkColor(entry.get("color", "#1f77b4")),
+            pg.mkColor(entry.get("color", "#0b4f8a")),
             dialog,
             "Curve color",
             options=QColorDialog.ShowAlphaChannel,
@@ -2940,7 +2942,7 @@ def _open_curve_settings_dialog(app, entry: dict, parent) -> None:
     entry["show_ic"] = bool(show_ic_cb.isChecked())
     if entry.get("is_preview"):
         app.data_fit_preview_style = dict(entry["curve_style"])
-        app.data_fit_preview_color = entry.get("color", "#1f77b4")
+        app.data_fit_preview_color = entry.get("color", "#0b4f8a")
         app.data_fit_preview_alpha_pct = int(entry.get("alpha_pct", 100))
     _refresh_curve_item(entry)
 
@@ -2962,7 +2964,7 @@ def _open_plot_summary(app) -> None:
         curves = [{
             "signature": ("__preview__",),
             "label": app.data_fit_y_cb.currentText(),
-            "color": getattr(app, "data_fit_preview_color", "#1f77b4"),
+            "color": getattr(app, "data_fit_preview_color", "#0b4f8a"),
             "alpha_pct": int(getattr(app, "data_fit_preview_alpha_pct", 100)),
             "skip_points": 1,
             "include_in_fit": bool(getattr(app, "data_fit_preview_include_in_fit", True)),
