@@ -881,7 +881,7 @@ def setup_data_fitting_tab_layout(app):
     toolbar = QGridLayout()
     app.data_fit_graph_btn = QPushButton("Graph settings…")
     app.data_fit_graph_btn.setToolTip(
-        "Open graph settings for scale, tick labels, title, grids, line and ticks."
+        "Open graph settings for scale, title, grids, and combined line/ticks/labels."
     )
     app.data_fit_zoom_mode_btn = QPushButton("Zoom Mode")
     app.data_fit_zoom_mode_btn.setCheckable(True)
@@ -2520,7 +2520,11 @@ def _post_fit_warnings(app, result, settings) -> None:
 
 
 def _open_graph_settings(app) -> None:
-    dialog = GraphSettingsDialog(app.data_fit_graph_settings, app)
+    def _apply_live(settings: GraphSettings) -> None:
+        app.data_fit_graph_settings = settings
+        refresh_preview(app)
+
+    dialog = GraphSettingsDialog(app.data_fit_graph_settings, app, on_apply=_apply_live)
     if dialog.exec_() == dialog.Accepted:
         app.data_fit_graph_settings = dialog.result_settings()
         refresh_preview(app)

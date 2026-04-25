@@ -13,7 +13,7 @@ import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pyqtgraph as pg
 from pyqtgraph import exporters
@@ -869,6 +869,26 @@ class _LinePanel(QWidget):
         self._lt.minor_length = int(self.minor_len_sb.value())
 
 
+class _LineAndTickLabelsPanel(QWidget):
+    """Single side-panel that combines line/tick geometry with tick-label format."""
+
+    def __init__(self, lt: LineAndTicks, labels: TickLabels, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        self._line_panel = _LinePanel(lt)
+        self._labels_panel = _TickLabelsPanel(labels)
+        self._labels_group = QGroupBox("Tick Labels")
+        labels_layout = QVBoxLayout(self._labels_group)
+        labels_layout.addWidget(self._labels_panel)
+        layout.addWidget(self._line_panel)
+        layout.addWidget(self._labels_group)
+        layout.addStretch()
+
+    def commit(self) -> None:
+        self._line_panel.commit()
+        self._labels_panel.commit()
+
+
 class _CurvePanel(QWidget):
     def __init__(self, settings: GraphSettings, parent=None):
         super().__init__(parent)
@@ -943,11 +963,17 @@ class _PlotTitlePanel(QWidget):
 class GraphSettingsDialog(QDialog):
     """Tabbed graph-settings dialog mirroring the familiar OriginLab layout."""
 
-    def __init__(self, settings: GraphSettings, parent=None):
+    def __init__(
+        self,
+        settings: GraphSettings,
+        parent=None,
+        on_apply: Optional[Callable[[GraphSettings], None]] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Graph settings")
         self.resize(700, 600)
         self._settings = deepcopy(settings)
+        self._on_apply = on_apply
         self._panels: list[Any] = []
         self._build()
 
@@ -966,19 +992,23 @@ class GraphSettingsDialog(QDialog):
 
         tabs.addTab(_AxisSelectorTab(scale_keys, _scale_factory), "Scale")
 
-        # Tick Labels tab: Bottom / Top / Left / Right.
+        # Axis lines + tick labels tab: Bottom / Top / Left / Right.
         side_keys = ("Bottom", "Top", "Left", "Right")
+        line_map = {
+            "Bottom": self._settings.line_bottom, "Top": self._settings.line_top,
+            "Left": self._settings.line_left, "Right": self._settings.line_right,
+        }
         ticks_map = {
             "Bottom": self._settings.ticks_bottom, "Top": self._settings.ticks_top,
             "Left": self._settings.ticks_left, "Right": self._settings.ticks_right,
         }
 
-        def _ticks_factory(key: str):
-            panel = _TickLabelsPanel(ticks_map[key])
+        def _axis_line_ticks_factory(key: str):
+            panel = _LineAndTickLabelsPanel(line_map[key], ticks_map[key])
             self._panels.append(panel)
             return panel
 
-        tabs.addTab(_AxisSelectorTab(side_keys, _ticks_factory), "Tick Labels")
+        tabs.addTab(_AxisSelectorTab(side_keys, _axis_line_ticks_factory), "Line, Ticks, Labels")
 
         # Title tab.
         titles_map = {
@@ -1004,19 +1034,6 @@ class GraphSettingsDialog(QDialog):
 
         tabs.addTab(_AxisSelectorTab(grid_keys, _grid_factory), "Grids")
 
-        # Line and Ticks tab.
-        line_map = {
-            "Bottom": self._settings.line_bottom, "Top": self._settings.line_top,
-            "Left": self._settings.line_left, "Right": self._settings.line_right,
-        }
-
-        def _line_factory(key: str):
-            panel = _LinePanel(line_map[key])
-            self._panels.append(panel)
-            return panel
-
-        tabs.addTab(_AxisSelectorTab(side_keys, _line_factory), "Line and Ticks")
-
         # Plot title tab.
         title_panel = _PlotTitlePanel(self._settings)
         self._panels.append(title_panel)
@@ -1024,10 +1041,16 @@ class GraphSettingsDialog(QDialog):
 
         root.addWidget(tabs)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.Apply).clicked.connect(self._apply_clicked)
         root.addWidget(buttons)
+
+    def _apply_clicked(self) -> None:
+        self.result_settings()
+        if self._on_apply is not None:
+            self._on_apply(self._settings)
 
     def result_settings(self) -> GraphSettings:
         for p in self._panels:
