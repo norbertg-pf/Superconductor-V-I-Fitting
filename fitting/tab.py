@@ -895,6 +895,9 @@ def setup_data_fitting_tab_layout(app):
 
     right_widget = QWidget()
     right = QVBoxLayout(right_widget)
+    # Keep a small right padding so right-side ticks/labels are never clipped
+    # by the window edge on narrow displays.
+    right.setContentsMargins(0, 0, 14, 0)
 
     # ---- Header row: equation + channels ----
     header = QHBoxLayout()
