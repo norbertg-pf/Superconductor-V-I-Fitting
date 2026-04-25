@@ -1537,6 +1537,7 @@ def refresh_preview(app):
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
     transformed = _apply_transforms(app)
+    t = transformed["time"]
     x = transformed["x"]
     y = transformed["y"]
     app.data_fit_model_curve.setData([], [])
@@ -1578,7 +1579,8 @@ def refresh_preview(app):
     x_max_full = float(np.max(x[:n]))
     _apply_robust_view(app, x[:n], y[:n])
     _refresh_all_x_values(app)
-    _update_fit_bands(app, x[:n], y[:n])
+    t_view = t[:n] if (t is not None and np.asarray(t).size >= n) else None
+    _update_fit_bands(app, x[:n], y[:n], t=t_view)
     _update_band_states(app)
     app.data_fit_xrange_label.setText(f"X window: [{x_min_full:.6g}, {x_max_full:.6g}]")
 
@@ -1605,7 +1607,7 @@ def _xform_from_view(val: float, is_log: bool) -> float:
     return float(10.0 ** float(val))
 
 
-def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
+def _update_fit_bands(app, x: np.ndarray, y: np.ndarray, *, t: Optional[np.ndarray] = None) -> None:
     """Update the three semi-transparent bands that show the configured windows.
 
     LinearRegionItem values are in plot view coordinates, which in log-log
@@ -1644,14 +1646,30 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        if y is not None and y.size:
+        pow_pair = None
+        # Prefer the exact IEC window from the same Step 1..4 pipeline used by
+        # the fit engine. This keeps the orange "Show / edit" band aligned with
+        # the I-window reported after Run Fit.
+        if t is not None and y is not None and np.asarray(t).size == np.asarray(x).size:
+            try:
+                preview_result = run_full_fit(np.asarray(t), np.asarray(x), np.asarray(y), _settings_from_inputs(app))
+                if preview_result.ok:
+                    lo, hi = preview_result.n_window_I
+                    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                        pow_pair = (float(lo), float(hi))
+            except Exception:
+                pow_pair = None
+        # Fallback for cases where a preview fit is not possible yet.
+        if pow_pair is None and y is not None and y.size:
             above_1 = np.where(y >= ec1)[0]
             above_2 = np.where(y >= ec2)[0]
             pow_lo = float(x[above_1[0]]) if above_1.size else x_max
             pow_hi = float(x[above_2[0]]) if above_2.size else x_max
             if pow_hi <= pow_lo:
                 pow_hi = pow_lo + max(1e-12, 0.01 * span)
-            band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+            pow_pair = (pow_lo, pow_hi)
+        if pow_pair is not None:
+            band_pairs.append((app.data_fit_band_power, pow_pair))
     else:
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
