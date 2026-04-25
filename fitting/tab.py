@@ -3297,7 +3297,7 @@ def _build_fit_diagram_pixmap():
     pw = W - margin_l - margin_r
     ph = H - margin_t - margin_b
 
-    painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
+    painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
     painter.setPen(QColor("#003a75"))
     painter.drawText(QRectF(0, 10, W, 28), Qt.AlignHCenter,
                      "Anatomy of a V–I curve")
@@ -3321,8 +3321,8 @@ def _build_fit_diagram_pixmap():
         return py + ph - (v / vmax) * ph
 
     bands = [
-        (0.00, 0.05, QColor(255, 178, 90, 70),  "#a85a00", "offset"),
-        (0.05, 0.32, QColor(120, 180, 255, 80), "#0a4a8c", "linear  R · I"),
+        (0.00, 0.10, QColor(255, 178, 90, 70),  "#a85a00", "offset"),
+        (0.10, 0.34, QColor(120, 180, 255, 80), "#0a4a8c", "linear  R · I"),
         (0.45, 0.97, QColor(255, 120, 120, 80), "#8a1f2a", "power-law  V_c·(I/I_c)ⁿ"),
     ]
 
@@ -3332,16 +3332,16 @@ def _build_fit_diagram_pixmap():
         painter.drawRect(QRectF(mx(lo), py, mx(hi) - mx(lo), ph))
 
     painter.setBrush(Qt.NoBrush)
-    painter.setPen(QPen(QColor("#1c2733"), 1.5))
+    painter.setPen(QPen(QColor("#1c2733"), 1.8))
     painter.drawRect(QRectF(px, py, pw, ph))
 
-    painter.setPen(QPen(QColor("#a85a00"), 1.6, Qt.DashLine))
+    painter.setPen(QPen(QColor("#a85a00"), 2.0, Qt.DashLine))
     painter.drawLine(QPointF(px, my(Vofs)), QPointF(px + pw, my(Vofs)))
-    painter.setPen(QPen(QColor("#0a4a8c"), 1.6, Qt.DashLine))
+    painter.setPen(QPen(QColor("#0a4a8c"), 2.0, Qt.DashLine))
     painter.drawLine(QPointF(mx(0.0), my(Vofs)),
                      QPointF(mx(1.0), my(Vofs + R)))
 
-    painter.setPen(QPen(QColor("#1c2733"), 2.8))
+    painter.setPen(QPen(QColor("#1c2733"), 3.2))
     path = QPainterPath()
     path.moveTo(mx(curve[0][0]), my(curve[0][1]))
     for i, v in curve[1:]:
@@ -3353,17 +3353,17 @@ def _build_fit_diagram_pixmap():
 
     icx = mx(Ic_n)
     vcrit = V_of(Ic_n)
-    painter.setPen(QPen(QColor("#cc2244"), 1.4, Qt.DashLine))
+    painter.setPen(QPen(QColor("#cc2244"), 1.8, Qt.DashLine))
     painter.drawLine(QPointF(icx, py), QPointF(icx, py + ph))
     painter.drawLine(QPointF(px, my(vcrit)), QPointF(px + pw, my(vcrit)))
 
-    painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    painter.setFont(QFont("Segoe UI", 12, QFont.Bold))
     painter.setPen(QColor("#cc2244"))
-    painter.drawText(QPointF(icx + 6, py + 18), "I_c")
-    painter.drawText(QPointF(px + 8, my(vcrit) - 5), "V_c criterion")
+    painter.drawText(QPointF(icx + 8, py + 20), "I_c")
+    painter.drawText(QPointF(px + 10, my(vcrit) - 6), "V_c criterion")
 
     painter.setPen(QColor("#1c2733"))
-    painter.setFont(QFont("Segoe UI", 11))
+    painter.setFont(QFont("Segoe UI", 12, QFont.Bold))
     painter.drawText(QRectF(px, py + ph + 22, pw, 24),
                      Qt.AlignHCenter, "Current  I  →")
     painter.save()
@@ -3373,11 +3373,11 @@ def _build_fit_diagram_pixmap():
                      Qt.AlignHCenter, "Voltage  V  →")
     painter.restore()
 
-    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     for lo, hi, _, ink, name in bands:
         painter.setPen(QColor(ink))
         painter.drawText(
-            QRectF(mx(lo), py - 18, mx(hi) - mx(lo), 14),
+            QRectF(mx(lo), py - 20, mx(hi) - mx(lo), 16),
             Qt.AlignCenter, name,
         )
 
@@ -3389,25 +3389,25 @@ def _build_fit_diagram_pixmap():
         (QColor("#0a4a8c"), Qt.DashLine,  "V_ofs + R·I"),
         (QColor("#cc2244"), Qt.DashLine,  "I_c / V_c"),
     ]
-    painter.setFont(QFont("Segoe UI", 9))
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     for k, (color, style, name) in enumerate(legend_items):
-        y = legend_y + k * 22
-        painter.setPen(QPen(color, 2.0, style))
+        y = legend_y + k * 24
+        painter.setPen(QPen(color, 2.4, style))
         painter.drawLine(QPointF(legend_x, y),
-                         QPointF(legend_x + 32, y))
+                         QPointF(legend_x + 36, y))
         painter.setPen(QColor("#1c2733"))
-        painter.drawText(QPointF(legend_x + 40, y + 4), name)
+        painter.drawText(QPointF(legend_x + 44, y + 5), name)
 
-    note_y = legend_y + len(legend_items) * 22 + 16
-    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    note_y = legend_y + len(legend_items) * 24 + 18
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     painter.setPen(QColor("#003a75"))
     painter.drawText(QPointF(legend_x, note_y), "Model")
-    painter.setFont(QFont("Consolas", 9))
+    painter.setFont(QFont("Consolas", 10, QFont.Bold))
     painter.setPen(QColor("#1c2733"))
     eq_lines = ["V = V_ofs", "   + L · dI/dt",
                 "   + R · I", "   + V_c·(I/I_c)ⁿ"]
     for k, ln in enumerate(eq_lines):
-        painter.drawText(QPointF(legend_x, note_y + 18 + k * 14), ln)
+        painter.drawText(QPointF(legend_x, note_y + 20 + k * 16), ln)
 
     painter.end()
     return pix
@@ -3430,20 +3430,24 @@ def _build_loglog_diagram_pixmap():
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setRenderHint(QPainter.TextAntialiasing, True)
 
-    margin_l, margin_r, margin_t, margin_b = 110, 220, 60, 70
+    margin_l, margin_r, margin_t, margin_b = 140, 220, 60, 70
     px, py = margin_l, margin_t
     pw = W - margin_l - margin_r
     ph = H - margin_t - margin_b
 
-    painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
+    painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
     painter.setPen(QColor("#003a75"))
     painter.drawText(QRectF(0, 10, W, 28), Qt.AlignHCenter,
                      "Log–log linear fit (IEC 61788)")
 
-    x_min, x_max = -0.55, 0.10        # log10(I / Ic)
-    y_min, y_max = -7.6, -5.4         # log10(E_sc) [V/cm]
+    # Realistic-ish HTS tape sample (2 mm REBCO @ 77 K, Ls = 1 cm):
+    # Ic ≈ 100 A, n ≈ 28, criterion Ec2 = 1 µV/cm, Ec1 = 0.1 µV/cm,
+    # voltage noise floor ≈ 30 nV (post-averaging) → log10 ≈ −7.5.
+    x_min, x_max = -0.45, 0.06        # log10(I / Ic): ~0.36·Ic .. 1.15·Ic
+    y_min, y_max = -8.0, -5.4         # log10(V′)  [V or V/cm]
     log_Ec1, log_Ec2 = -7.0, -6.0     # 0.1 µV/cm and 1 µV/cm
-    n_slope = 24.0
+    log_floor = -7.55                 # noise floor of V′ (≈ 28 nV/cm)
+    n_slope = 28.0                    # n-value of the modelled tape
 
     def line_y(log_I_norm: float) -> float:
         return n_slope * log_I_norm + log_Ec2
@@ -3456,71 +3460,108 @@ def _build_loglog_diagram_pixmap():
 
     # Decade window shading.
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor(120, 200, 130, 60))
+    painter.setBrush(QColor(120, 200, 130, 70))
     painter.drawRect(QRectF(px, my(log_Ec2),
                             pw, my(log_Ec1) - my(log_Ec2)))
 
     # Plot frame.
     painter.setBrush(Qt.NoBrush)
-    painter.setPen(QPen(QColor("#1c2733"), 1.5))
+    painter.setPen(QPen(QColor("#1c2733"), 1.8))
     painter.drawRect(QRectF(px, py, pw, ph))
 
     # Ec1 / Ec2 horizontal references.
-    painter.setPen(QPen(QColor("#2d8a3a"), 1.4, Qt.DashLine))
+    painter.setPen(QPen(QColor("#2d8a3a"), 1.8, Qt.DashLine))
     painter.drawLine(QPointF(px, my(log_Ec1)), QPointF(px + pw, my(log_Ec1)))
     painter.drawLine(QPointF(px, my(log_Ec2)), QPointF(px + pw, my(log_Ec2)))
-    painter.setFont(QFont("Segoe UI", 9))
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     painter.setPen(QColor("#1f5b2c"))
-    painter.drawText(QPointF(px - 78, my(log_Ec1) + 4), "log E_c1")
-    painter.drawText(QPointF(px - 78, my(log_Ec2) + 4), "log E_c2")
+    painter.drawText(QPointF(px - 78, my(log_Ec1) + 5), "log E_c1")
+    painter.drawText(QPointF(px - 78, my(log_Ec2) + 5), "log E_c2")
 
     # Vertical line at I = Ic (log_I_norm = 0).
-    painter.setPen(QPen(QColor("#cc2244"), 1.4, Qt.DashLine))
+    painter.setPen(QPen(QColor("#cc2244"), 1.8, Qt.DashLine))
     painter.drawLine(QPointF(mx(0.0), py), QPointF(mx(0.0), py + ph))
-    painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    painter.setFont(QFont("Segoe UI", 12, QFont.Bold))
     painter.setPen(QColor("#cc2244"))
-    painter.drawText(QPointF(mx(0.0) + 6, py + 18), "I = I_c")
+    painter.drawText(QPointF(mx(0.0) + 8, py + 22), "I = I_c")
 
-    # Synthetic noisy points: blue inside the decade window, grey outside.
-    random.seed(42)
+    # Realistic measurement-style data:
+    # • Below the noise floor V′ is dominated by amplifier noise → points
+    #   scatter around log_floor with σ ≈ 0.13 in log space.
+    # • Above the floor V′ tracks the power-law line with multiplicative
+    #   noise σ_log ≈ 0.06 (~14 % on V).
+    # • Real ramps are linear in I, so the X spacing is uniform and a
+    #   given decade contains many samples — typical of a 1–5 A/s ramp
+    #   sampled at 1 kHz over a few hundred ms of transition.
+    random.seed(11)
+    n_data = 240
+    sigma_above = 0.06
+    sigma_floor = 0.13
+    # log_I_norm at which the underlying signal first overtakes the noise
+    # floor; below this, even a "blue" scatter would not really be a
+    # transition-segment point (mirrors how the IEC routine selects the
+    # monotonic rise).
+    log_I_onset = (log_floor - log_Ec2) / n_slope
     pts = []
-    for k in range(80):
-        x_n = x_min + (x_max - x_min) * (k / 79.0)
-        y_n = line_y(x_n) + random.gauss(0.0, 0.05)
-        pts.append((x_n, y_n))
+    for k in range(n_data):
+        log_I_norm = x_min + (x_max - x_min) * (k / (n_data - 1))
+        v_true = line_y(log_I_norm)
+        if v_true >= log_floor + 0.40:
+            v_obs = v_true + random.gauss(0.0, sigma_above)
+        elif v_true >= log_floor - 0.40:
+            # Soft-knee: a smooth blend of true signal and noise floor.
+            blend = (v_true - (log_floor - 0.40)) / 0.80
+            v_obs = (
+                blend * (v_true + random.gauss(0.0, sigma_above))
+                + (1.0 - blend) * (log_floor + random.gauss(0.0, sigma_floor))
+            )
+        else:
+            v_obs = log_floor + random.gauss(0.0, sigma_floor)
+        pts.append((log_I_norm, v_obs))
+
+    painter.save()
+    painter.setClipRect(QRectF(px, py, pw, ph))
     painter.setPen(Qt.NoPen)
     for x_n, y_n in pts:
         if not (y_min <= y_n <= y_max):
             continue
-        in_band = log_Ec1 <= y_n <= log_Ec2
+        on_transition = x_n > log_I_onset
+        in_band = (log_Ec1 <= y_n <= log_Ec2) and on_transition
         if in_band:
             painter.setBrush(QColor("#0a4a8c"))
-            r = 3.4
+            r = 3.8
         else:
-            painter.setBrush(QColor(150, 150, 160))
-            r = 2.4
+            painter.setBrush(QColor(135, 138, 148, 215))
+            r = 2.8
         painter.drawEllipse(QPointF(mx(x_n), my(y_n)), r, r)
+    painter.restore()
 
-    # Fitted line, clipped to the plot rectangle.
+    # Fitted line, clipped to the plot rectangle. Draw it on top of the
+    # data with a slight white halo so it stays legible across the dots.
     painter.save()
     painter.setClipRect(QRectF(px, py, pw, ph))
-    painter.setPen(QPen(QColor("#cc2244"), 2.6))
+    painter.setPen(QPen(QColor(255, 255, 255, 180), 5.0))
+    painter.drawLine(
+        QPointF(mx(x_min), my(line_y(x_min))),
+        QPointF(mx(x_max), my(line_y(x_max))),
+    )
+    painter.setPen(QPen(QColor("#cc2244"), 2.8))
     painter.drawLine(
         QPointF(mx(x_min), my(line_y(x_min))),
         QPointF(mx(x_max), my(line_y(x_max))),
     )
     painter.restore()
 
-    # Slope annotation.
-    painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    # Slope annotation, placed above the fitted line near the band.
+    painter.setFont(QFont("Segoe UI", 12, QFont.Bold))
     painter.setPen(QColor("#cc2244"))
-    painter.drawText(QPointF(mx(-0.30) + 12, my(line_y(-0.30)) - 8),
+    painter.drawText(QPointF(mx(-0.18) + 10, my(line_y(-0.18)) - 10),
                      "slope = n")
 
     # Axis labels.
     painter.setPen(QColor("#1c2733"))
-    painter.setFont(QFont("Segoe UI", 11))
-    painter.drawText(QRectF(px, py + ph + 22, pw, 24),
+    painter.setFont(QFont("Segoe UI", 12, QFont.Bold))
+    painter.drawText(QRectF(px, py + ph + 24, pw, 24),
                      Qt.AlignHCenter, "log₁₀ ( I / I_c )")
     painter.save()
     painter.translate(28, py + ph / 2)
@@ -3530,9 +3571,9 @@ def _build_loglog_diagram_pixmap():
     painter.restore()
 
     # Decade-window label inside the band.
-    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     painter.setPen(QColor("#1f5b2c"))
-    painter.drawText(QPointF(px + 8, my(log_Ec2) - 4),
+    painter.drawText(QPointF(px + 10, my(log_Ec2) - 5),
                      "IEC decade window  [E_c1 , E_c2]")
 
     # Legend on the right.
@@ -3540,25 +3581,25 @@ def _build_loglog_diagram_pixmap():
     legend_y = py + 6
     items = [
         (QColor("#0a4a8c"), "in-window data"),
-        (QColor(150, 150, 160), "outside window"),
+        (QColor(140, 140, 150), "outside window"),
         (QColor("#cc2244"), "linear fit"),
         (QColor("#2d8a3a"), "Ec1 / Ec2"),
         (QColor("#cc2244"), "I_c at E = Ec2"),
     ]
-    painter.setFont(QFont("Segoe UI", 9))
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     for k, (color, name) in enumerate(items):
-        y = legend_y + k * 22
+        y = legend_y + k * 24
         painter.setPen(Qt.NoPen)
         painter.setBrush(color)
-        painter.drawEllipse(QPointF(legend_x + 12, y), 4.5, 4.5)
+        painter.drawEllipse(QPointF(legend_x + 12, y), 5.5, 5.5)
         painter.setPen(QColor("#1c2733"))
-        painter.drawText(QPointF(legend_x + 26, y + 4), name)
+        painter.drawText(QPointF(legend_x + 28, y + 5), name)
 
-    note_y = legend_y + len(items) * 22 + 14
-    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    note_y = legend_y + len(items) * 24 + 18
+    painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
     painter.setPen(QColor("#003a75"))
     painter.drawText(QPointF(legend_x, note_y), "How it fits")
-    painter.setFont(QFont("Consolas", 9))
+    painter.setFont(QFont("Consolas", 10, QFont.Bold))
     painter.setPen(QColor("#1c2733"))
     eq_lines = [
         "V′ = V − V_ofs − R·I",
@@ -3566,7 +3607,7 @@ def _build_loglog_diagram_pixmap():
         "I_c : V′(I_c) = E_c2",
     ]
     for k, ln in enumerate(eq_lines):
-        painter.drawText(QPointF(legend_x, note_y + 18 + k * 14), ln)
+        painter.drawText(QPointF(legend_x, note_y + 20 + k * 16), ln)
 
     painter.end()
     return pix
