@@ -3309,7 +3309,10 @@ def _build_fit_diagram_pixmap():
 
     n_pts = 400
     curve = [(k / (n_pts - 1), V_of(k / (n_pts - 1))) for k in range(n_pts)]
-    vmax = max(v for _, v in curve) * 1.06
+    # Cap the y-axis so the offset, the linear slope, and the V_c criterion
+    # line are all clearly visible — the power-law branch is allowed to exit
+    # the top of the plot rectangle (it is then clipped at the frame).
+    vmax = max(Vofs + R + 2.0 * Vc, 3.0 * Vc)
 
     def mx(i: float) -> float:
         return px + i * pw
@@ -3343,7 +3346,10 @@ def _build_fit_diagram_pixmap():
     path.moveTo(mx(curve[0][0]), my(curve[0][1]))
     for i, v in curve[1:]:
         path.lineTo(mx(i), my(v))
+    painter.save()
+    painter.setClipRect(QRectF(px, py, pw, ph))
     painter.drawPath(path)
+    painter.restore()
 
     icx = mx(Ic_n)
     vcrit = V_of(Ic_n)
@@ -3400,6 +3406,165 @@ def _build_fit_diagram_pixmap():
     painter.setPen(QColor("#1c2733"))
     eq_lines = ["V = V_ofs", "   + L · dI/dt",
                 "   + R · I", "   + V_c·(I/I_c)ⁿ"]
+    for k, ln in enumerate(eq_lines):
+        painter.drawText(QPointF(legend_x, note_y + 18 + k * 14), ln)
+
+    painter.end()
+    return pix
+
+
+def _build_loglog_diagram_pixmap():
+    """Render a schematic of the IEC log-log linear fit.
+
+    Shows log10(V - V_ofs - R·I) vs log10(I/Ic): a straight line whose
+    slope is n, with the IEC decade window between Ec1 and Ec2 shaded.
+    """
+    import random
+    from PyQt5.QtCore import Qt, QRectF, QPointF
+    from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont
+
+    W, H = 880, 500
+    pix = QPixmap(W, H)
+    pix.fill(QColor("white"))
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+    margin_l, margin_r, margin_t, margin_b = 110, 220, 60, 70
+    px, py = margin_l, margin_t
+    pw = W - margin_l - margin_r
+    ph = H - margin_t - margin_b
+
+    painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
+    painter.setPen(QColor("#003a75"))
+    painter.drawText(QRectF(0, 10, W, 28), Qt.AlignHCenter,
+                     "Log–log linear fit (IEC 61788)")
+
+    x_min, x_max = -0.55, 0.10        # log10(I / Ic)
+    y_min, y_max = -7.6, -5.4         # log10(E_sc) [V/cm]
+    log_Ec1, log_Ec2 = -7.0, -6.0     # 0.1 µV/cm and 1 µV/cm
+    n_slope = 24.0
+
+    def line_y(log_I_norm: float) -> float:
+        return n_slope * log_I_norm + log_Ec2
+
+    def mx(log_I: float) -> float:
+        return px + (log_I - x_min) / (x_max - x_min) * pw
+
+    def my(log_V: float) -> float:
+        return py + ph - (log_V - y_min) / (y_max - y_min) * ph
+
+    # Decade window shading.
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(120, 200, 130, 60))
+    painter.drawRect(QRectF(px, my(log_Ec2),
+                            pw, my(log_Ec1) - my(log_Ec2)))
+
+    # Plot frame.
+    painter.setBrush(Qt.NoBrush)
+    painter.setPen(QPen(QColor("#1c2733"), 1.5))
+    painter.drawRect(QRectF(px, py, pw, ph))
+
+    # Ec1 / Ec2 horizontal references.
+    painter.setPen(QPen(QColor("#2d8a3a"), 1.4, Qt.DashLine))
+    painter.drawLine(QPointF(px, my(log_Ec1)), QPointF(px + pw, my(log_Ec1)))
+    painter.drawLine(QPointF(px, my(log_Ec2)), QPointF(px + pw, my(log_Ec2)))
+    painter.setFont(QFont("Segoe UI", 9))
+    painter.setPen(QColor("#1f5b2c"))
+    painter.drawText(QPointF(px - 78, my(log_Ec1) + 4), "log E_c1")
+    painter.drawText(QPointF(px - 78, my(log_Ec2) + 4), "log E_c2")
+
+    # Vertical line at I = Ic (log_I_norm = 0).
+    painter.setPen(QPen(QColor("#cc2244"), 1.4, Qt.DashLine))
+    painter.drawLine(QPointF(mx(0.0), py), QPointF(mx(0.0), py + ph))
+    painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    painter.setPen(QColor("#cc2244"))
+    painter.drawText(QPointF(mx(0.0) + 6, py + 18), "I = I_c")
+
+    # Synthetic noisy points: blue inside the decade window, grey outside.
+    random.seed(42)
+    pts = []
+    for k in range(80):
+        x_n = x_min + (x_max - x_min) * (k / 79.0)
+        y_n = line_y(x_n) + random.gauss(0.0, 0.05)
+        pts.append((x_n, y_n))
+    painter.setPen(Qt.NoPen)
+    for x_n, y_n in pts:
+        if not (y_min <= y_n <= y_max):
+            continue
+        in_band = log_Ec1 <= y_n <= log_Ec2
+        if in_band:
+            painter.setBrush(QColor("#0a4a8c"))
+            r = 3.4
+        else:
+            painter.setBrush(QColor(150, 150, 160))
+            r = 2.4
+        painter.drawEllipse(QPointF(mx(x_n), my(y_n)), r, r)
+
+    # Fitted line, clipped to the plot rectangle.
+    painter.save()
+    painter.setClipRect(QRectF(px, py, pw, ph))
+    painter.setPen(QPen(QColor("#cc2244"), 2.6))
+    painter.drawLine(
+        QPointF(mx(x_min), my(line_y(x_min))),
+        QPointF(mx(x_max), my(line_y(x_max))),
+    )
+    painter.restore()
+
+    # Slope annotation.
+    painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    painter.setPen(QColor("#cc2244"))
+    painter.drawText(QPointF(mx(-0.30) + 12, my(line_y(-0.30)) - 8),
+                     "slope = n")
+
+    # Axis labels.
+    painter.setPen(QColor("#1c2733"))
+    painter.setFont(QFont("Segoe UI", 11))
+    painter.drawText(QRectF(px, py + ph + 22, pw, 24),
+                     Qt.AlignHCenter, "log₁₀ ( I / I_c )")
+    painter.save()
+    painter.translate(28, py + ph / 2)
+    painter.rotate(-90)
+    painter.drawText(QRectF(-180, -10, 360, 20),
+                     Qt.AlignHCenter, "log₁₀ ( V − V_ofs − R · I )")
+    painter.restore()
+
+    # Decade-window label inside the band.
+    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    painter.setPen(QColor("#1f5b2c"))
+    painter.drawText(QPointF(px + 8, my(log_Ec2) - 4),
+                     "IEC decade window  [E_c1 , E_c2]")
+
+    # Legend on the right.
+    legend_x = px + pw + 18
+    legend_y = py + 6
+    items = [
+        (QColor("#0a4a8c"), "in-window data"),
+        (QColor(150, 150, 160), "outside window"),
+        (QColor("#cc2244"), "linear fit"),
+        (QColor("#2d8a3a"), "Ec1 / Ec2"),
+        (QColor("#cc2244"), "I_c at E = Ec2"),
+    ]
+    painter.setFont(QFont("Segoe UI", 9))
+    for k, (color, name) in enumerate(items):
+        y = legend_y + k * 22
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(legend_x + 12, y), 4.5, 4.5)
+        painter.setPen(QColor("#1c2733"))
+        painter.drawText(QPointF(legend_x + 26, y + 4), name)
+
+    note_y = legend_y + len(items) * 22 + 14
+    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    painter.setPen(QColor("#003a75"))
+    painter.drawText(QPointF(legend_x, note_y), "How it fits")
+    painter.setFont(QFont("Consolas", 9))
+    painter.setPen(QColor("#1c2733"))
+    eq_lines = [
+        "V′ = V − V_ofs − R·I",
+        "log V′ = n·log I + b",
+        "I_c : V′(I_c) = E_c2",
+    ]
     for k, ln in enumerate(eq_lines):
         painter.drawText(QPointF(legend_x, note_y + 18 + k * 14), ln)
 
@@ -3467,17 +3632,99 @@ def _open_help_dialog(app) -> None:
 
     overview_html = base_css + """
     <h1>Superconductor V&ndash;I Fitting</h1>
-    <p>This tool extracts the <b>critical current <span class="mono">Iₒ</span></b>,
-    the <b>n&#8209;value</span></b> and the <b>resistive baseline</b> from a recorded
-    voltage&ndash;current ramp using the IEC 61788 power&#8209;law criterion.</p>
+    <p>This tool extracts the <b>critical current <span class="mono">I<sub>c</sub></span></b>,
+    the <b>n&#8209;value</b> and the <b>resistive baseline</b> from a recorded
+    voltage&ndash;current ramp. Two complementary fitting methods are available
+    (selectable on the left panel).</p>
 
     <p style="text-align:center; margin: 6px 0 2px 0;">
       <img src="fit-diagram://overview" width="820">
     </p>
     <p style="text-align:center; color:#5a6472; font-size:10pt; margin: 0 0 10px 0;">
-      <i>Schematic: the three additive parts of the model and the
-      <span class="mono">Iₒ</span> / <span class="mono">Vₒ</span> criterion.</i>
+      <i>Schematic in <b>linear axes</b>: the three additive parts of the model
+      and the <span class="mono">I<sub>c</sub></span> /
+      <span class="mono">V<sub>c</sub></span> criterion.
+      The log&ndash;log view of the same data is on the next tab.</i>
     </p>
+
+    <h2>The two fitting methods</h2>
+    <table>
+      <tr>
+        <th style="width:50%;">Log&ndash;log linear&nbsp;
+          <span class="pill">IEC 61788 standard</span></th>
+        <th style="width:50%;">Non&#8209;linear (Levenberg&ndash;Marquardt)</th>
+      </tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Subtracts the linear baseline first
+              (<code>V′ = V − V<sub>ofs</sub> − R·I</code>).</li>
+            <li>Fits <code>log V′</code> vs <code>log I</code> with a
+              straight line on the IEC <b>decade window</b>
+              <code>[E<sub>c1</sub>, E<sub>c2</sub>]</code>.</li>
+            <li>Slope = <span class="mono">n</span>;
+              <span class="mono">I<sub>c</sub></span> at <code>V′ = E<sub>c2</sub></code>.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>Fits the full model
+              <code>V = V<sub>ofs</sub> + L·dI/dt + R·I + V<sub>c</sub>·(I/I<sub>c</sub>)<sup>n</sup></code>
+              directly to the raw V&ndash;I data.</li>
+            <li>Solves for all parameters simultaneously inside an outer
+              self&#8209;consistency loop on
+              <span class="mono">I<sub>c</sub></span>.</li>
+          </ul>
+        </td>
+      </tr>
+      <tr>
+        <th>Pros</th><th>Pros</th>
+      </tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Reference method per IEC 61788 → reproducible across labs.</li>
+            <li>Closed&#8209;form linear regression: very fast, no convergence issues.</li>
+            <li>Robust against multiplicative noise on V.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>Returns proper σ on every parameter from the covariance matrix.</li>
+            <li>Handles non&#8209;negligible inductive / baseline coupling natively.</li>
+            <li>Uses the entire ramp, not only the decade window.</li>
+          </ul>
+        </td>
+      </tr>
+      <tr>
+        <th>Cons</th><th>Cons</th>
+      </tr>
+      <tr>
+        <td>
+          <ul>
+            <li>Sensitive to errors in the pre&#8209;subtracted baseline
+              <code>(V<sub>ofs</sub>, R)</code>.</li>
+            <li>Only the data inside the decade window is used.</li>
+            <li>Needs ≥ a few dozen samples between
+              <code>E<sub>c1</sub></code> and <code>E<sub>c2</sub></code>.</li>
+          </ul>
+        </td>
+        <td>
+          <ul>
+            <li>Slower; can fail to converge if windows or seeds are poor.</li>
+            <li>Baseline and transition compete in the residual &mdash; sensitive
+              to a wrongly chosen power&#8209;law window.</li>
+            <li>No standardized acceptance criterion.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+    <div class="tip"><b>Default &amp; recommendation:</b> the tab starts in
+      <b>log&ndash;log linear</b> mode because that is the IEC&nbsp;61788
+      reference method for reporting <span class="mono">I<sub>c</sub></span> and
+      <span class="mono">n</span>. Switch to <b>non&#8209;linear</b> only when the
+      log&ndash;log fit reports <i>insufficient n&#8209;window points</i> or
+      when the ramp is noticeably inductive.</div>
 
     <h2>The model</h2>
     <p>Without a sample length the fitted relation is:</p>
@@ -3507,6 +3754,76 @@ def _open_help_dialog(app) -> None:
 
     <div class="tip"><b>Tip:</b> Hover any field to see a tooltip. Each curve can
     be saved as a profile so its window settings persist between sessions.</div>
+    """
+
+    loglog_html = base_css + """
+    <h1>Log&ndash;log linear fit
+      <span class="pill">IEC 61788</span></h1>
+
+    <p>The <b>log&ndash;log</b> method is the standard way to report
+    <span class="mono">I<sub>c</sub></span> and the <span class="mono">n</span>&#8209;value.
+    It splits the V&ndash;I curve into two clean steps and fits a straight line in
+    log space &mdash; very robust as long as the linear baseline is correct.</p>
+
+    <p style="text-align:center; margin: 6px 0 2px 0;">
+      <img src="fit-diagram://loglog" width="820">
+    </p>
+    <p style="text-align:center; color:#5a6472; font-size:10pt; margin: 0 0 10px 0;">
+      <i>Same curve as on the Overview tab, but plotted as
+      <code>log V′</code> vs <code>log I</code>. The shaded band is the IEC
+      decade window <code>[E<sub>c1</sub>, E<sub>c2</sub>]</code>.</i>
+    </p>
+
+    <h2>Procedure</h2>
+    <ol>
+      <li><b>Linear baseline</b> in the low&#8209;current window
+        <code>V<sub>ofs</sub> + R·I</code> (or ρ&middot;I) is fit on points
+        well below <span class="mono">I<sub>c</sub></span>.</li>
+      <li>The baseline is subtracted from the raw signal:
+        <code>V′(I) = V − V<sub>ofs</sub> − R·I</code>.</li>
+      <li>Inside the <b>IEC decade window</b>
+        <code>[E<sub>c1</sub>, E<sub>c2</sub>]</code> a straight line is fit to
+        <code>log<sub>10</sub> V′</code> vs <code>log<sub>10</sub> I</code>
+        using <code>numpy.polyfit</code> (closed form, no iterations).</li>
+      <li>The slope is the <b>n&#8209;value</b>;
+        <span class="mono">I<sub>c</sub></span> is the current at which
+        <code>V′ = E<sub>c2</sub></code>.</li>
+    </ol>
+
+    <h2>IEC 61788 defaults</h2>
+    <ul>
+      <li><b>E<sub>c2</sub> = 1&nbsp;µV/cm</b> &mdash; the <span class="pill">I<sub>c</sub></span>
+        criterion (HTS at 77&nbsp;K).</li>
+      <li><b>E<sub>c1</sub> = 0.1&nbsp;µV/cm</b> &mdash; the lower edge of the
+        decade window.</li>
+      <li><b>≥&nbsp;50</b> samples inside the decade are recommended for a
+        reliable n&#8209;value.</li>
+      <li>Without a sample length the equivalent <span class="mono">V<sub>c</sub></span>
+        criterion (default <b>1&nbsp;mV</b>) is used; <span class="mono">E<sub>c1</sub></span>
+        and <span class="mono">E<sub>c2</sub></span> scale by the same ratio.</li>
+    </ul>
+
+    <h2>What you get</h2>
+    <ul>
+      <li><span class="mono">I<sub>c</sub></span>, <span class="mono">n</span></li>
+      <li><b>σ(I<sub>c</sub>)</b>, <b>σ(n)</b> from the polyfit covariance.</li>
+      <li><b>R²</b> on <code>log V′</code> vs the linear model.</li>
+      <li><b>n&#8209;window points used</b> &mdash; the actual count of samples
+        inside the decade.</li>
+    </ul>
+
+    <div class="warn"><b>Common failure modes</b>
+      <ul>
+        <li><i>“Insufficient n&#8209;window points”</i> &mdash; widen the
+          baseline window so the residual is centred, slow the ramp, or use a
+          longer recording so the decade contains more samples.</li>
+        <li><i>“Data never reaches E<sub>c2</sub>”</i> &mdash; the ramp ended
+          before the criterion was reached. Increase the maximum current.</li>
+        <li>If the linear baseline is wrong, the residual <code>V′</code> may
+          dip below zero in the decade window and the log fit will fail.
+          Recheck the linear&#8209;baseline window first.</li>
+      </ul>
+    </div>
     """
 
     workflow_html = base_css + """
@@ -3540,17 +3857,32 @@ def _open_help_dialog(app) -> None:
     </ol>
 
     <h2>Choosing fit windows well</h2>
+    <p><b>Common to both methods:</b></p>
     <ul>
       <li><b>dI/dt window</b> &mdash; pick a region where the current ramps
         linearly (typically <b>40&nbsp;%&ndash;60&nbsp;%</b> of the trace). Avoid the
         switch&#8209;on transient and the transition region.</li>
       <li><b>Linear baseline window</b> &mdash; well below
-        <span class="mono">Iₒ</span> (default <b>5&nbsp;%&ndash;30&nbsp;%</b>), where
-        <code>V</code> is dominated by the resistive baseline and noise.</li>
-      <li><b>Power&#8209;law window</b> &mdash; from a low fraction of
-        <span class="mono">Iₒ</span> up to the largest voltage you trust
-        (<b>≤&nbsp;80&nbsp;%</b> of <code>V<sub>max</sub></code> by default), so the
-        transition is captured but flux&#8209;flow / runaway is excluded.</li>
+        <span class="mono">I<sub>c</sub></span> (default
+        <b>5&nbsp;%&ndash;30&nbsp;%</b>&nbsp;of <code>I<sub>max</sub></code>),
+        where <code>V</code> is dominated by the resistive baseline and noise.</li>
+    </ul>
+
+    <p><b>Power&#8209;law window depends on the method:</b></p>
+    <ul>
+      <li><span class="pill">Log&ndash;log (IEC 61788)</span> &mdash; the
+        effective fit window is the <b>decade
+        <code>[E<sub>c1</sub>, E<sub>c2</sub>]</code></b> on the
+        baseline&#8209;subtracted residual (defaults
+        <b>0.1&nbsp;µV/cm</b> &ndash; <b>1&nbsp;µV/cm</b>). The numeric
+        “Power low” / “Power V frac” fields only act as a sanity envelope
+        on top of the IEC window.</li>
+      <li><span class="pill">Non&#8209;linear (LM)</span> &mdash; uses the
+        full <b>“Power&#8209;law window”</b> from a low fraction of
+        <span class="mono">I<sub>c</sub></span> up to the largest voltage you
+        trust (<b>≤&nbsp;80&nbsp;%</b> of <code>V<sub>max</sub></code> by
+        default), so the transition is captured but flux&#8209;flow / runaway
+        is excluded.</li>
     </ul>
 
     <h2>Reading the result</h2>
@@ -3579,42 +3911,80 @@ def _open_help_dialog(app) -> None:
     options_html = base_css + """
     <h1>Custom settings &amp; options</h1>
 
-    <h2>Fit method</h2>
+    <h2>Fit method (top of the iteration box)</h2>
     <ul>
-      <li><b>log&ndash;log linear</b> (default) &mdash; fits <code>log V</code>
-        vs <code>log I</code> after baseline subtraction. Fast and very robust;
-        recommended for most measurements.</li>
-      <li><b>Non&#8209;linear (Levenberg&ndash;Marquardt)</b> &mdash; fits the full
-        model directly. Useful when the baseline is non&#8209;trivial or when
-        you need true σ on every parameter.</li>
+      <li><span class="pill">Log&ndash;log linear</span> &mdash; default,
+        IEC 61788 reference. Fits <code>log V′</code> vs <code>log I</code>
+        after baseline subtraction; closed&#8209;form, no iteration.</li>
+      <li><span class="pill">Non&#8209;linear&nbsp;(LM)</span> &mdash; fits the
+        full coupled model in one shot using Levenberg&ndash;Marquardt inside an
+        outer self&#8209;consistency loop on
+        <span class="mono">I<sub>c</sub></span>.</li>
     </ul>
 
-    <h2>Iteration knobs</h2>
+    <h2>Parameters that depend on the method</h2>
+
+    <h3>Log&ndash;log linear &mdash; <i>only these inputs are used</i></h3>
     <table>
       <tr><th>Field</th><th>Meaning</th><th>Default</th></tr>
-      <tr><td><code>Max iterations</code></td><td>Outer&#8209;loop cap for the
-        self&#8209;consistent <span class="mono">Iₒ</span> refinement.</td><td>20</td></tr>
-      <tr><td><code>Iₒ stop tol (%)</code></td><td>Stop when
-        |ΔIₒ|/Iₒ falls below this.</td><td>0.1&nbsp;%</td></tr>
-      <tr><td><code>Chi&#8209;sqr tol</code></td><td>Convergence threshold for the
-        non&#8209;linear residual.</td><td>1e&minus;6</td></tr>
+      <tr><td><code>E<sub>c1</sub></code></td>
+        <td>Lower edge of the IEC decade window.</td>
+        <td>0.1&nbsp;µV/cm</td></tr>
+      <tr><td><code>E<sub>c2</sub></code> /
+        <code>V<sub>c</sub></code></td>
+        <td>Upper edge of the decade and the
+          <span class="mono">I<sub>c</sub></span> criterion.</td>
+        <td>1&nbsp;µV/cm (or 1&nbsp;mV without L<sub>s</sub>)</td></tr>
+      <tr><td><code>Linear low / high</code></td>
+        <td>Window for fitting <code>V<sub>ofs</sub> + R·I</code> &mdash;
+          the baseline that is subtracted before the log fit.</td>
+        <td>5&nbsp;%&ndash;30&nbsp;% of I<sub>max</sub></td></tr>
+      <tr><td><code>dI/dt low / high</code></td>
+        <td>Window for the inductive&#8209;ratio diagnostic
+          (does not change the fitted <span class="mono">I<sub>c</sub></span>).</td>
+        <td>40&nbsp;%&ndash;60&nbsp;% of t</td></tr>
+    </table>
+    <p style="color:#5a6472; font-size:10pt;"><i>The
+      <code>Max iterations</code>, <code>I<sub>c</sub> stop tol</code> and
+      <code>Chi&#8209;sqr tol</code> fields are <b>greyed out / ignored</b> in
+      this mode &mdash; the polyfit is one&#8209;shot.</i></p>
+
+    <h3>Non&#8209;linear (LM) &mdash; <i>iteration knobs apply here</i></h3>
+    <table>
+      <tr><th>Field</th><th>Meaning</th><th>Default</th></tr>
+      <tr><td><code>Max iterations</code></td>
+        <td>Outer&#8209;loop cap for the self&#8209;consistent
+          <span class="mono">I<sub>c</sub></span> refinement.</td>
+        <td>20</td></tr>
+      <tr><td><code>I<sub>c</sub> stop tol (%)</code></td>
+        <td>Stop when
+          |ΔI<sub>c</sub>|/I<sub>c</sub> falls below this.</td>
+        <td>0.1&nbsp;%</td></tr>
+      <tr><td><code>Chi&#8209;sqr tol</code></td>
+        <td><code>ftol</code>/<code>xtol</code>/<code>gtol</code> passed to the
+          inner LM solver.</td>
+        <td>1e&minus;6</td></tr>
       <tr><td><code>V<sub>c</sub></code> / <code>E<sub>c</sub></code></td>
         <td>Criterion voltage / electric field used to define
-          <span class="mono">Iₒ</span>.</td>
-        <td>1&nbsp;mV (no L<sub>s</sub>) / 1&nbsp;µV/cm</td></tr>
+          <span class="mono">I<sub>c</sub></span>.</td>
+        <td>1&nbsp;mV / 1&nbsp;µV/cm</td></tr>
+      <tr><td><code>Power low</code> /
+        <code>Power V frac</code></td>
+        <td>Lower current bound and upper voltage bound of the
+          <b>power&#8209;law fit window</b>.</td>
+        <td>0.05·I<sub>max</sub> / 0.80·V<sub>max</sub></td></tr>
     </table>
+    <p style="color:#5a6472; font-size:10pt;"><i>
+      <code>E<sub>c1</sub></code> is irrelevant in this mode (no decade window).</i></p>
 
-    <h2>Window fractions</h2>
+    <h2>Shared diagnostics</h2>
     <ul>
-      <li><b>dI/dt low/high</b> &mdash; defaults <b>0.40&ndash;0.60</b> of the
-        time axis.</li>
-      <li><b>Linear low/high</b> &mdash; defaults <b>0.05&ndash;0.30</b> of
-        I<sub>max</sub>.</li>
-      <li><b>Power low</b> &mdash; default <b>0.05</b> of I<sub>max</sub>.
-        Power high is governed by <b>Power&nbsp;V&nbsp;frac</b> (default
-        <b>0.80</b> of V<sub>max</sub>).</li>
-      <li><b>Zero&#8209;I fraction</b> &mdash; default <b>2&nbsp;%</b>; used to
-        pin the thermal offset away from any switch&#8209;on glitch.</li>
+      <li><b>Zero&#8209;I fraction</b> &mdash; default <b>2&nbsp;%</b>; used by
+        both methods to pin the thermal offset away from any switch&#8209;on
+        glitch.</li>
+      <li><b>dI/dt window</b> &mdash; both methods compute the inductive
+        ratio (<code>L·dI/dt</code> / criterion) here and raise the
+        <i>“ramp too fast”</i> warning if it dominates.</li>
     </ul>
 
     <h2>Presets &amp; profiles</h2>
@@ -3706,20 +4076,24 @@ def _open_help_dialog(app) -> None:
     LabVIEW and Origin readers.</div>
     """
 
-    diagram_pixmap = _build_fit_diagram_pixmap()
+    overview_pixmap = _build_fit_diagram_pixmap()
+    loglog_pixmap = _build_loglog_diagram_pixmap()
 
-    for title, html, image in (
-        ("Overview", overview_html, diagram_pixmap),
-        ("How to fit", workflow_html, None),
-        ("Settings & options", options_html, None),
-        ("Metadata fields", metadata_html, None),
+    for title, html, resources in (
+        ("Overview", overview_html,
+         (("fit-diagram://overview", overview_pixmap),)),
+        ("Log–log linear fit", loglog_html,
+         (("fit-diagram://loglog", loglog_pixmap),)),
+        ("How to fit", workflow_html, ()),
+        ("Settings & options", options_html, ()),
+        ("Metadata fields", metadata_html, ()),
     ):
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        if image is not None:
+        for url, image in resources:
             browser.document().addResource(
                 QTextDocument.ImageResource,
-                QUrl("fit-diagram://overview"),
+                QUrl(url),
                 image,
             )
         browser.setHtml(html)
