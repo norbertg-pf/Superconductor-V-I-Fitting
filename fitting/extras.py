@@ -212,9 +212,9 @@ class GraphSettings:
     grid_h: GridConfig = field(default_factory=GridConfig)
     # Axis line + tick visibility per side.
     line_bottom: LineAndTicks = field(default_factory=LineAndTicks)
-    line_top: LineAndTicks = field(default_factory=lambda: LineAndTicks(show=False))
+    line_top: LineAndTicks = field(default_factory=lambda: LineAndTicks(show=True))
     line_left: LineAndTicks = field(default_factory=LineAndTicks)
-    line_right: LineAndTicks = field(default_factory=lambda: LineAndTicks(show=False))
+    line_right: LineAndTicks = field(default_factory=lambda: LineAndTicks(show=True))
     # Plot title.
     plot_title_text: str = "V-I preview"
     plot_title_size: int = 13
