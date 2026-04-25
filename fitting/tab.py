@@ -2014,23 +2014,41 @@ def load_metadata_from_tdms(app):
     refresh_preview(app)
 
 
-def _apply_voltage_tap_from_metadata(app) -> None:
-    """Pick up the voltage-tap distance from the Y channel (Tape/Cable preset
-    or QD metadata).
+def _vtap_from_recording(controller) -> Optional[float]:
+    """Find a positive voltage-tap distance anywhere in the loaded recording.
 
-    If present and > 0: check the voltage-tap-separation box, populate the
-    distance, and keep Ec at the IEC default (1 uV/cm). If absent:
-    uncheck the box so the tool does not fit in E-field mode with a stale
-    sample length.
+    Prefers the Y channel's metadata (the most likely owner of the property),
+    then falls back to any other channel that carries a positive VTap value.
+    Returns ``None`` when nothing usable is present.
+    """
+    if controller is None:
+        return None
+    for name, meta in (controller.channel_metadata or {}).items():
+        v_tap = meta.get("voltage_tap_cm")
+        if v_tap and v_tap > 0:
+            return float(v_tap)
+    return None
+
+
+def _apply_voltage_tap_from_metadata(app) -> None:
+    """Pick up the voltage-tap distance from the loaded recording.
+
+    Looks at the Y channel first, then falls back to any other channel in the
+    file that exposes a positive VTap distance (set by DAQUniversal's QD or
+    Tape/Cable preset). When found: check the voltage-tap-separation box,
+    populate the distance, and keep Ec at the IEC default (1 µV/cm). When
+    absent: uncheck the box so the tool does not fit in E-field mode with a
+    stale sample length.
     """
     controller = getattr(app, "data_fit_controller", None)
     if controller is None:
         return
     y_name = app.data_fit_y_cb.currentText()
-    if not y_name:
-        return
-    meta = controller.get_metadata(y_name)
-    v_tap = meta.get("voltage_tap_cm")
+    v_tap: Optional[float] = None
+    if y_name:
+        v_tap = controller.get_metadata(y_name).get("voltage_tap_cm")
+    if not (v_tap and v_tap > 0):
+        v_tap = _vtap_from_recording(controller)
     cb = app.data_fit_use_length_cb
     cb.blockSignals(True)
     try:
