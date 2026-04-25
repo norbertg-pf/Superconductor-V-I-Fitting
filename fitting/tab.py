@@ -276,13 +276,19 @@ def _read_time_channel(tdms_file):
     return None
 
 
-def _read_channel_metadata(channel) -> dict:
-    """Extract Scale_Factor / Offset / Voltage_Tab_Distance metadata.
+_VTAP_KEYS = ("VTap_Distance_cm", "Voltage_Tap_Distance_cm",
+              "Voltage_Tap_Distance", "Voltage_Tab_Distance")
 
-    Voltage_Tab_Distance is written by the Tape and Cable presets of
-    DAQUniversal (see TDMS metadata spec). When present, the Data Fitting
-    tab auto-populates the voltage-tap separation and enables the E-field
-    path so Ic is computed per IEC 61788 with a 1 uV/cm criterion.
+
+def _read_channel_metadata(channel) -> dict:
+    """Extract Scale_Factor / Offset / VTap distance metadata.
+
+    The voltage-tap separation is written by the Tape and Cable presets of
+    DAQUniversal and by its QD configuration (see TDMS metadata spec). When
+    present, the Data Fitting tab auto-populates the voltage-tap separation
+    and enables the E-field path so Ic is computed per IEC 61788 with a
+    1 µV/cm criterion. Multiple key spellings are accepted to stay
+    compatible with older recordings.
     """
     props = getattr(channel, "properties", {}) or {}
     try:
@@ -293,15 +299,20 @@ def _read_channel_metadata(channel) -> dict:
         offset = float(props.get("Offset", 0.0))
     except (TypeError, ValueError):
         offset = 0.0
-    v_tap_raw = props.get("Voltage_Tab_Distance", "")
     v_tap: Optional[float] = None
-    if v_tap_raw not in ("", None):
+    for key in _VTAP_KEYS:
+        v_tap_raw = props.get(key, "")
+        if v_tap_raw in ("", None):
+            continue
         try:
             v_tap = float(v_tap_raw)
-            if v_tap <= 0:
-                v_tap = None
         except (TypeError, ValueError):
             v_tap = None
+            continue
+        if v_tap <= 0:
+            v_tap = None
+            continue
+        break
     return {"scale": scale, "offset": offset, "voltage_tap_cm": v_tap}
 
 
@@ -887,6 +898,15 @@ def setup_data_fitting_tab_layout(app):
     preset_row.addWidget(app.data_fit_help_btn)
     left.addLayout(preset_row)
 
+    app.data_fit_save_separate_cb = QCheckBox("Save fit results to separate TDMS file")
+    app.data_fit_save_separate_cb.setChecked(False)
+    app.data_fit_save_separate_cb.setToolTip(
+        "Checked: write fit results to <source>_fit_report.tdms next to the source file.\n"
+        "Unchecked (default): append the FitResults group into the source TDMS file itself, "
+        "overwriting any prior fit for the same channel."
+    )
+    left.addWidget(app.data_fit_save_separate_cb)
+
     app.data_fit_warning_label = QLabel("")
     app.data_fit_warning_label.setWordWrap(True)
     app.data_fit_warning_label.setStyleSheet(
@@ -1140,8 +1160,8 @@ def _settings_from_inputs(app) -> FitSettings:
     to_si = 1.0e-6 if sample_length is not None else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-    if method == FIT_METHOD_LOG_LOG:
-        criterion_value = ec2  # Ic is reported at E = Ec2.
+    # In log-log mode the user-entered Ec/Vc is the criterion at which Ic is
+    # reported. Ec1/Ec2 only define the fit window for the n-value slope.
 
     settings = FitSettings(
         didt_low_frac=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
@@ -1395,10 +1415,10 @@ def _update_method_mode_ui(app) -> None:
         app.data_fit_chi_tol,
     ):
         widget.setEnabled(not is_loglog)
-    # Vc input: disabled in log-log mode (criterion is Ec2 from the Step 4
-    # editors) and when the E-field path is active it is Ec not Vc anyway.
-    app.data_fit_vc_input.setEnabled(not is_loglog)
-    app.data_fit_vc_label.setEnabled(not is_loglog)
+    # Vc input stays enabled in log-log mode so the user can override the
+    # IEC default (Ec2) and report Ic at any criterion value of their choice.
+    app.data_fit_vc_input.setEnabled(True)
+    app.data_fit_vc_label.setEnabled(True)
     # The X-value editors in Step 4 map a percentage to a current, which is
     # meaningless when the editors hold Ec1/Ec2. Disable them in log-log mode.
     for widget in (
@@ -1994,22 +2014,41 @@ def load_metadata_from_tdms(app):
     refresh_preview(app)
 
 
-def _apply_voltage_tap_from_metadata(app) -> None:
-    """Pick up Voltage_Tab_Distance from the Y channel (Tape/Cable preset).
+def _vtap_from_recording(controller) -> Optional[float]:
+    """Find a positive voltage-tap distance anywhere in the loaded recording.
 
-    If present and > 0: check the voltage-tap-separation box, populate the
-    distance, and keep Ec at the IEC default (1 uV/cm). If absent:
-    uncheck the box so the tool does not fit in E-field mode with a stale
-    sample length.
+    Prefers the Y channel's metadata (the most likely owner of the property),
+    then falls back to any other channel that carries a positive VTap value.
+    Returns ``None`` when nothing usable is present.
+    """
+    if controller is None:
+        return None
+    for name, meta in (controller.channel_metadata or {}).items():
+        v_tap = meta.get("voltage_tap_cm")
+        if v_tap and v_tap > 0:
+            return float(v_tap)
+    return None
+
+
+def _apply_voltage_tap_from_metadata(app) -> None:
+    """Pick up the voltage-tap distance from the loaded recording.
+
+    Looks at the Y channel first, then falls back to any other channel in the
+    file that exposes a positive VTap distance (set by DAQUniversal's QD or
+    Tape/Cable preset). When found: check the voltage-tap-separation box,
+    populate the distance, and keep Ec at the IEC default (1 µV/cm). When
+    absent: uncheck the box so the tool does not fit in E-field mode with a
+    stale sample length.
     """
     controller = getattr(app, "data_fit_controller", None)
     if controller is None:
         return
     y_name = app.data_fit_y_cb.currentText()
-    if not y_name:
-        return
-    meta = controller.get_metadata(y_name)
-    v_tap = meta.get("voltage_tap_cm")
+    v_tap: Optional[float] = None
+    if y_name:
+        v_tap = controller.get_metadata(y_name).get("voltage_tap_cm")
+    if not (v_tap and v_tap > 0):
+        v_tap = _vtap_from_recording(controller)
     cb = app.data_fit_use_length_cb
     cb.blockSignals(True)
     try:
@@ -2212,12 +2251,14 @@ def _fit_result_properties(result) -> dict:
 
 
 def _write_fit_report_tdms(app, results: list[tuple[str, object]]) -> Optional[str]:
-    """Write fit results to ``<source_stem>_fit_report.tdms`` next to the source.
+    """Write fit results either next to the source (separate file) or into the
+    source TDMS itself, depending on the ``Save fit results to separate TDMS file``
+    checkbox.
 
     Each OK ``FitResult`` becomes one channel in the ``FitResults`` group, with
     the fit parameters (Ic, n, Ec, dI/dt, σ(Ic), σ(n), R², warnings, …) attached
-    as channel properties. Channels for the same label are overwritten; other
-    channels in an existing side-car are preserved.
+    as channel properties. Channels for the same label are overwritten; channels
+    from prior runs that this fit didn't touch are preserved.
 
     Returns the path written (or ``None`` if no source file or no OK results).
     Any I/O error is swallowed after logging — a failed report must not break
@@ -2229,36 +2270,83 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]]) -> Optional[s
     if not src_path or not ok_results:
         return None
     src = Path(src_path)
-    report_path = src.with_name(f"{src.stem}_fit_report.tdms")
-
-    # Preserve channel entries from prior runs that this fit didn't touch.
-    existing: dict[str, dict] = {}
-    if report_path.exists():
-        try:
-            with TdmsFile.read(str(report_path)) as tfile:
-                for grp in tfile.groups():
-                    if grp.name != "FitResults":
-                        continue
-                    for ch in grp.channels():
-                        existing[ch.name] = dict(ch.properties)
-        except Exception as exc:
-            traceback.print_exception(type(exc), exc, exc.__traceback__)
-            existing = {}
+    save_separate = bool(
+        getattr(app, "data_fit_save_separate_cb", None) is not None
+        and app.data_fit_save_separate_cb.isChecked()
+    )
+    report_path = src.with_name(f"{src.stem}_fit_report.tdms") if save_separate else src
 
     new_entries = {lbl: _fit_result_properties(r) for lbl, r in ok_results}
-    merged = {**existing, **new_entries}
 
-    # nptdms' TdmsWriter takes a flat list of objects per segment. Empty
-    # channels aren't allowed by the spec, so we include a single NaN sample
-    # as a sentinel — consumers that only read properties ignore the data.
+    if save_separate:
+        # Preserve FitResults channels from prior runs that this fit didn't touch
+        # by reading the existing side-car and rewriting it with merged entries.
+        existing: dict[str, dict] = {}
+        if report_path.exists():
+            try:
+                with TdmsFile.read(str(report_path)) as tfile:
+                    for grp in tfile.groups():
+                        if grp.name != "FitResults":
+                            continue
+                        for ch in grp.channels():
+                            existing[ch.name] = dict(ch.properties)
+            except Exception as exc:
+                traceback.print_exception(type(exc), exc, exc.__traceback__)
+                existing = {}
+        merged = {**existing, **new_entries}
+        objects = [GroupObject("FitResults")]
+        for name, props in merged.items():
+            data = np.array([np.nan], dtype=np.float64)
+            objects.append(ChannelObject("FitResults", name, data, properties=props))
+        try:
+            with TdmsWriter(str(report_path)) as writer:
+                writer.write_segment(objects)
+        except Exception as exc:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            return None
+        return str(report_path)
+
+    # Append a FitResults segment to the source TDMS. nptdms' append mode
+    # adds a new segment; readers see the latest properties, which is the
+    # overwrite semantics requested for re-runs.
     objects = [GroupObject("FitResults")]
-    for name, props in merged.items():
+    for name, props in new_entries.items():
         data = np.array([np.nan], dtype=np.float64)
         objects.append(ChannelObject("FitResults", name, data, properties=props))
-
     try:
-        with TdmsWriter(str(report_path)) as writer:
+        with TdmsWriter(str(report_path), mode="a") as writer:
             writer.write_segment(objects)
+    except TypeError:
+        # Older nptdms versions don't support mode='a' on TdmsWriter; fall
+        # back to rewriting the file with merged contents preserved.
+        try:
+            existing_groups: list[GroupObject] = []
+            existing_channels: list[ChannelObject] = []
+            existing_fit: dict[str, dict] = {}
+            if report_path.exists():
+                with TdmsFile.read(str(report_path)) as tfile:
+                    for grp in tfile.groups():
+                        if grp.name == "FitResults":
+                            for ch in grp.channels():
+                                existing_fit[ch.name] = dict(ch.properties)
+                            continue
+                        existing_groups.append(GroupObject(grp.name, properties=dict(grp.properties)))
+                        for ch in grp.channels():
+                            existing_channels.append(
+                                ChannelObject(grp.name, ch.name, np.asarray(ch[:]),
+                                              properties=dict(ch.properties))
+                            )
+            merged = {**existing_fit, **new_entries}
+            out_objects = list(existing_groups) + list(existing_channels)
+            out_objects.append(GroupObject("FitResults"))
+            for name, props in merged.items():
+                data = np.array([np.nan], dtype=np.float64)
+                out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+            with TdmsWriter(str(report_path)) as writer:
+                writer.write_segment(out_objects)
+        except Exception as exc:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            return None
     except Exception as exc:
         traceback.print_exception(type(exc), exc, exc.__traceback__)
         return None
@@ -3190,6 +3278,10 @@ def _fit_single_curve(app, entry: dict) -> None:
 
 
 def _settings_to_preset(app) -> FitPreset:
+    save_separate = bool(
+        getattr(app, "data_fit_save_separate_cb", None) is not None
+        and app.data_fit_save_separate_cb.isChecked()
+    )
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
         didt_high=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100),
@@ -3207,6 +3299,8 @@ def _settings_to_preset(app) -> FitPreset:
         x_channel=app.data_fit_x_cb.currentText(),
         y_channel=app.data_fit_y_cb.currentText(),
         time_channel=app.data_fit_time_cb.currentText(),
+        fit_method=_active_fit_method(app),
+        save_to_separate_tdms=save_separate,
     )
 
 
@@ -3227,6 +3321,18 @@ def _apply_preset(app, preset: FitPreset) -> None:
     app.data_fit_use_length_cb.setChecked(preset.use_length)
     app.data_fit_use_length_cb.blockSignals(False)
     _on_use_length_changed(app)
+    # Restore the fit method (log-log vs non-linear) before refreshing the
+    # mode-dependent UI so widget enabled-states and labels match the preset.
+    method = getattr(preset, "fit_method", FIT_METHOD_LOG_LOG)
+    if method == FIT_METHOD_LOG_LOG:
+        app.data_fit_method_loglog_rb.setChecked(True)
+    else:
+        app.data_fit_method_nonlinear_rb.setChecked(True)
+    _update_method_mode_ui(app)
+    if hasattr(app, "data_fit_save_separate_cb"):
+        app.data_fit_save_separate_cb.setChecked(
+            bool(getattr(preset, "save_to_separate_tdms", False))
+        )
     # Attempt to restore channel selections if they exist in the current file.
     for combo, name in (
         (app.data_fit_x_cb, preset.x_channel),
@@ -3237,6 +3343,37 @@ def _apply_preset(app, preset: FitPreset) -> None:
         if idx >= 0:
             combo.setCurrentIndex(idx)
     refresh_preview(app)
+
+
+def get_data_fit_preset_dict(app) -> dict:
+    """Public helper: snapshot the Data Fitting tab state as a JSON-able dict.
+
+    Used by DAQUniversal to embed Data Fitting settings inside daq_config.json.
+    Returns an empty dict if the tab hasn't been built yet.
+    """
+    if not hasattr(app, "data_fit_vc_input"):
+        return {}
+    try:
+        from dataclasses import asdict
+        return asdict(_settings_to_preset(app))
+    except Exception:
+        return {}
+
+
+def apply_data_fit_preset_dict(app, payload: dict) -> None:
+    """Public helper: restore Data Fitting tab state from a dict produced by
+    :func:`get_data_fit_preset_dict`. No-op if the tab isn't built yet or the
+    payload is empty/invalid.
+    """
+    if not payload or not hasattr(app, "data_fit_vc_input"):
+        return
+    try:
+        from dataclasses import fields
+        allowed = {f.name for f in fields(FitPreset)}
+        clean = {k: v for k, v in dict(payload).items() if k in allowed}
+        _apply_preset(app, FitPreset(**clean))
+    except Exception:
+        pass
 
 
 def _preset_dir(app) -> Path:
