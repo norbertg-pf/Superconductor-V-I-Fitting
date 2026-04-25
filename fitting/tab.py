@@ -3280,8 +3280,137 @@ def _load_preset(app) -> None:
     _show_warning(app, f"Loaded preset from {path_str}", severity="warning")
 
 
+def _build_fit_diagram_pixmap():
+    """Render a schematic V-I curve highlighting offset, linear and power-law parts."""
+    from PyQt5.QtCore import Qt, QRectF, QPointF
+    from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QPainterPath
+
+    W, H = 880, 500
+    pix = QPixmap(W, H)
+    pix.fill(QColor("white"))
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+    margin_l, margin_r, margin_t, margin_b = 80, 210, 60, 70
+    px, py = margin_l, margin_t
+    pw = W - margin_l - margin_r
+    ph = H - margin_t - margin_b
+
+    painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
+    painter.setPen(QColor("#003a75"))
+    painter.drawText(QRectF(0, 10, W, 28), Qt.AlignHCenter,
+                     "Anatomy of a V–I curve")
+
+    Ic_n, Vc, R, Vofs, n_val = 0.78, 0.085, 0.075, 0.045, 24
+
+    def V_of(i: float) -> float:
+        return Vofs + R * i + Vc * (max(i / Ic_n, 0.0) ** n_val)
+
+    n_pts = 400
+    curve = [(k / (n_pts - 1), V_of(k / (n_pts - 1))) for k in range(n_pts)]
+    vmax = max(v for _, v in curve) * 1.06
+
+    def mx(i: float) -> float:
+        return px + i * pw
+
+    def my(v: float) -> float:
+        return py + ph - (v / vmax) * ph
+
+    bands = [
+        (0.00, 0.05, QColor(255, 178, 90, 70),  "#a85a00", "offset"),
+        (0.05, 0.32, QColor(120, 180, 255, 80), "#0a4a8c", "linear  R · I"),
+        (0.45, 0.97, QColor(255, 120, 120, 80), "#8a1f2a", "power-law  V_c·(I/I_c)ⁿ"),
+    ]
+
+    painter.setPen(Qt.NoPen)
+    for lo, hi, fill, _, _ in bands:
+        painter.setBrush(fill)
+        painter.drawRect(QRectF(mx(lo), py, mx(hi) - mx(lo), ph))
+
+    painter.setBrush(Qt.NoBrush)
+    painter.setPen(QPen(QColor("#1c2733"), 1.5))
+    painter.drawRect(QRectF(px, py, pw, ph))
+
+    painter.setPen(QPen(QColor("#a85a00"), 1.6, Qt.DashLine))
+    painter.drawLine(QPointF(px, my(Vofs)), QPointF(px + pw, my(Vofs)))
+    painter.setPen(QPen(QColor("#0a4a8c"), 1.6, Qt.DashLine))
+    painter.drawLine(QPointF(mx(0.0), my(Vofs)),
+                     QPointF(mx(1.0), my(Vofs + R)))
+
+    painter.setPen(QPen(QColor("#1c2733"), 2.8))
+    path = QPainterPath()
+    path.moveTo(mx(curve[0][0]), my(curve[0][1]))
+    for i, v in curve[1:]:
+        path.lineTo(mx(i), my(v))
+    painter.drawPath(path)
+
+    icx = mx(Ic_n)
+    vcrit = V_of(Ic_n)
+    painter.setPen(QPen(QColor("#cc2244"), 1.4, Qt.DashLine))
+    painter.drawLine(QPointF(icx, py), QPointF(icx, py + ph))
+    painter.drawLine(QPointF(px, my(vcrit)), QPointF(px + pw, my(vcrit)))
+
+    painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    painter.setPen(QColor("#cc2244"))
+    painter.drawText(QPointF(icx + 6, py + 18), "I_c")
+    painter.drawText(QPointF(px + 8, my(vcrit) - 5), "V_c criterion")
+
+    painter.setPen(QColor("#1c2733"))
+    painter.setFont(QFont("Segoe UI", 11))
+    painter.drawText(QRectF(px, py + ph + 22, pw, 24),
+                     Qt.AlignHCenter, "Current  I  →")
+    painter.save()
+    painter.translate(22, py + ph / 2)
+    painter.rotate(-90)
+    painter.drawText(QRectF(-120, -10, 240, 20),
+                     Qt.AlignHCenter, "Voltage  V  →")
+    painter.restore()
+
+    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    for lo, hi, _, ink, name in bands:
+        painter.setPen(QColor(ink))
+        painter.drawText(
+            QRectF(mx(lo), py - 18, mx(hi) - mx(lo), 14),
+            Qt.AlignCenter, name,
+        )
+
+    legend_x = px + pw + 18
+    legend_y = py + 6
+    legend_items = [
+        (QColor("#1c2733"), Qt.SolidLine, "V(I) total"),
+        (QColor("#a85a00"), Qt.DashLine,  "V_ofs"),
+        (QColor("#0a4a8c"), Qt.DashLine,  "V_ofs + R·I"),
+        (QColor("#cc2244"), Qt.DashLine,  "I_c / V_c"),
+    ]
+    painter.setFont(QFont("Segoe UI", 9))
+    for k, (color, style, name) in enumerate(legend_items):
+        y = legend_y + k * 22
+        painter.setPen(QPen(color, 2.0, style))
+        painter.drawLine(QPointF(legend_x, y),
+                         QPointF(legend_x + 32, y))
+        painter.setPen(QColor("#1c2733"))
+        painter.drawText(QPointF(legend_x + 40, y + 4), name)
+
+    note_y = legend_y + len(legend_items) * 22 + 16
+    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    painter.setPen(QColor("#003a75"))
+    painter.drawText(QPointF(legend_x, note_y), "Model")
+    painter.setFont(QFont("Consolas", 9))
+    painter.setPen(QColor("#1c2733"))
+    eq_lines = ["V = V_ofs", "   + L · dI/dt",
+                "   + R · I", "   + V_c·(I/I_c)ⁿ"]
+    for k, ln in enumerate(eq_lines):
+        painter.drawText(QPointF(legend_x, note_y + 18 + k * 14), ln)
+
+    painter.end()
+    return pix
+
+
 def _open_help_dialog(app) -> None:
     """Open a sizable, tabbed help window explaining the fitting workflow."""
+    from PyQt5.QtCore import QUrl
+    from PyQt5.QtGui import QTextDocument
     from PyQt5.QtWidgets import (
         QDialog, QTabWidget, QTextBrowser, QVBoxLayout, QHBoxLayout,
         QPushButton, QSizePolicy,
@@ -3341,6 +3470,14 @@ def _open_help_dialog(app) -> None:
     <p>This tool extracts the <b>critical current <span class="mono">Iₒ</span></b>,
     the <b>n&#8209;value</span></b> and the <b>resistive baseline</b> from a recorded
     voltage&ndash;current ramp using the IEC 61788 power&#8209;law criterion.</p>
+
+    <p style="text-align:center; margin: 6px 0 2px 0;">
+      <img src="fit-diagram://overview" width="820">
+    </p>
+    <p style="text-align:center; color:#5a6472; font-size:10pt; margin: 0 0 10px 0;">
+      <i>Schematic: the three additive parts of the model and the
+      <span class="mono">Iₒ</span> / <span class="mono">Vₒ</span> criterion.</i>
+    </p>
 
     <h2>The model</h2>
     <p>Without a sample length the fitted relation is:</p>
@@ -3569,14 +3706,22 @@ def _open_help_dialog(app) -> None:
     LabVIEW and Origin readers.</div>
     """
 
-    for title, html in (
-        ("Overview", overview_html),
-        ("How to fit", workflow_html),
-        ("Settings & options", options_html),
-        ("Metadata fields", metadata_html),
+    diagram_pixmap = _build_fit_diagram_pixmap()
+
+    for title, html, image in (
+        ("Overview", overview_html, diagram_pixmap),
+        ("How to fit", workflow_html, None),
+        ("Settings & options", options_html, None),
+        ("Metadata fields", metadata_html, None),
     ):
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
+        if image is not None:
+            browser.document().addResource(
+                QTextDocument.ImageResource,
+                QUrl("fit-diagram://overview"),
+                image,
+            )
         browser.setHtml(html)
         tabs.addTab(browser, title)
 
