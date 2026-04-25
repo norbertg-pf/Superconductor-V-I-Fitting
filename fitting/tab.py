@@ -634,12 +634,41 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot_summary_btn.setToolTip(
         "Show all plotted curves: color, label, skip points, include-in-fit, remove."
     )
-    for compact_btn in (app.data_fit_load_metadata_btn, app.data_fit_add_plot_btn, app.data_fit_plot_summary_btn):
+    app.data_fit_graph_btn = QPushButton("Graph settings…")
+    app.data_fit_graph_btn.setToolTip(
+        "Open graph settings for scale, tick labels, title, grids, line and ticks."
+    )
+    app.data_fit_zoom_mode_btn = QPushButton("Zoom Mode")
+    app.data_fit_zoom_mode_btn.setCheckable(True)
+    app.data_fit_zoom_mode_btn.setToolTip(
+        "When on: left-drag on the plot draws a rectangle to zoom in.\n"
+        "When off: left-drag pans the view (pyqtgraph default)."
+    )
+    app.data_fit_robust_view_btn = QPushButton("Robust Auto-Range")
+    app.data_fit_robust_view_btn.setToolTip(
+        "Set the view to the 1st-99th percentile of the data with a 10% margin, "
+        "ignoring extreme outliers (common at the edges of V-I curves)."
+    )
+    app.data_fit_reset_view_btn = QPushButton("Full View")
+    app.data_fit_reset_view_btn.setToolTip("Show the complete data range (includes outliers).")
+    for compact_btn in (
+        app.data_fit_load_metadata_btn,
+        app.data_fit_add_plot_btn,
+        app.data_fit_plot_summary_btn,
+        app.data_fit_graph_btn,
+        app.data_fit_robust_view_btn,
+        app.data_fit_zoom_mode_btn,
+        app.data_fit_reset_view_btn,
+    ):
         compact_btn.setMinimumHeight(24)
         compact_btn.setStyleSheet("padding:2px 8px; font-size:11px;")
     ch_grid.addWidget(app.data_fit_load_metadata_btn, 5, 0)
     ch_grid.addWidget(app.data_fit_add_plot_btn, 5, 1)
     ch_grid.addWidget(app.data_fit_plot_summary_btn, 5, 2, 1, 2)
+    ch_grid.addWidget(app.data_fit_graph_btn, 6, 0)
+    ch_grid.addWidget(app.data_fit_robust_view_btn, 6, 1)
+    ch_grid.addWidget(app.data_fit_zoom_mode_btn, 6, 2)
+    ch_grid.addWidget(app.data_fit_reset_view_btn, 6, 3)
 
     # Voltage-tap separation + criterion widgets.
     # When checked, Y is divided by the tap distance so the fit is in V/cm
@@ -878,35 +907,11 @@ def setup_data_fitting_tab_layout(app):
 
     app.data_fit_graph_settings = GraphSettings()
 
-    toolbar = QGridLayout()
-    app.data_fit_graph_btn = QPushButton("Graph settings…")
-    app.data_fit_graph_btn.setToolTip(
-        "Open graph settings for scale, tick labels, title, grids, line and ticks."
-    )
-    app.data_fit_zoom_mode_btn = QPushButton("Zoom Mode")
-    app.data_fit_zoom_mode_btn.setCheckable(True)
-    app.data_fit_zoom_mode_btn.setToolTip(
-        "When on: left-drag on the plot draws a rectangle to zoom in.\n"
-        "When off: left-drag pans the view (pyqtgraph default)."
-    )
-    app.data_fit_robust_view_btn = QPushButton("Robust Auto-Range")
-    app.data_fit_robust_view_btn.setToolTip(
-        "Set the view to the 1st-99th percentile of the data with a 10% margin, "
-        "ignoring extreme outliers (common at the edges of V-I curves)."
-    )
-    app.data_fit_reset_view_btn = QPushButton("Full View")
-    app.data_fit_reset_view_btn.setToolTip("Show the complete data range (includes outliers).")
-    toolbar.addWidget(app.data_fit_graph_btn, 0, 0)
-    toolbar.addWidget(app.data_fit_robust_view_btn, 0, 1)
-    toolbar.addWidget(app.data_fit_zoom_mode_btn, 1, 0)
-    toolbar.addWidget(app.data_fit_reset_view_btn, 1, 1)
-    left_header.addLayout(toolbar)
-
     app.data_fit_result_text = QTextEdit()
     app.data_fit_result_text.setReadOnly(True)
     app.data_fit_result_text.setPlaceholderText("Fit results will appear here.")
-    app.data_fit_result_text.setMinimumHeight(60)
-    app.data_fit_result_text.setMaximumHeight(80)
+    app.data_fit_result_text.setMinimumHeight(110)
+    app.data_fit_result_text.setMaximumHeight(140)
     left_header.addWidget(app.data_fit_result_text)
     header.addLayout(left_header, stretch=1)
 
