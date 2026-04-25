@@ -17,8 +17,9 @@ from typing import Any, Optional
 
 import pyqtgraph as pg
 from pyqtgraph import exporters
-from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtCore import QPointF, QRectF, QSize, Qt
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt5.QtWidgets import QGraphicsObject
 from PyQt5.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -218,6 +219,7 @@ class GraphSettings:
     plot_title_text: str = "V-I preview"
     plot_title_size: int = 13
     plot_title_color: str = "#000000"
+    plot_title_font_family: str = ""
     # Residuals sub-plot toggle (off by default — user enables via graph settings).
     show_residuals: bool = False
 
@@ -311,10 +313,23 @@ def apply_graph_settings(plot_widget, raw_curve, x, y, settings: GraphSettings) 
     vb.invertY(settings.scale_v.reverse)
 
     # Plot title.
-    plot_item.setTitle(
-        f'<span style="color:{_parse_color(settings.plot_title_color).name()};'
-        f' font-size:{settings.plot_title_size}pt">{settings.plot_title_text}</span>'
-    )
+    plot_item.setTitle(_html_for_title(
+        settings.plot_title_text,
+        settings.plot_title_color,
+        settings.plot_title_size,
+        settings.plot_title_font_family,
+    ))
+
+    # Axis visibility is driven by the Line and Ticks panel, not the Title panel,
+    # so the user can hide a side completely without losing its title text.
+    side_visibility = {
+        "bottom": settings.line_bottom.show,
+        "top": settings.line_top.show,
+        "left": settings.line_left.show,
+        "right": settings.line_right.show,
+    }
+    for axis_name, visible in side_visibility.items():
+        plot_item.showAxis(axis_name, bool(visible))
 
     # Per-axis title.
     for axis_name, title in (
@@ -325,51 +340,121 @@ def apply_graph_settings(plot_widget, raw_curve, x, y, settings: GraphSettings) 
     ):
         axis = plot_item.getAxis(axis_name)
         if title.show and title.text:
-            label_html = (
-                f'<span style="color:{_parse_color(title.color).name()};'
-                f' font-size:{title.size}pt">{title.text}</span>'
-            )
-            axis.setLabel(label_html)
-            plot_item.showAxis(axis_name, True)
+            axis.setLabel(_html_for_title(title.text, title.color, title.size, title.font_family))
         else:
-            if axis_name in ("top", "right"):
-                plot_item.showAxis(axis_name, False)
-            else:
-                axis.setLabel("")
+            axis.setLabel("")
 
-    # Tick spacing (applied to the bottom/left axes where pyqtgraph draws them).
-    for axis_name, scale in (("bottom", settings.scale_h), ("left", settings.scale_v)):
+    # Tick spacing on bottom/left (the sides pyqtgraph draws by default). In log
+    # mode pyqtgraph chooses tick positions in view (= log10) space, so a
+    # user-entered linear increment can't map cleanly — fall back to auto.
+    for axis_name, scale, is_log in (
+        ("bottom", settings.scale_h, is_log_x),
+        ("left", settings.scale_v, is_log_y),
+    ):
         axis = plot_item.getAxis(axis_name)
-        step = scale.major_tick_value
-        if scale.major_tick_type == "By Increment" and step and step > 0:
-            minor = step / max(1, scale.minor_tick_count) if scale.minor_tick_type == "By Count" else step / 5.0
-            axis.setTickSpacing(major=step, minor=minor)
-        else:
-            axis.setTickSpacing(major=None, minor=None)
+        _apply_tick_spacing(axis, scale, is_log)
 
-    # Tick-label formatting (prefix/suffix/divide factor are handled via tickStrings override).
+    # Tick-label formatting on every side; visibility from labels.show.
     for axis_name, labels in (
         ("bottom", settings.ticks_bottom),
+        ("top", settings.ticks_top),
         ("left", settings.ticks_left),
+        ("right", settings.ticks_right),
     ):
         axis = plot_item.getAxis(axis_name)
         _install_tick_formatter(axis, labels)
-        axis.setStyle(showValues=labels.show)
+        axis.setStyle(showValues=bool(labels.show))
 
-    # Axis line / tick styling.
+    # Axis line / tick styling on every side.
     for axis_name, lt in (
         ("bottom", settings.line_bottom),
+        ("top", settings.line_top),
         ("left", settings.line_left),
+        ("right", settings.line_right),
     ):
         axis = plot_item.getAxis(axis_name)
         pen = pg.mkPen(_parse_color(lt.line_color), width=lt.line_thickness)
         axis.setPen(pen)
         axis.setTextPen(pen)
-        axis.setStyle(tickLength=-lt.major_length if lt.show else 0)
+        # tickLength sign controls direction: negative draws ticks outside.
+        axis.setStyle(tickLength=-int(lt.major_length) if lt.show else 0)
+        # Minor ticks share the major direction; pyqtgraph draws them at
+        # max(major_length / 2, minor_length).
+        try:
+            axis.setStyle(tickTextOffset=2)
+        except Exception:
+            pass
 
-    # Grids.
-    _apply_grid(plot_item, "bottom", settings.grid_v)   # vertical lines controlled by X ticks (bottom axis)
-    _apply_grid(plot_item, "left", settings.grid_h)     # horizontal lines controlled by Y ticks (left axis)
+    # Grids — replace pyqtgraph's built-in axis.setGrid (which only honours
+    # opacity) with a custom overlay that respects color, style and thickness
+    # for both major and minor grid lines.
+    for axis in (plot_item.getAxis("bottom"), plot_item.getAxis("left"),
+                 plot_item.getAxis("top"), plot_item.getAxis("right")):
+        axis.setGrid(False)
+    _apply_custom_grid(plot_item, settings.grid_v, settings.grid_h)
+
+
+def _html_for_title(text: str, color: str, size: int, font_family: str) -> str:
+    parts = [f"color:{_parse_color(color).name()}", f"font-size:{int(size)}pt"]
+    if font_family:
+        parts.append(f"font-family:'{font_family}'")
+    return f'<span style="{";".join(parts)}">{text}</span>'
+
+
+def _apply_tick_spacing(axis, scale: AxisScale, is_log: bool) -> None:
+    """Set major/minor tick spacing on an axis according to ``scale``.
+
+    "By Increment" sets a fixed linear step. "By Count" splits the current
+    visible view range into N equal intervals. Log axes fall back to
+    pyqtgraph's automatic tick selection because tick positions live in
+    view (log10) space.
+    """
+    if is_log:
+        axis.setTickSpacing(major=None, minor=None)
+        return
+
+    minor_step = None
+    major_step = None
+    if scale.major_tick_type == "By Increment":
+        if scale.major_tick_value and scale.major_tick_value > 0:
+            major_step = float(scale.major_tick_value)
+    elif scale.major_tick_type == "By Count":
+        count = int(scale.major_tick_value) if scale.major_tick_value else 0
+        if count > 0:
+            try:
+                view_range = axis.linkedView().viewRange()
+                vmin, vmax = view_range[0] if axis.orientation in ("bottom", "top") else view_range[1]
+                span = float(vmax) - float(vmin)
+                if span > 0:
+                    major_step = span / count
+            except Exception:
+                major_step = None
+
+    if major_step and major_step > 0:
+        if scale.minor_tick_type == "By Count" and scale.minor_tick_count > 0:
+            minor_step = major_step / float(scale.minor_tick_count + 1)
+        elif scale.minor_tick_type == "None":
+            minor_step = major_step  # equal => pyqtgraph draws no extra minor ticks
+        else:
+            minor_step = major_step / 5.0
+        axis.setTickSpacing(major=major_step, minor=minor_step)
+    else:
+        axis.setTickSpacing(major=None, minor=None)
+
+
+def _apply_custom_grid(plot_item, grid_v: GridConfig, grid_h: GridConfig) -> None:
+    """Install or update a single ``_PlotGridOverlay`` on ``plot_item``.
+
+    Stored on the ViewBox as ``_custom_grid_overlay`` so repeated calls just
+    refresh the existing item instead of stacking up.
+    """
+    vb = plot_item.getViewBox()
+    overlay = getattr(vb, "_custom_grid_overlay", None)
+    if overlay is None:
+        overlay = _PlotGridOverlay(plot_item)
+        vb.addItem(overlay, ignoreBounds=True)
+        vb._custom_grid_overlay = overlay
+    overlay.set_config(grid_v, grid_h)
 
 
 def _install_tick_formatter(axis, labels: TickLabels) -> None:
@@ -416,13 +501,110 @@ def _install_tick_formatter(axis, labels: TickLabels) -> None:
     axis.tickStrings = _tick_strings
 
 
-def _apply_grid(plot_item, axis_name: str, grid: GridConfig) -> None:
-    axis = plot_item.getAxis(axis_name)
-    style = LINE_STYLES.get(grid.major.style, Qt.SolidLine) if grid.major.show else Qt.NoPen
-    if grid.major.show:
-        axis.setGrid(int(255 * 0.5))
-    else:
-        axis.setGrid(False)
+class _PlotGridOverlay(QGraphicsObject):
+    """Custom grid overlay that respects color/style/thickness for both major
+    and minor grids on each axis. Lives inside the plot's ViewBox so it follows
+    pan/zoom; tick positions come from the bottom/left axis tick generators.
+    """
+
+    def __init__(self, plot_item, parent=None):
+        super().__init__(parent)
+        self._plot_item = plot_item
+        self._grid_v: Optional[GridConfig] = None
+        self._grid_h: Optional[GridConfig] = None
+        self.setZValue(-100)  # Behind data curves.
+        vb = plot_item.getViewBox()
+        vb.sigRangeChanged.connect(lambda *_: self.update())
+        vb.sigResized.connect(lambda *_: self.update())
+
+    def set_config(self, grid_v: GridConfig, grid_h: GridConfig) -> None:
+        self._grid_v = grid_v
+        self._grid_h = grid_h
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        vb = self._plot_item.getViewBox()
+        return vb.viewRect()
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
+        if self._grid_v is None or self._grid_h is None:
+            return
+        vb = self._plot_item.getViewBox()
+        view_rect = vb.viewRect()
+        if view_rect.width() <= 0 or view_rect.height() <= 0:
+            return
+
+        bottom_axis = self._plot_item.getAxis("bottom")
+        left_axis = self._plot_item.getAxis("left")
+        x_major, x_minor = _tick_values_in_range(bottom_axis, view_rect.left(), view_rect.right())
+        y_major, y_minor = _tick_values_in_range(left_axis, view_rect.top(), view_rect.bottom())
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        # Vertical lines (controlled by grid_v) span the full y view.
+        if self._grid_v is not None:
+            self._paint_lines(painter, x_minor, view_rect, self._grid_v.minor, vertical=True)
+            self._paint_lines(painter, x_major, view_rect, self._grid_v.major, vertical=True)
+        # Horizontal lines (controlled by grid_h) span the full x view.
+        if self._grid_h is not None:
+            self._paint_lines(painter, y_minor, view_rect, self._grid_h.minor, vertical=False)
+            self._paint_lines(painter, y_major, view_rect, self._grid_h.major, vertical=False)
+
+        painter.restore()
+
+    def _paint_lines(self, painter: QPainter, values, view_rect: QRectF,
+                     line: GridLine, *, vertical: bool) -> None:
+        if not line.show or not values:
+            return
+        pen = QPen(_parse_color(line.color))
+        pen.setStyle(LINE_STYLES.get(line.style, Qt.SolidLine))
+        pen.setWidthF(max(0.0, float(line.thickness)))
+        pen.setCosmetic(True)  # Width in pixels regardless of view scale.
+        painter.setPen(pen)
+        if vertical:
+            top, bottom = view_rect.top(), view_rect.bottom()
+            for v in values:
+                painter.drawLine(QPointF(v, top), QPointF(v, bottom))
+        else:
+            left, right = view_rect.left(), view_rect.right()
+            for v in values:
+                painter.drawLine(QPointF(left, v), QPointF(right, v))
+
+
+def _tick_values_in_range(axis, lo: float, hi: float):
+    """Return (major_values, minor_values) in view coordinates for ``axis``.
+
+    Falls back to empty lists if pyqtgraph hasn't computed ticks yet.
+    """
+    if hi == lo:
+        return [], []
+    if hi < lo:
+        lo, hi = hi, lo
+    try:
+        size_rect = axis.geometry()
+        if axis.orientation in ("bottom", "top"):
+            pixel_size = max(1.0, float(size_rect.width()))
+        else:
+            pixel_size = max(1.0, float(size_rect.height()))
+    except Exception:
+        pixel_size = max(hi - lo, 1.0)
+    try:
+        ticks = axis.tickValues(lo, hi, pixel_size)
+    except Exception:
+        return [], []
+    if not ticks:
+        return [], []
+    major: list[float] = []
+    minor: list[float] = []
+    # tickValues returns [(spacing0, [vals0]), (spacing1, [vals1]), ...]
+    # First entry is the largest spacing (major). Subsequent entries are minor.
+    for idx, (_, vals) in enumerate(ticks):
+        target = major if idx == 0 else minor
+        for v in vals:
+            if lo <= v <= hi:
+                target.append(float(v))
+    return major, minor
 
 
 # ----------------------------------------------------------------------------
@@ -526,10 +708,19 @@ class _ScalePanel(QWidget):
         form.addRow(self.reverse_cb)
         form.addRow(QLabel("<b>Major Ticks</b>"))
         form.addRow("Type", self.major_type_cb)
-        form.addRow("Value (0 = auto)", self.major_val_sb)
+        self._major_value_label = QLabel("Increment (0 = auto)")
+        form.addRow(self._major_value_label, self.major_val_sb)
         form.addRow(QLabel("<b>Minor Ticks</b>"))
         form.addRow("Type", self.minor_type_cb)
-        form.addRow("Count", self.minor_count_sb)
+        form.addRow("Count between major", self.minor_count_sb)
+        self.major_type_cb.currentTextChanged.connect(self._on_major_type_changed)
+        self._on_major_type_changed(self.major_type_cb.currentText())
+
+    def _on_major_type_changed(self, kind: str) -> None:
+        if kind == "By Count":
+            self._major_value_label.setText("Count (0 = auto)")
+        else:
+            self._major_value_label.setText("Increment (0 = auto)")
 
     def commit(self) -> None:
         self._scale.auto_range = self.auto_cb.isChecked()
@@ -730,14 +921,19 @@ class _PlotTitlePanel(QWidget):
         self.size_sb.setRange(6, 48)
         self.size_sb.setValue(settings.plot_title_size)
         self.color_btn = _ColorButton(settings.plot_title_color)
+        self.font_cb = QFontComboBox()
+        if settings.plot_title_font_family:
+            self.font_cb.setCurrentFont(QFont(settings.plot_title_font_family))
         form.addRow("Plot title", self.text_edit)
         form.addRow("Title size", self.size_sb)
         form.addRow("Title color", self.color_btn)
+        form.addRow("Font", self.font_cb)
 
     def commit(self) -> None:
         self._settings.plot_title_text = self.text_edit.text()
         self._settings.plot_title_size = int(self.size_sb.value())
         self._settings.plot_title_color = self.color_btn.color_name()
+        self._settings.plot_title_font_family = self.font_cb.currentFont().family()
 
 
 # ----------------------------------------------------------------------------

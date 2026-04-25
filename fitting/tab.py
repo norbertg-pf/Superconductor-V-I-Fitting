@@ -1240,19 +1240,27 @@ _Y_TITLE_VOLTAGE = "Voltage (V)"
 _Y_TITLE_E_FIELD = "Electric field (V/cm)"
 
 
+_AUTO_LEFT_TITLES = {
+    "",
+    _Y_TITLE_VOLTAGE,
+    _Y_TITLE_E_FIELD,
+    f"{_Y_TITLE_VOLTAGE}  [log scale]",
+    f"{_Y_TITLE_E_FIELD}  [log scale]",
+}
+
+
 def _update_y_axis_label(app):
-    """Swap the Y-axis title. Also update graph_settings.title_left.text so the
-    graph-settings dialog / apply_graph_settings stay in sync.
-    If the user has customised the title to something other than one of the two
+    """Swap the Y-axis title in the graph-settings model so apply_graph_settings
+    re-renders it (preserving the user's color/size/font choices).
+
+    If the user has customised the title to something other than one of the
     auto values, we leave it alone.
     """
     desired = _Y_TITLE_E_FIELD if app.data_fit_use_length_cb.isChecked() else _Y_TITLE_VOLTAGE
     if _current_plot_scale(app) == _PLOT_SCALE_LOGLOG:
-        app.data_fit_plot.setLabel("left", f"{desired}  [log scale]")
-    else:
-        app.data_fit_plot.setLabel("left", desired)
+        desired = f"{desired}  [log scale]"
     settings = getattr(app, "data_fit_graph_settings", None)
-    if settings is not None and settings.title_left.text in ("", _Y_TITLE_VOLTAGE, _Y_TITLE_E_FIELD):
+    if settings is not None and settings.title_left.text in _AUTO_LEFT_TITLES:
         settings.title_left.text = desired
 
 
@@ -1493,27 +1501,35 @@ def _toggle_plot_scale(app) -> None:
             traceback.print_exc()
 
 
+_AUTO_BOTTOM_TITLES = {
+    "",
+    "Current (A)",
+    "Current (A)  [log scale]",
+}
+
+
 def _apply_axis_labels_for_scale(app, to_loglog: bool) -> None:
-    """Rewrite axis titles to make the log transform explicit.
+    """Rewrite axis titles in the graph-settings model so the log transform is
+    explicit. apply_graph_settings re-renders the labels with the user's
+    color/size/font choices preserved.
 
     Tick labels are handled by EngineeringAxisItem (which shows SI-prefixed
     values in both linear and log mode), so here we only adjust the title.
     """
-    plot_widget = getattr(app, "data_fit_plot", None)
-    if plot_widget is None:
+    settings = getattr(app, "data_fit_graph_settings", None)
+    if settings is None:
         return
-    plot_item = plot_widget.getPlotItem()
     use_length = (
         getattr(app, "data_fit_use_length_cb", None)
         and app.data_fit_use_length_cb.isChecked()
     )
     y_base = _Y_TITLE_E_FIELD if use_length else _Y_TITLE_VOLTAGE
-    if to_loglog:
-        plot_item.setLabel("bottom", "Current (A)  [log scale]")
-        plot_item.setLabel("left", f"{y_base}  [log scale]")
-    else:
-        plot_item.setLabel("bottom", "Current (A)")
-        plot_item.setLabel("left", y_base)
+    bottom_desired = "Current (A)  [log scale]" if to_loglog else "Current (A)"
+    left_desired = f"{y_base}  [log scale]" if to_loglog else y_base
+    if settings.title_bottom.text in _AUTO_BOTTOM_TITLES:
+        settings.title_bottom.text = bottom_desired
+    if settings.title_left.text in _AUTO_LEFT_TITLES:
+        settings.title_left.text = left_desired
 
 
 def _on_use_length_changed(app):
