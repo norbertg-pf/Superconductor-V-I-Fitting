@@ -339,6 +339,11 @@ class DataFittingController:
         self.channel_names: list[str] = []
         self.channel_metadata: dict[str, dict] = {}
         self.last_result = None
+        # Most recent (label, FitResult) pairs from a multi-curve run_fit.
+        # Used by the manual "Save metadata" button to persist results that
+        # weren't tied to a stored ``data_fit_curves`` entry — e.g. fits run
+        # against the preview curve.
+        self.last_fit_results: list[tuple[str, object]] = []
         # Saved-fit metadata keyed by channel label, populated from either a
         # FitResults group inside the TDMS or fit_* properties attached to the
         # source channel itself. Used to redraw fitted curves on file load.
@@ -467,6 +472,13 @@ def _connect_data_fitting_actions(app):
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
+    app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
+    app.data_fit_save_metadata_btn.clicked.connect(lambda: _save_metadata_clicked(app))
+    # Autosave gates the two layout checkboxes; save-separate gates same-group.
+    # Initialise the enabled state once and re-evaluate on every toggle.
+    app.data_fit_autosave_cb.toggled.connect(lambda _: _refresh_save_settings_enabled(app))
+    app.data_fit_save_separate_cb.toggled.connect(lambda _: _refresh_save_settings_enabled(app))
+    _refresh_save_settings_enabled(app)
     app.data_fit_add_plot_btn.clicked.connect(lambda: (_add_plot_from_current(app), robust_view(app)))
     app.data_fit_add_corrected_btn.clicked.connect(lambda: (_add_corrected_curve_from_last_fit(app), robust_view(app)))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
@@ -553,6 +565,19 @@ def _reset_data_fitting_defaults(app) -> None:
     _update_avg_rate_label(app)
     _update_method_mode_ui(app)
     _refresh_curve_profile_selector(app)
+    # Reset the Settings checkboxes to their defaults so a Clear gives the
+    # user a clean slate for the next session.
+    if hasattr(app, "data_fit_auto_load_cb"):
+        app.data_fit_auto_load_cb.setChecked(True)
+    if hasattr(app, "data_fit_autosave_cb"):
+        app.data_fit_autosave_cb.setChecked(True)
+    if hasattr(app, "data_fit_save_separate_cb"):
+        app.data_fit_save_separate_cb.setChecked(False)
+    if hasattr(app, "data_fit_same_group_cb"):
+        app.data_fit_same_group_cb.setChecked(True)
+    _refresh_save_settings_enabled(app)
+    if hasattr(app, "data_fit_save_metadata_btn"):
+        app.data_fit_save_metadata_btn.setEnabled(False)
 
 
 def _curve_profile_key_from_ui(app) -> str:
@@ -606,38 +631,87 @@ def setup_data_fitting_tab_layout(app):
     file_row = QHBoxLayout()
     app.data_fit_path_label = QLabel("No file loaded.")
     app.data_fit_path_label.setStyleSheet("color: gray;")
-    app.data_fit_clear_btn = QPushButton("Clear all")
-    app.data_fit_clear_btn.setToolTip("Reset data fitting to defaults and clear loaded curves/preview state.")
-    app.data_fit_load_btn = QPushButton("Load File…")
-    app.data_fit_refresh_btn = QPushButton("Use Current Recording")
-    app.data_fit_export_btn = QPushButton("Export plot…")
+    app.data_fit_clear_btn = QPushButton("Clear")
+    app.data_fit_clear_btn.setToolTip("Reset Data Fitting to defaults and clear loaded curves and preview state.")
+    app.data_fit_load_btn = QPushButton("Load file…")
+    app.data_fit_load_btn.setToolTip("Open a TDMS recording from disk for fitting.")
+    app.data_fit_refresh_btn = QPushButton("Use current")
+    app.data_fit_refresh_btn.setToolTip("Reload the most recent recording from the active acquisition into this tab.")
+    app.data_fit_export_btn = QPushButton("Export…")
     app.data_fit_export_btn.setToolTip("Export the plot in a chosen image or data format (PNG, SVG, CSV, …).")
+    app.data_fit_settings_btn = QPushButton("Settings…")
+    app.data_fit_settings_btn.setToolTip(
+        "Open the Data Fitting settings dialog: auto-load behaviour, automatic\n"
+        "metadata saving, and where fit parameters are written in the TDMS file."
+    )
+    # Compact buttons fit four actions plus the Settings button on one row.
+    for compact_btn in (
+        app.data_fit_clear_btn,
+        app.data_fit_load_btn,
+        app.data_fit_refresh_btn,
+        app.data_fit_export_btn,
+        app.data_fit_settings_btn,
+    ):
+        compact_btn.setStyleSheet("padding: 4px 8px; font-size: 11px;")
     file_row.addWidget(app.data_fit_clear_btn)
     file_row.addWidget(app.data_fit_load_btn)
     file_row.addWidget(app.data_fit_refresh_btn)
     file_row.addWidget(app.data_fit_export_btn)
+    file_row.addWidget(app.data_fit_settings_btn)
     left.addLayout(file_row)
+    left.addWidget(app.data_fit_path_label)
 
-    # Auto-load fitted recording: when checked, finishing an acquisition (or
-    # loading a previously fitted TDMS) auto-populates the Data Fitting tab
-    # with the source curves and any saved FitResult overlays. When unchecked,
-    # auto-fit still writes parameter metadata to the TDMS but the Data
-    # Fitting tab is left untouched so the user can stay in their current
-    # context.
+    # Settings checkboxes live in the Settings dialog (constructed lazily when
+    # the user clicks the button) but the QCheckBox instances themselves are
+    # kept on ``app`` so the rest of the tab can read their state directly.
+    # All four default to "checked" — i.e. metadata is saved automatically,
+    # in the same group/channel, and the tab auto-loads the fitted recording.
     app.data_fit_auto_load_cb = QCheckBox(
-        "Auto-load fitted recording into plot after acquisition / on file load"
+        "Auto-load fitted recording into plot after acquisition or on file load"
     )
     app.data_fit_auto_load_cb.setChecked(True)
     app.data_fit_auto_load_cb.setToolTip(
-        "Checked (default): after Stop Read the just-finished TDMS is loaded\n"
+        "Checked (default): after Stop Read, the just-finished TDMS is loaded\n"
         "into the Data Fitting tab and every fit-enabled voltage channel is\n"
         "plotted with its fitted curve. Loading a previously fitted TDMS also\n"
         "redraws the saved fit overlays.\n"
-        "Unchecked: post-acquisition fits are still written into the TDMS as\n"
+        "Unchecked: post-acquisition fits are still written to the TDMS as\n"
         "channel metadata, but the Data Fitting plot is not refreshed."
     )
-    left.addWidget(app.data_fit_auto_load_cb)
-    left.addWidget(app.data_fit_path_label)
+    app.data_fit_autosave_cb = QCheckBox(
+        "Automatically save fitting parameters as metadata"
+    )
+    app.data_fit_autosave_cb.setChecked(True)
+    app.data_fit_autosave_cb.setToolTip(
+        "Checked (default): every fit attempt — successful or failed — is "
+        "written into the loaded TDMS file as fit metadata, using the layout\n"
+        "selected by the two options below.\n"
+        "Unchecked: the fit runs and shows the parameters in the result panel "
+        "but nothing is written to disk. Use the manual 'Save metadata' button\n"
+        "next to Run Fit when you do want to persist a particular result."
+    )
+    app.data_fit_save_separate_cb = QCheckBox(
+        "Save fit results to a separate TDMS file"
+    )
+    app.data_fit_save_separate_cb.setChecked(False)
+    app.data_fit_save_separate_cb.setToolTip(
+        "Checked: write fit results to <source>_fit_report.tdms next to the source file.\n"
+        "Unchecked (default): write fit metadata into the source TDMS itself "
+        "(the layout depends on 'Use the same group/channel for fit metadata' below)."
+    )
+    app.data_fit_same_group_cb = QCheckBox(
+        "Use the same group/channel for fit metadata"
+    )
+    app.data_fit_same_group_cb.setChecked(True)
+    app.data_fit_same_group_cb.setToolTip(
+        "Checked (default): write fit parameters as TDMS properties on the "
+        "fitted voltage channel itself, in its original group. No extra\n"
+        "FitResults group is created and the file layout stays familiar.\n"
+        "Unchecked: write fit parameters into a dedicated 'FitResults' group, "
+        "one channel per fitted curve. Useful when several fits with different\n"
+        "settings should coexist without overwriting each other.\n"
+        "Greyed out when 'Save fit results to a separate TDMS file' is checked."
+    )
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
     ch_grid = QGridLayout(app.data_fit_channels_group)
@@ -922,9 +996,25 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_vc_input, 1, 3)
     left.addWidget(iter_group)
 
+    run_row = QHBoxLayout()
     app.data_fit_run_btn = QPushButton("Run Fit")
     app.data_fit_run_btn.setStyleSheet("font-weight: bold; background-color: #0078D7; color: white; padding: 8px;")
-    left.addWidget(app.data_fit_run_btn)
+    app.data_fit_save_metadata_btn = QPushButton("Save metadata")
+    app.data_fit_save_metadata_btn.setToolTip(
+        "Manually save the most recent fit parameters into the loaded TDMS file.\n"
+        "Useful when 'Automatically save fitting parameters as metadata' is\n"
+        "unchecked in Settings, or to re-save after toggling the layout\n"
+        "(separate file vs. same group/channel).\n"
+        "Disabled until at least one fit has run."
+    )
+    app.data_fit_save_metadata_btn.setStyleSheet(
+        "font-weight: bold; background-color: #f1f4f8; color: #003a75; padding: 8px;"
+    )
+    app.data_fit_save_metadata_btn.setEnabled(False)
+    # Stretch ratios make Run Fit three times as wide as Save metadata.
+    run_row.addWidget(app.data_fit_run_btn, stretch=3)
+    run_row.addWidget(app.data_fit_save_metadata_btn, stretch=1)
+    left.addLayout(run_row)
 
     preset_row = QHBoxLayout()
     app.data_fit_save_preset_btn = QPushButton("Save preset…")
@@ -939,27 +1029,9 @@ def setup_data_fitting_tab_layout(app):
     preset_row.addWidget(app.data_fit_help_btn)
     left.addLayout(preset_row)
 
-    save_row = QHBoxLayout()
-    app.data_fit_save_separate_cb = QCheckBox("Save fit results to separate TDMS file")
-    app.data_fit_save_separate_cb.setChecked(False)
-    app.data_fit_save_separate_cb.setToolTip(
-        "Checked: write fit results to <source>_fit_report.tdms next to the source file.\n"
-        "Unchecked (default): write fit metadata into the source TDMS itself "
-        "(see 'Use same group/channel' for the layout)."
-    )
-    app.data_fit_same_group_cb = QCheckBox("Use same group/channel for fit metadata")
-    app.data_fit_same_group_cb.setChecked(True)
-    app.data_fit_same_group_cb.setToolTip(
-        "Checked (default): write fit parameters as TDMS properties on the "
-        "fitted voltage channel itself, in its original group. No extra\n"
-        "FitResults group is created and the file layout stays familiar.\n"
-        "Unchecked: write fit parameters into a dedicated 'FitResults' group, "
-        "one channel per fitted curve. Useful when several fits with different\n"
-        "settings should coexist without overwriting each other."
-    )
-    save_row.addWidget(app.data_fit_save_separate_cb)
-    save_row.addWidget(app.data_fit_same_group_cb)
-    left.addLayout(save_row)
+    # Save-result checkboxes were moved to the Settings dialog; the four
+    # QCheckBox instances are constructed earlier in this layout so other
+    # parts of the code can still read their state directly.
 
     app.data_fit_warning_label = QLabel("")
     app.data_fit_warning_label.setWordWrap(True)
@@ -1318,10 +1390,18 @@ def open_file_dialog(app):
         _post_load_setup(app, auto_plot_fits=auto_load)
 
 
-def refresh_current_recording(app):
-    # Prefer the currently-running file; fall back to the last completed
-    # recording so "Use current recording" still works after Stop Read.
-    path = getattr(app, "current_tdms_filepath", "") or ""
+def refresh_current_recording(app, path: Optional[str] = None):
+    """Reload the active recording into the Data Fitting tab.
+
+    When ``path`` is given, it is loaded directly — used by the post-
+    acquisition auto-load path so the lookup does not depend on
+    ``current_tdms_filepath`` still being set when the GUI thread
+    finally services the request. Otherwise: prefer the currently
+    running file, fall back to the most recently completed one so
+    "Use Current Recording" still works after Stop Read.
+    """
+    if not path:
+        path = getattr(app, "current_tdms_filepath", "") or ""
     if not path:
         runtime_state = getattr(app, "runtime_state", None)
         path = getattr(runtime_state, "last_tdms_filepath", "") or ""
@@ -2732,29 +2812,42 @@ def _write_fit_report_same_group(report_path: Path,
         return None
 
 
-def _write_fit_report_tdms(app, results: list[tuple[str, object]]) -> Optional[str]:
+def _write_fit_report_tdms(app, results: list[tuple[str, object]],
+                           *, force: bool = False) -> Optional[str]:
     """Persist fit results into the source TDMS or a side-car file.
 
-    Behaviour follows the two checkboxes in the Data Fitting tab:
+    Behaviour follows the checkboxes in the Settings dialog:
 
-    * ``Save fit results to separate TDMS file`` → write into
+    * ``Automatically save fitting parameters as metadata`` (default on) —
+      gates the writer entirely. When off, post-fit autosave is skipped
+      (used by ``run_fit``); the manual ``Save metadata`` button passes
+      ``force=True`` to bypass this gate.
+    * ``Save fit results to a separate TDMS file`` → write into
       ``<source>_fit_report.tdms`` next to the source. Always uses a
       ``FitResults`` group regardless of the same-group toggle.
-    * ``Use same group/channel for fit metadata`` (default) → attach the fit
-      properties to the fitted voltage channel itself, in its original group;
-      no extra ``FitResults`` group is created. When unchecked, write a
-      ``FitResults`` group into the source TDMS as before.
+    * ``Use the same group/channel for fit metadata`` (default) → attach
+      the fit properties to the fitted voltage channel itself, in its
+      original group; no extra ``FitResults`` group is created. When
+      unchecked, write a ``FitResults`` group into the source TDMS as
+      before.
 
     Failed fits are also persisted (with ``fit_status = "failed"``) so users
     can see that an attempt was made.
 
-    Returns the path written, or ``None`` if there's nothing to write or the
-    source TDMS is unknown. I/O errors are logged and swallowed.
+    Returns the path written, or ``None`` if there's nothing to write, the
+    source TDMS is unknown, or autosave is off (and ``force`` is False).
+    I/O errors are logged and swallowed.
     """
     controller = getattr(app, "data_fit_controller", None)
     src_path = getattr(controller, "tdms_path", "") if controller is not None else ""
     persistent = [(lbl, r) for lbl, r in results if r is not None]
     if not src_path or not persistent:
+        return None
+    autosave_on = bool(
+        getattr(app, "data_fit_autosave_cb", None) is None
+        or app.data_fit_autosave_cb.isChecked()
+    )
+    if not autosave_on and not force:
         return None
     src = Path(src_path)
     save_separate = bool(
@@ -2919,8 +3012,23 @@ def run_fit(app):
         else:
             _hide_fit_overlays(app)
             _show_warning(app, "No curve produced a successful fit.", severity="error")
+        # Any fit attempt — successful or not — enables the manual
+        # "Save metadata" button so the user can re-persist the result
+        # after toggling layout in Settings without re-running the fit.
+        if hasattr(app, "data_fit_save_metadata_btn"):
+            app.data_fit_save_metadata_btn.setEnabled(True)
+        # Cache results on the controller so the manual Save metadata
+        # button can find them even when the fit ran against the preview
+        # (no entry stored in ``data_fit_curves``).
+        controller_obj = getattr(app, "data_fit_controller", None)
+        if controller_obj is not None:
+            controller_obj.last_fit_results = list(all_results)
+            if last_ok is not None:
+                controller_obj.last_result = last_ok
         # Persist every attempt — including failed ones — so users can see a
-        # paper trail in the TDMS even when the fit didn't converge.
+        # paper trail in the TDMS even when the fit didn't converge. The
+        # writer respects the Autosave toggle in Settings; a no-op return
+        # here is normal when autosave is off.
         report_path = _write_fit_report_tdms(app, all_results)
         if report_path:
             current = app.data_fit_result_text.toPlainText()
@@ -2954,11 +3062,16 @@ def run_fit(app):
         _hide_fit_overlays(app)
         _show_warning(app, msg or "Fit failed.", severity="error")
         if result is not None:
+            if hasattr(app, "data_fit_save_metadata_btn"):
+                app.data_fit_save_metadata_btn.setEnabled(True)
+            label = app.data_fit_y_cb.currentText() or "Curve"
+            controller.last_fit_results = [(label, result)]
+            controller.last_result = result
             # Even a totally failed fit leaves a record in the TDMS so the
             # user can tell, when re-opening the file later, that an attempt
             # was made and what error it produced.
             failed_path = _write_fit_report_tdms(
-                app, [(app.data_fit_y_cb.currentText(), result)]
+                app, [(label, result)]
             )
             if failed_path:
                 current = app.data_fit_result_text.toPlainText()
@@ -2987,8 +3100,15 @@ def run_fit(app):
     )
     _plot_residuals(app, result)
     _post_fit_warnings(app, result, settings)
+    if hasattr(app, "data_fit_save_metadata_btn"):
+        app.data_fit_save_metadata_btn.setEnabled(True)
+    # Cache the single-curve result so manual Save metadata can re-persist
+    # it after the user toggles the layout in Settings.
+    label = app.data_fit_y_cb.currentText() or "Curve"
+    controller.last_fit_results = [(label, result)]
+    controller.last_result = result
     report_path = _write_fit_report_tdms(
-        app, [(app.data_fit_y_cb.currentText(), result)]
+        app, [(label, result)]
     )
     if report_path:
         current = app.data_fit_result_text.toPlainText()
@@ -3146,6 +3266,138 @@ def _open_export_dialog(app) -> None:
     default_dir = _preset_dir(app)
     dialog = ExportPlotDialog(app.data_fit_plot.getPlotItem(), app, default_dir)
     dialog.exec_()
+
+
+def _refresh_save_settings_enabled(app) -> None:
+    """Apply the dependency rules between the four metadata-saving checkboxes.
+
+    Rules:
+    * Autosave unchecked → save-separate and same-group are greyed out: the
+      writer never runs in that mode, so the layout choice is moot.
+    * Save-separate checked → same-group is greyed out: the side-car file
+      always uses the FitResults group regardless of the same-group setting.
+    """
+    autosave_cb = getattr(app, "data_fit_autosave_cb", None)
+    save_separate_cb = getattr(app, "data_fit_save_separate_cb", None)
+    same_group_cb = getattr(app, "data_fit_same_group_cb", None)
+    if autosave_cb is None or save_separate_cb is None or same_group_cb is None:
+        return
+    autosave_on = bool(autosave_cb.isChecked())
+    save_separate_on = bool(save_separate_cb.isChecked())
+    save_separate_cb.setEnabled(autosave_on)
+    same_group_cb.setEnabled(autosave_on and not save_separate_on)
+
+
+def _open_settings_dialog(app) -> None:
+    """Open the Data Fitting settings dialog.
+
+    The dialog hosts the four metadata-saving checkboxes that used to clutter
+    the main Data Fitting panel. The QCheckBox instances live on ``app`` so
+    the rest of the tab can read their state without a reference to the
+    dialog; the dialog only re-parents them for the duration of its lifetime
+    and returns them to the main panel as hidden widgets when it closes.
+    """
+    from PyQt5.QtWidgets import QDialog, QVBoxLayout, QGroupBox, QPushButton, QHBoxLayout
+
+    dialog = QDialog(app)
+    dialog.setWindowTitle("Data Fitting — Settings")
+    dialog.setModal(True)
+    dialog.resize(520, 280)
+
+    root = QVBoxLayout(dialog)
+
+    load_group = QGroupBox("Loading")
+    load_layout = QVBoxLayout(load_group)
+    load_layout.addWidget(app.data_fit_auto_load_cb)
+    root.addWidget(load_group)
+
+    save_group = QGroupBox("Saving fit metadata")
+    save_layout = QVBoxLayout(save_group)
+    save_layout.addWidget(app.data_fit_autosave_cb)
+    save_layout.addWidget(app.data_fit_save_separate_cb)
+    save_layout.addWidget(app.data_fit_same_group_cb)
+    root.addWidget(save_group)
+
+    # Re-evaluate dependency rules every time the dialog opens, in case the
+    # user has changed checkbox state via a preset since the last open.
+    _refresh_save_settings_enabled(app)
+
+    button_row = QHBoxLayout()
+    button_row.addStretch(1)
+    close_btn = QPushButton("Close")
+    close_btn.clicked.connect(dialog.accept)
+    button_row.addWidget(close_btn)
+    root.addLayout(button_row)
+
+    dialog.exec_()
+
+
+def _save_metadata_clicked(app) -> None:
+    """Manual handler for the 'Save metadata' button next to Run Fit.
+
+    Persists the most recent fit attempt for each curve into the loaded
+    TDMS file, following the layout selected in the Settings dialog
+    (separate file vs. same group/channel). No-op when there's no fit to
+    save — the button is disabled in that case but the guard is here too
+    so programmatic callers stay safe.
+    """
+    if not _collect_persisted_fit_results(app):
+        QMessageBox.information(
+            app, "Data Fitting",
+            "No fit results to save yet. Run a fit first.",
+        )
+        return
+    results = _collect_persisted_fit_results(app)
+    report_path = _write_fit_report_tdms(app, results, force=True)
+    if report_path:
+        existing = app.data_fit_result_text.toPlainText()
+        suffix = f"\nFit metadata saved to: {report_path}"
+        if suffix.strip() not in existing:
+            app.data_fit_result_text.setPlainText(existing + suffix)
+        _show_warning(
+            app, f"Fit metadata saved to {report_path}", severity="warning",
+        )
+    else:
+        QMessageBox.warning(
+            app, "Data Fitting",
+            "Could not save fit metadata. Check that the source TDMS still exists "
+            "and is writable.",
+        )
+
+
+def _collect_persisted_fit_results(app) -> list[tuple[str, object]]:
+    """Return the fit results to persist when the user clicks Save metadata.
+
+    Priority order:
+    1. ``controller.last_fit_results`` — the (label, FitResult) tuples cached
+       by the most recent ``run_fit`` call. This is the authoritative source
+       because it covers preview-only fits that don't get a stored entry in
+       ``data_fit_curves``.
+    2. Stored curves with attached ``fit_result`` (excluding the
+       ``is_fit_result`` overlay rows).
+    3. ``controller.last_result`` as a final fallback for very old code paths.
+    """
+    controller = getattr(app, "data_fit_controller", None)
+    cached = list(getattr(controller, "last_fit_results", []) or []) if controller is not None else []
+    if cached:
+        return cached
+    seen_labels: set[str] = set()
+    out: list[tuple[str, object]] = []
+    for entry in getattr(app, "data_fit_curves", []) or []:
+        if bool(entry.get("is_fit_result", False)):
+            continue
+        result = entry.get("fit_result")
+        if result is None:
+            continue
+        label = str(entry.get("label") or "Curve")
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        out.append((label, result))
+    last_result = getattr(controller, "last_result", None) if controller is not None else None
+    if not out and last_result is not None:
+        out.append((app.data_fit_y_cb.currentText() or "Curve", last_result))
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -3845,6 +4097,10 @@ def _settings_to_preset(app) -> FitPreset:
         getattr(app, "data_fit_auto_load_cb", None) is None
         or app.data_fit_auto_load_cb.isChecked()
     )
+    autosave = bool(
+        getattr(app, "data_fit_autosave_cb", None) is None
+        or app.data_fit_autosave_cb.isChecked()
+    )
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
         didt_high=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100),
@@ -3866,6 +4122,7 @@ def _settings_to_preset(app) -> FitPreset:
         save_to_separate_tdms=save_separate,
         save_fit_in_same_group=same_group,
         auto_load_after_acquisition=auto_load,
+        autosave_fit_metadata=autosave,
     )
 
 
@@ -3906,6 +4163,13 @@ def _apply_preset(app, preset: FitPreset) -> None:
         app.data_fit_auto_load_cb.setChecked(
             bool(getattr(preset, "auto_load_after_acquisition", True))
         )
+    if hasattr(app, "data_fit_autosave_cb"):
+        app.data_fit_autosave_cb.setChecked(
+            bool(getattr(preset, "autosave_fit_metadata", True))
+        )
+    # The four save-settings checkboxes drive each other's enabled state;
+    # re-evaluate after every preset apply so the UI reflects the new values.
+    _refresh_save_settings_enabled(app)
     # Attempt to restore channel selections if they exist in the current file.
     for combo, name in (
         (app.data_fit_x_cb, preset.x_channel),

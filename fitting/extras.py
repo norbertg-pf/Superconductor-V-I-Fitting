@@ -1089,6 +1089,10 @@ class FitPreset:
     # When True, loading a TDMS or finishing an acquisition auto-populates
     # the Data Fitting tab with the source curves and any saved fit overlays.
     auto_load_after_acquisition: bool = True
+    # When True, every fit attempt (success or failure) is automatically
+    # written into the loaded TDMS as fit metadata. When False, fits run
+    # silently and the user must press the Save metadata button to persist.
+    autosave_fit_metadata: bool = True
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:
