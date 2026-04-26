@@ -1,15 +1,3 @@
-# Superconductor V–I Fitting
-
-Self-contained Python/Qt tool that extracts the **critical current `I_c`**, the
-**n-value** and the **resistive baseline** from a recorded voltage–current
-ramp using the IEC 61788 power-law criterion. It bundles a pure-numpy/scipy
-math layer, an interactive PyQt5 UI with an OriginLab-style graph-settings
-dialog, presets, multi-curve management, and a per-fit TDMS side-car report.
-
-![Anatomy of a V–I curve](docs/v_i_curve_anatomy.png)
-
----
-
 ## Install (Windows PowerShell)
 
 ```powershell
@@ -28,6 +16,54 @@ python -m fitting
 
 The app shows a gray version label at the bottom-right:
 `v1.0 (build N)` where `N` follows the git commit count.
+
+## Build one-file Windows EXE
+
+```powershell
+pip install pyinstaller
+pyinstaller --clean --noconfirm --distpath build superconductorfit.spec
+```
+
+Output: `build\Superconductor fitting v1.0 build N.exe` — copy to any
+Windows machine and run directly.
+
+## Embedding in another Qt app
+
+```python
+from types import SimpleNamespace
+from PyQt5.QtWidgets import QWidget
+from fitting import setup_data_fitting_tab_layout, tab as _tab
+
+host.ui_state = SimpleNamespace()
+host.ui_state.data_fitting_tab = QWidget()    # your tab container
+host.data_fitting_refresh_preview = lambda *_: _tab.refresh_preview(host)
+# ...plus the other `data_fitting_*` methods (see standalone.DataFittingWindow).
+setup_data_fitting_tab_layout(host)
+```
+
+## Public API
+
+```python
+from fitting import (
+    FitResult, FitSettings, run_full_fit, robust_view_range,
+    setup_data_fitting_tab_layout,
+)
+```
+
+`run_full_fit(t, x, y, settings)` returns a `FitResult` without any Qt
+dependencies, so the math layer can be used in scripts and tests.
+
+---
+
+# Superconductor V–I Fitting
+
+Self-contained Python/Qt tool that extracts the **critical current `I_c`**, the
+**n-value** and the **resistive baseline** from a recorded voltage–current
+ramp using the IEC 61788 power-law criterion. It bundles a pure-numpy/scipy
+math layer, an interactive PyQt5 UI with an OriginLab-style graph-settings
+dialog, presets, multi-curve management, and a per-fit TDMS side-car report.
+
+![Anatomy of a V–I curve](docs/v_i_curve_anatomy.png)
 
 ---
 
@@ -177,44 +213,6 @@ round-trips through LabVIEW, OriginLab and Python.
 | `fitting/tab.py` | Qt layout, action functions, in-app help dialog. |
 | `fitting/standalone.py` | Minimal `QMainWindow` that wraps the tab for standalone use. |
 | `fitting/__main__.py` | `python -m fitting` entry point. |
-
----
-
-## Build one-file Windows EXE
-
-```powershell
-pip install pyinstaller
-pyinstaller --clean --noconfirm --distpath build superconductorfit.spec
-```
-
-Output: `build\Superconductor fitting v1.0 build N.exe` — copy to any
-Windows machine and run directly.
-
-## Embedding in another Qt app
-
-```python
-from types import SimpleNamespace
-from PyQt5.QtWidgets import QWidget
-from fitting import setup_data_fitting_tab_layout, tab as _tab
-
-host.ui_state = SimpleNamespace()
-host.ui_state.data_fitting_tab = QWidget()    # your tab container
-host.data_fitting_refresh_preview = lambda *_: _tab.refresh_preview(host)
-# ...plus the other `data_fitting_*` methods (see standalone.DataFittingWindow).
-setup_data_fitting_tab_layout(host)
-```
-
-## Public API
-
-```python
-from fitting import (
-    FitResult, FitSettings, run_full_fit, robust_view_range,
-    setup_data_fitting_tab_layout,
-)
-```
-
-`run_full_fit(t, x, y, settings)` returns a `FitResult` without any Qt
-dependencies, so the math layer can be used in scripts and tests.
 
 ---
 
