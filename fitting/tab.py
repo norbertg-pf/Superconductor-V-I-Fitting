@@ -1350,6 +1350,58 @@ def _try_select(combo: QComboBox, preferred_substrings):
                 return
 
 
+def _clear_plot_state_for_new_recording(app) -> None:
+    """Wipe plotted curves, fit overlays, and result text so the next load
+    starts from a clean slate.
+
+    Called before every new TDMS load (manual or auto). Without this, every
+    Stop Read of a new acquisition piles new replayed source curves and fit
+    overlays on top of the previous run's plot, and the result panel
+    accumulates stale summaries.
+
+    Preserves user-configurable settings (Settings checkboxes, fit-window
+    inputs, scale/offset inputs) — only the per-recording plot state is
+    reset. Use ``_reset_data_fitting_defaults`` (the Clear button) when the
+    user wants a full reset.
+    """
+    # Remove every curve item that was added to the plot.
+    for entry in list(getattr(app, "data_fit_curves", []) or []):
+        item = entry.get("plot_item")
+        if item is not None:
+            try:
+                app.data_fit_plot.removeItem(item)
+            except Exception:
+                pass
+        fit_item = entry.get("fit_plot_item")
+        if fit_item is not None:
+            try:
+                app.data_fit_plot.removeItem(fit_item)
+            except Exception:
+                pass
+    app.data_fit_curves = []
+    # Reset preview state and clear the static raw/model curve items.
+    app.data_fit_preview_visible = True
+    app.data_fit_preview_include_in_fit = True
+    if hasattr(app, "data_fit_raw_curve"):
+        app.data_fit_raw_curve.setData([], [])
+    if hasattr(app, "data_fit_model_curve"):
+        app.data_fit_model_curve.setData([], [])
+    # Clear the result panel and any stale warning so the next fit's
+    # output isn't appended to the previous run's text.
+    if hasattr(app, "data_fit_result_text"):
+        app.data_fit_result_text.clear()
+    _hide_fit_overlays(app)
+    _clear_warning(app)
+    # Reset cached fit results so the manual Save metadata button doesn't
+    # carry over stale (label, FitResult) tuples from the previous file.
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is not None:
+        controller.last_result = None
+        controller.last_fit_results = []
+    if hasattr(app, "data_fit_save_metadata_btn"):
+        app.data_fit_save_metadata_btn.setEnabled(False)
+
+
 def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
     """Shared post-load wiring for ``open_file_dialog`` and
     ``refresh_current_recording``: rebuild combos, populate metadata, refresh
@@ -1376,6 +1428,9 @@ def open_file_dialog(app):
     path, _ = QFileDialog.getOpenFileName(app, "Select TDMS recording", start_dir, "TDMS Files (*.tdms);;All Files (*)")
     if not path:
         return
+    # Clear stale curves and result text so the new file starts on an
+    # empty plot rather than piling on top of the previous load.
+    _clear_plot_state_for_new_recording(app)
     ok, msg = app.data_fit_controller.load_recording(path)
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
@@ -1405,6 +1460,9 @@ def refresh_current_recording(app, path: Optional[str] = None):
     if not path:
         runtime_state = getattr(app, "runtime_state", None)
         path = getattr(runtime_state, "last_tdms_filepath", "") or ""
+    # Clear stale curves and result text so a new acquisition starts on an
+    # empty plot rather than piling on top of the previous run's results.
+    _clear_plot_state_for_new_recording(app)
     ok, msg = app.data_fit_controller.load_recording(path)
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
