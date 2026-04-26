@@ -339,6 +339,10 @@ class DataFittingController:
         self.channel_names: list[str] = []
         self.channel_metadata: dict[str, dict] = {}
         self.last_result = None
+        # Saved-fit metadata keyed by channel label, populated from either a
+        # FitResults group inside the TDMS or fit_* properties attached to the
+        # source channel itself. Used to redraw fitted curves on file load.
+        self.saved_fit_results: dict[str, dict] = {}
 
     # --- data source -----------------------------------------------------
     def load_recording(self, path: str) -> tuple[bool, str]:
@@ -346,6 +350,7 @@ class DataFittingController:
         self.channel_metadata.clear()
         self.channel_names = []
         self.time_array = None
+        self.saved_fit_results = {}
         if not path or not os.path.exists(path):
             return False, "No recording found. Click 'Load File…' to choose a TDMS."
         try:
@@ -353,15 +358,31 @@ class DataFittingController:
                 self.time_array = _read_time_channel(tdms_file)
                 names: list[str] = []
                 for group in tdms_file.groups():
+                    is_fit_results_group = (group.name == "FitResults")
                     for channel in group.channels():
                         name = getattr(channel, "name", "")
                         if not name or name.lower() == "time":
+                            continue
+                        props = dict(getattr(channel, "properties", {}) or {})
+                        if is_fit_results_group:
+                            # FitResults group → property dict per fitted label.
+                            self.saved_fit_results[name] = props
                             continue
                         if name in self.channel_cache:
                             continue
                         self.channel_cache[name] = np.asarray(channel[:], dtype=float)
                         self.channel_metadata[name] = _read_channel_metadata(channel)
                         names.append(name)
+                        # Same-group mode: fit_* properties live on the source
+                        # channel itself. Strip the prefix so consumers see the
+                        # same dict shape as a FitResults entry.
+                        same_group_fit = {
+                            key[len(_FIT_PROPERTY_PREFIX):]: value
+                            for key, value in props.items()
+                            if key.startswith(_FIT_PROPERTY_PREFIX)
+                        }
+                        if same_group_fit and name not in self.saved_fit_results:
+                            self.saved_fit_results[name] = same_group_fit
                 self.channel_names = names
         except Exception as exc:
             return False, f"Could not read TDMS: {exc}"
@@ -596,6 +617,26 @@ def setup_data_fitting_tab_layout(app):
     file_row.addWidget(app.data_fit_refresh_btn)
     file_row.addWidget(app.data_fit_export_btn)
     left.addLayout(file_row)
+
+    # Auto-load fitted recording: when checked, finishing an acquisition (or
+    # loading a previously fitted TDMS) auto-populates the Data Fitting tab
+    # with the source curves and any saved FitResult overlays. When unchecked,
+    # auto-fit still writes parameter metadata to the TDMS but the Data
+    # Fitting tab is left untouched so the user can stay in their current
+    # context.
+    app.data_fit_auto_load_cb = QCheckBox(
+        "Auto-load fitted recording into plot after acquisition / on file load"
+    )
+    app.data_fit_auto_load_cb.setChecked(True)
+    app.data_fit_auto_load_cb.setToolTip(
+        "Checked (default): after Stop Read the just-finished TDMS is loaded\n"
+        "into the Data Fitting tab and every fit-enabled voltage channel is\n"
+        "plotted with its fitted curve. Loading a previously fitted TDMS also\n"
+        "redraws the saved fit overlays.\n"
+        "Unchecked: post-acquisition fits are still written into the TDMS as\n"
+        "channel metadata, but the Data Fitting plot is not refreshed."
+    )
+    left.addWidget(app.data_fit_auto_load_cb)
     left.addWidget(app.data_fit_path_label)
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
@@ -898,14 +939,27 @@ def setup_data_fitting_tab_layout(app):
     preset_row.addWidget(app.data_fit_help_btn)
     left.addLayout(preset_row)
 
+    save_row = QHBoxLayout()
     app.data_fit_save_separate_cb = QCheckBox("Save fit results to separate TDMS file")
     app.data_fit_save_separate_cb.setChecked(False)
     app.data_fit_save_separate_cb.setToolTip(
         "Checked: write fit results to <source>_fit_report.tdms next to the source file.\n"
-        "Unchecked (default): append the FitResults group into the source TDMS file itself, "
-        "overwriting any prior fit for the same channel."
+        "Unchecked (default): write fit metadata into the source TDMS itself "
+        "(see 'Use same group/channel' for the layout)."
     )
-    left.addWidget(app.data_fit_save_separate_cb)
+    app.data_fit_same_group_cb = QCheckBox("Use same group/channel for fit metadata")
+    app.data_fit_same_group_cb.setChecked(True)
+    app.data_fit_same_group_cb.setToolTip(
+        "Checked (default): write fit parameters as TDMS properties on the "
+        "fitted voltage channel itself, in its original group. No extra\n"
+        "FitResults group is created and the file layout stays familiar.\n"
+        "Unchecked: write fit parameters into a dedicated 'FitResults' group, "
+        "one channel per fitted curve. Useful when several fits with different\n"
+        "settings should coexist without overwriting each other."
+    )
+    save_row.addWidget(app.data_fit_save_separate_cb)
+    save_row.addWidget(app.data_fit_same_group_cb)
+    left.addLayout(save_row)
 
     app.data_fit_warning_label = QLabel("")
     app.data_fit_warning_label.setWordWrap(True)
@@ -1224,6 +1278,26 @@ def _try_select(combo: QComboBox, preferred_substrings):
                 return
 
 
+def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
+    """Shared post-load wiring for ``open_file_dialog`` and
+    ``refresh_current_recording``: rebuild combos, populate metadata, refresh
+    the preview, and (when configured) replay saved fits onto the plot.
+    """
+    app.data_fit_preview_visible = True
+    app.data_fit_preview_include_in_fit = True
+    app.data_fit_preview_color = _next_pastel_color(app)
+    app.data_fit_preview_alpha_pct = 100
+    app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
+    app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
+    app.data_fit_plot_dirty = True
+    _populate_channel_combos(app)
+    load_metadata_from_tdms(app)
+    _refresh_curve_profile_selector(app)
+    refresh_preview(app)
+    if auto_plot_fits:
+        _replay_saved_fits_into_plot(app)
+
+
 def open_file_dialog(app):
     runtime_state = getattr(app, "runtime_state", None)
     start_dir = getattr(runtime_state, "output_folder", "") or ""
@@ -1234,17 +1308,14 @@ def open_file_dialog(app):
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
     if ok:
-        app.data_fit_preview_visible = True
-        app.data_fit_preview_include_in_fit = True
-        app.data_fit_preview_color = _next_pastel_color(app)
-        app.data_fit_preview_alpha_pct = 100
-        app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
-        app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
-        app.data_fit_plot_dirty = True
-        _populate_channel_combos(app)
-        load_metadata_from_tdms(app)
-        _refresh_curve_profile_selector(app)
-        refresh_preview(app)
+        # Auto-load checkbox controls whether we also redraw any saved fit
+        # overlays into the plot — separate from whether the preview itself
+        # is shown, which always happens on a successful load.
+        auto_load = bool(
+            getattr(app, "data_fit_auto_load_cb", None) is None
+            or app.data_fit_auto_load_cb.isChecked()
+        )
+        _post_load_setup(app, auto_plot_fits=auto_load)
 
 
 def refresh_current_recording(app):
@@ -1258,17 +1329,214 @@ def refresh_current_recording(app):
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
     if ok:
-        app.data_fit_preview_visible = True
-        app.data_fit_preview_include_in_fit = True
-        app.data_fit_preview_color = _next_pastel_color(app)
-        app.data_fit_preview_alpha_pct = 100
-        app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
-        app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
-        app.data_fit_plot_dirty = True
-        _populate_channel_combos(app)
-        load_metadata_from_tdms(app)
-        _refresh_curve_profile_selector(app)
-        refresh_preview(app)
+        auto_load = bool(
+            getattr(app, "data_fit_auto_load_cb", None) is None
+            or app.data_fit_auto_load_cb.isChecked()
+        )
+        _post_load_setup(app, auto_plot_fits=auto_load)
+
+
+def _y_signature_from_meta(name: str, meta: dict) -> tuple:
+    """Synthesise a curve signature for a replayed channel that matches what
+    ``_curve_signature`` would produce if the user had clicked Add to plot
+    on the same channel themselves. Lets the dedup in ``_add_plot_from_current``
+    swap the replay for a fresh plot without leaving an orphan entry behind.
+    """
+    return (
+        "Time",
+        "",
+        name,
+        float(meta.get("scale", 1.0) or 1.0),
+        float(meta.get("offset", 0.0) or 0.0),
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        1,
+        meta.get("voltage_tap_cm"),
+    )
+
+
+def _add_replayed_source_curve(app, name: str, x: np.ndarray, y: np.ndarray,
+                               t: np.ndarray, meta: dict, *, visible: bool):
+    """Add a source curve (the raw V-I data) that was loaded from TDMS."""
+    color = _next_pastel_color(app)
+    label = name
+    item = app.data_fit_plot.plot(
+        [], [], pen=None, symbol="o", symbolSize=4,
+        symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color), name=label,
+    )
+    sig = ("__replayed__", name)
+    entry = {
+        "signature": sig,
+        "label": label,
+        "color": color,
+        "alpha_pct": 100,
+        "skip_points": 1,
+        "include_in_fit": True,
+        "visible": bool(visible),
+        "x": x,
+        "y": y,
+        "t": t,
+        "plot_item": item,
+        "fit_result": None,
+        "curve_style": {"draw_mode": "Auto", "line_width": 1.0, "point_size": 4},
+        "avg_window": 1,
+        "show_criterion": False,
+        "show_ic": False,
+        "source": {
+            "time_sig": "Time",
+            "x_sig": "",
+            "y_sig": name,
+            "t_scale": 1.0,
+            "t_offset": 0.0,
+            "x_scale": 1.0,
+            "x_offset": 0.0,
+            "y_scale": float(meta.get("scale", 1.0) or 1.0),
+            "y_offset": float(meta.get("offset", 0.0) or 0.0),
+            "use_length": bool(meta.get("voltage_tap_cm")),
+            "length_cm": float(meta.get("voltage_tap_cm") or 1.0),
+        },
+        "is_replayed": True,
+    }
+    app.data_fit_curves.append(entry)
+    _refresh_curve_item(entry)
+    _apply_curve_visibility(entry)
+    return entry
+
+
+def _replay_saved_fits_into_plot(app) -> None:
+    """Replay every saved fit overlay we found in the just-loaded TDMS.
+
+    For each labelled entry in ``controller.saved_fit_results``:
+    1. If a matching source channel exists, plot it as a replayed source
+       curve (so the fit has something to overlay).
+    2. Reconstruct a ``FitResult`` from the saved properties and call
+       ``_upsert_fit_curve_entry`` to attach the model curve.
+    Only the first source curve is shown by default — the rest are added
+    hidden so the plot stays uncluttered. The user can toggle visibility
+    from the Plot summary dialog.
+    """
+    controller = getattr(app, "data_fit_controller", None)
+    saved = getattr(controller, "saved_fit_results", {}) if controller is not None else {}
+    if not saved:
+        return
+    if not hasattr(app, "data_fit_curves"):
+        app.data_fit_curves = []
+    # Hide the preview when we have replayed curves so the plot doesn't
+    # contain both the raw preview and the replayed source curve for the
+    # same channel.
+    if any(name in (controller.channel_names or []) for name in saved):
+        app.data_fit_preview_visible = False
+        app.data_fit_raw_curve.setData([], [])
+
+    fit_summary_lines: list[str] = []
+    plotted = 0
+    failed = 0
+    first = True
+    for name, props in saved.items():
+        if not name:
+            continue
+        meta = controller.get_metadata(name)
+        x_raw = controller.get_channel("")  # placeholder, set below
+        # X (current) defaults to the recording's first non-time channel
+        # whose name contains "current"/"I"; otherwise the first numeric
+        # channel that's not the Y itself. Falls back to ``time_array`` if
+        # nothing matches — no overlay is drawn in that case.
+        x_name = _guess_current_channel(controller, exclude=name)
+        x_raw = controller.get_channel(x_name) if x_name else None
+        y_raw = controller.get_channel(name)
+        t_raw = controller.time_array
+        if y_raw is None or x_raw is None or t_raw is None:
+            failed += 1
+            continue
+        x_arr = controller.apply_transform(
+            x_raw,
+            float(controller.get_metadata(x_name).get("scale", 1.0) or 1.0),
+            float(controller.get_metadata(x_name).get("offset", 0.0) or 0.0),
+        )
+        y_arr = controller.apply_transform(
+            y_raw,
+            float(meta.get("scale", 1.0) or 1.0),
+            float(meta.get("offset", 0.0) or 0.0),
+        )
+        t_arr = np.asarray(t_raw, dtype=float)
+        # Apply per-unit-length scaling iff the saved fit was in V/cm AND
+        # the channel has a recorded tap distance.
+        v_tap = meta.get("voltage_tap_cm")
+        if v_tap and float(v_tap) > 0 and _coerce_bool(_prop_lookup(props, "uses_sample_length")):
+            y_arr = y_arr / float(v_tap)
+        result = _fit_result_from_props(props)
+        fit_x, fit_y = _build_fit_curve(result, x_arr)
+        result.fit_x = fit_x
+        result.fit_y = fit_y
+        source_entry = _add_replayed_source_curve(
+            app, name, x_arr, y_arr, t_arr, meta, visible=first,
+        )
+        # Only attach a model overlay when the saved fit converged. Failed
+        # fits are still acknowledged in the summary lines below.
+        if result.ok and fit_x is not None and fit_y is not None:
+            _upsert_fit_curve_entry(app, source_entry, result)
+            for c in app.data_fit_curves:
+                if (
+                    c.get("is_fit_result")
+                    and c.get("fit_parent_signature") == source_entry.get("signature")
+                ):
+                    c["visible"] = bool(first)
+                    _apply_curve_visibility(c)
+            plotted += 1
+            first = False
+            fit_summary_lines.append(
+                f"[{name}] saved fit replayed: Ic = {result.Ic:.6g} A, n = {result.n_value:.2f}"
+            )
+        else:
+            failed += 1
+            msg = _prop_lookup(props, "fit_message", "message") or "no parameters available"
+            fit_summary_lines.append(f"[{name}] saved fit FAILED ({msg})")
+            if first:
+                # Still show one source curve when nothing succeeded so the
+                # user has visual confirmation that the file was loaded.
+                first = False
+    _refresh_curve_profile_selector(app)
+    if fit_summary_lines:
+        intro = (
+            f"Replayed {plotted} saved fit{'s' if plotted != 1 else ''}"
+            + (f", {failed} failed" if failed else "")
+            + ":\n"
+        )
+        app.data_fit_result_text.setPlainText(intro + "\n".join(fit_summary_lines))
+    try:
+        robust_view(app)
+    except Exception:
+        traceback.print_exc()
+
+
+def _guess_current_channel(controller, *, exclude: str) -> str:
+    """Pick the most likely current (X-axis) channel from a loaded recording.
+
+    Used during fit replay when the user hasn't picked an X channel yet.
+    Heuristic: prefer names containing 'I' or 'current' that aren't the
+    excluded Y label; fall back to the first non-excluded channel.
+    """
+    if not controller:
+        return ""
+    candidates = [n for n in (controller.channel_names or []) if n and n != exclude]
+    for needle in ("Current", "current", "_I", "AI0", "Ic"):
+        for name in candidates:
+            if needle in name:
+                return name
+    return candidates[0] if candidates else ""
+
+
+def _apply_curve_visibility(entry: dict) -> None:
+    """Honour ``entry['visible']`` on the underlying pyqtgraph plot item."""
+    item = entry.get("plot_item")
+    if item is None:
+        return
+    try:
+        item.setVisible(bool(entry.get("visible", True)))
+    except Exception:
+        pass
 
 
 _Y_TITLE_VOLTAGE = "Voltage (V)"
@@ -2209,43 +2477,67 @@ def _format_result(result) -> str:
     return "\n".join(lines)
 
 
+_FIT_PROPERTY_PREFIX = "fit_"
+_FIT_PROPERTY_KEYS = (
+    "method", "method_compliant", "fit_status", "fit_message",
+    "fit_timestamp", "Ic_A", "sigma_Ic_A", "n_value", "sigma_n",
+    "r_squared", "chi_squared", "di_dt_A_per_s", "criterion_value",
+    "criterion_unit", "criterion_name", "Ec1", "Ec2",
+    "n_window_I_lo_A", "n_window_I_hi_A", "n_points_used",
+    "V_ofs", "V0_inductive", "inductance_L_H", "R_or_rho", "R_unit",
+    "ramp_inductive_ratio", "ramp_too_fast", "insufficient_n_points",
+    "thermal_offset_applied", "uses_sample_length",
+    "fit_method",
+)
+
+
 def _fit_result_properties(result) -> dict:
-    """Serialise a FitResult into a flat dict of TDMS-writable properties."""
+    """Serialise a FitResult into a flat dict of TDMS-writable properties.
+
+    Failed results are also serialised (with ``fit_status = "failed"`` and the
+    originating message) so a user opening the recording later can see that an
+    attempt was made and why it didn't produce numbers.
+    """
     is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
+    ok = bool(getattr(result, "ok", False))
+    n_window = getattr(result, "n_window_I", (0.0, 0.0)) or (0.0, 0.0)
     props = {
         "method": "IEC 61788 log-log (decade n-value)" if is_loglog else "Non-linear V-I",
         "method_compliant": "IEC 61788-3" if is_loglog else "legacy",
+        "fit_status": "ok" if ok else "failed",
+        "fit_message": str(getattr(result, "message", "") or ""),
         "fit_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "fit_method": str(getattr(result, "fit_method", FIT_METHOD_LOG_LOG)),
         # Primary outputs per IEC 61788 / user request.
-        "Ic_A": float(result.Ic),
+        "Ic_A": float(getattr(result, "Ic", 0.0)),
         "sigma_Ic_A": float(getattr(result, "sigma_Ic", 0.0)),
-        "n_value": float(result.n_value),
+        "n_value": float(getattr(result, "n_value", 0.0)),
         "sigma_n": float(getattr(result, "sigma_n", 0.0)),
         "r_squared": float(getattr(result, "r_squared", 0.0)),
-        "chi_squared": float(result.chi_sqr),
-        "di_dt_A_per_s": float(result.di_dt),
+        "chi_squared": float(getattr(result, "chi_sqr", 0.0)),
+        "di_dt_A_per_s": float(getattr(result, "di_dt", 0.0)),
         # Criterion: Ec (V/cm) when uses_sample_length, else Vc (V).
-        "criterion_value": float(result.criterion),
-        "criterion_unit": "V/cm" if result.uses_sample_length else "V",
-        "criterion_name": "Ec" if result.uses_sample_length else "Vc",
+        "criterion_value": float(getattr(result, "criterion", 0.0)),
+        "criterion_unit": "V/cm" if getattr(result, "uses_sample_length", False) else "V",
+        "criterion_name": "Ec" if getattr(result, "uses_sample_length", False) else "Vc",
         # IEC decade window (0 for non-linear fits).
         "Ec1": float(getattr(result, "ec1", 0.0)),
         "Ec2": float(getattr(result, "ec2", 0.0)),
-        "n_window_I_lo_A": float(result.n_window_I[0]),
-        "n_window_I_hi_A": float(result.n_window_I[1]),
+        "n_window_I_lo_A": float(n_window[0]),
+        "n_window_I_hi_A": float(n_window[1]),
         "n_points_used": int(getattr(result, "n_points_used", 0)),
         # Baseline decomposition: V_total = V_ofs + L·dI/dt + R·I + Vc·(I/Ic)^n.
         "V_ofs": float(getattr(result, "V_ofs", 0.0)),
-        "V0_inductive": float(result.V0),
-        "inductance_L_H": float(result.inductance_L),
-        "R_or_rho": float(result.R),
-        "R_unit": "Ω/cm" if result.uses_sample_length else "Ω",
+        "V0_inductive": float(getattr(result, "V0", 0.0)),
+        "inductance_L_H": float(getattr(result, "inductance_L", 0.0)),
+        "R_or_rho": float(getattr(result, "R", 0.0)),
+        "R_unit": "Ω/cm" if getattr(result, "uses_sample_length", False) else "Ω",
         # Diagnostic flags the user asked to propagate to channel metadata.
         "ramp_inductive_ratio": float(getattr(result, "ramp_inductive_ratio", 0.0)),
         "ramp_too_fast": bool(getattr(result, "ramp_too_fast", False)),
         "insufficient_n_points": bool(getattr(result, "insufficient_n_points", False)),
         "thermal_offset_applied": bool(getattr(result, "thermal_offset_applied", False)),
-        "uses_sample_length": bool(result.uses_sample_length),
+        "uses_sample_length": bool(getattr(result, "uses_sample_length", False)),
     }
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
@@ -2255,33 +2547,230 @@ def _fit_result_properties(result) -> dict:
     return props
 
 
+def _prefix_fit_props(props: dict) -> dict:
+    """Prefix per-channel fit properties with ``fit_`` so they don't collide
+    with the channel's existing metadata when written into the same group."""
+    out = {}
+    for key, value in props.items():
+        if key.startswith(_FIT_PROPERTY_PREFIX):
+            out[key] = value
+        else:
+            out[f"{_FIT_PROPERTY_PREFIX}{key}"] = value
+    return out
+
+
+def _channel_to_group(tfile, name: str) -> Optional[str]:
+    """Find which group a channel belongs to in a TDMS file."""
+    for grp in tfile.groups():
+        for ch in grp.channels():
+            if getattr(ch, "name", "") == name:
+                return grp.name
+    return None
+
+
+def _coerce_float(value, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def _coerce_bool(value, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return fallback
+
+
+def _prop_lookup(props: dict, *names, default=None):
+    """Look up a property by any of several names — supports both
+    same-group reads (where keys may be ``status`` after the ``fit_``
+    prefix has been stripped) and FitResults-group reads (where keys
+    keep their original ``fit_status``/``Ic_A`` form).
+    """
+    for name in names:
+        if name in props:
+            return props[name]
+    return default
+
+
+def _fit_result_from_props(props: dict):
+    """Best-effort reconstruction of a FitResult from saved TDMS metadata.
+
+    Produces a usable result for plotting (``ok``, ``Ic``, ``n_value``, ``R``,
+    ``V0``, ``criterion``, ``uses_sample_length``) and synthesises a smooth
+    fit curve on the same V-I model the run-time fitter uses, so re-opening a
+    file shows the same overlay the user saw on the original run.
+    """
+    from .service import FitResult, FIT_METHOD_LOG_LOG, FIT_METHOD_NONLINEAR
+    method = str(_prop_lookup(props, "fit_method", "method_id") or "").strip()
+    if method not in (FIT_METHOD_LOG_LOG, FIT_METHOD_NONLINEAR):
+        # Older recordings stored the human-readable label only; infer the
+        # method from the descriptive "method" property.
+        descriptive = str(_prop_lookup(props, "method") or "")
+        method = FIT_METHOD_LOG_LOG if "log-log" in descriptive.lower() else FIT_METHOD_NONLINEAR
+    uses_length = _coerce_bool(_prop_lookup(props, "uses_sample_length"), False)
+    n_window = (
+        _coerce_float(_prop_lookup(props, "n_window_I_lo_A"), 0.0),
+        _coerce_float(_prop_lookup(props, "n_window_I_hi_A"), 0.0),
+    )
+    status = str(_prop_lookup(props, "fit_status", "status", default="ok")).lower()
+    ok = status == "ok"
+    return FitResult(
+        ok=ok,
+        message=str(_prop_lookup(props, "fit_message", "message") or ""),
+        di_dt=_coerce_float(_prop_lookup(props, "di_dt_A_per_s")),
+        inductance_L=_coerce_float(_prop_lookup(props, "inductance_L_H")),
+        V_ofs=_coerce_float(_prop_lookup(props, "V_ofs")),
+        V0=_coerce_float(_prop_lookup(props, "V0_inductive")),
+        R=_coerce_float(_prop_lookup(props, "R_or_rho")),
+        Ic=_coerce_float(_prop_lookup(props, "Ic_A")),
+        n_value=_coerce_float(_prop_lookup(props, "n_value")),
+        criterion=_coerce_float(_prop_lookup(props, "criterion_value")),
+        chi_sqr=_coerce_float(_prop_lookup(props, "chi_squared")),
+        linear_fit_window=(0.0, 0.0),
+        power_fit_window=n_window,
+        uses_sample_length=uses_length,
+        fit_method=method,
+        ec1=_coerce_float(_prop_lookup(props, "Ec1")),
+        ec2=_coerce_float(_prop_lookup(props, "Ec2")),
+        n_window_I=n_window,
+        n_points_used=int(_coerce_float(_prop_lookup(props, "n_points_used"), 0)),
+        sigma_Ic=_coerce_float(_prop_lookup(props, "sigma_Ic_A")),
+        sigma_n=_coerce_float(_prop_lookup(props, "sigma_n")),
+        r_squared=_coerce_float(_prop_lookup(props, "r_squared")),
+        ramp_inductive_ratio=_coerce_float(_prop_lookup(props, "ramp_inductive_ratio")),
+        ramp_too_fast=_coerce_bool(_prop_lookup(props, "ramp_too_fast")),
+        insufficient_n_points=_coerce_bool(_prop_lookup(props, "insufficient_n_points")),
+        thermal_offset_applied=_coerce_bool(_prop_lookup(props, "thermal_offset_applied")),
+    )
+
+
+def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
+    """Reconstruct a smooth (fit_x, fit_y) curve from a FitResult.
+
+    Mirrors the model used by ``run_full_fit`` so re-loaded fits overlay
+    cleanly on the source data. Returns ``(None, None)`` when the result
+    parameters are degenerate (e.g. failed-fit metadata).
+    """
+    if not getattr(result, "ok", False):
+        return None, None
+    Ic = float(getattr(result, "Ic", 0.0))
+    if Ic <= 0:
+        return None, None
+    x_arr = np.asarray(x_data, dtype=float)
+    if x_arr.size < 2:
+        return None, None
+    x_min = max(float(np.min(x_arr)), 1e-12)
+    x_max = float(np.max(x_arr))
+    if x_max <= x_min:
+        return None, None
+    fit_x = np.linspace(x_min, x_max, 400)
+    crit = float(getattr(result, "criterion", 0.0))
+    V0 = float(getattr(result, "V0", 0.0))
+    R = float(getattr(result, "R", 0.0))
+    n_val = float(getattr(result, "n_value", 0.0))
+    fit_y = V0 + R * fit_x + crit * np.power(np.clip(fit_x / Ic, 1e-30, None), n_val)
+    if getattr(result, "thermal_offset_applied", False):
+        fit_y = fit_y + float(getattr(result, "V_ofs", 0.0))
+    # If the saved fit was per-unit-length but the user is loading without
+    # the voltage-tap path active, leave the curve in the same units the
+    # caller plotted x_data in. The caller has already applied the correct
+    # transform via ``_apply_transforms``.
+    return fit_x, fit_y
+
+
+def _write_fit_report_same_group(report_path: Path,
+                                 new_entries: dict[str, dict]) -> Optional[str]:
+    """Attach fit properties as channel metadata on the matching source channels.
+
+    Reads the source TDMS, merges each curve's fit properties into the
+    properties of the channel sharing its label, and rewrites the file with
+    the original groups, channels and data preserved. Properties from prior
+    fits on the same channel are overwritten; properties on channels that
+    weren't fitted in this run are kept untouched.
+
+    Channels whose label has no match in the file (e.g. user renamed a curve
+    before fitting) fall back to a ``FitResults`` group inside the source
+    file, so nothing is silently dropped.
+    """
+    if not report_path.exists():
+        return None
+    try:
+        existing_groups: list[GroupObject] = []
+        existing_channels: list[ChannelObject] = []
+        unmatched: dict[str, dict] = dict(new_entries)
+        with TdmsFile.read(str(report_path)) as tfile:
+            for grp in tfile.groups():
+                if grp.name == "FitResults":
+                    continue
+                existing_groups.append(GroupObject(grp.name, properties=dict(grp.properties)))
+                for ch in grp.channels():
+                    props = dict(ch.properties)
+                    fit_props = unmatched.pop(ch.name, None)
+                    if fit_props is not None:
+                        props.update(_prefix_fit_props(fit_props))
+                    existing_channels.append(
+                        ChannelObject(grp.name, ch.name,
+                                      np.asarray(ch[:]),
+                                      properties=props)
+                    )
+        out_objects: list = list(existing_groups) + list(existing_channels)
+        if unmatched:
+            out_objects.append(GroupObject("FitResults"))
+            for name, props in unmatched.items():
+                data = np.array([np.nan], dtype=np.float64)
+                out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+        with TdmsWriter(str(report_path)) as writer:
+            writer.write_segment(out_objects)
+        return str(report_path)
+    except Exception as exc:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        return None
+
+
 def _write_fit_report_tdms(app, results: list[tuple[str, object]]) -> Optional[str]:
-    """Write fit results either next to the source (separate file) or into the
-    source TDMS itself, depending on the ``Save fit results to separate TDMS file``
-    checkbox.
+    """Persist fit results into the source TDMS or a side-car file.
 
-    Each OK ``FitResult`` becomes one channel in the ``FitResults`` group, with
-    the fit parameters (Ic, n, Ec, dI/dt, σ(Ic), σ(n), R², warnings, …) attached
-    as channel properties. Channels for the same label are overwritten; channels
-    from prior runs that this fit didn't touch are preserved.
+    Behaviour follows the two checkboxes in the Data Fitting tab:
 
-    Returns the path written (or ``None`` if no source file or no OK results).
-    Any I/O error is swallowed after logging — a failed report must not break
-    an otherwise successful fit.
+    * ``Save fit results to separate TDMS file`` → write into
+      ``<source>_fit_report.tdms`` next to the source. Always uses a
+      ``FitResults`` group regardless of the same-group toggle.
+    * ``Use same group/channel for fit metadata`` (default) → attach the fit
+      properties to the fitted voltage channel itself, in its original group;
+      no extra ``FitResults`` group is created. When unchecked, write a
+      ``FitResults`` group into the source TDMS as before.
+
+    Failed fits are also persisted (with ``fit_status = "failed"``) so users
+    can see that an attempt was made.
+
+    Returns the path written, or ``None`` if there's nothing to write or the
+    source TDMS is unknown. I/O errors are logged and swallowed.
     """
     controller = getattr(app, "data_fit_controller", None)
     src_path = getattr(controller, "tdms_path", "") if controller is not None else ""
-    ok_results = [(lbl, r) for lbl, r in results if r is not None and getattr(r, "ok", False)]
-    if not src_path or not ok_results:
+    persistent = [(lbl, r) for lbl, r in results if r is not None]
+    if not src_path or not persistent:
         return None
     src = Path(src_path)
     save_separate = bool(
         getattr(app, "data_fit_save_separate_cb", None) is not None
         and app.data_fit_save_separate_cb.isChecked()
     )
+    same_group = bool(
+        getattr(app, "data_fit_same_group_cb", None) is None
+        or app.data_fit_same_group_cb.isChecked()
+    )
     report_path = src.with_name(f"{src.stem}_fit_report.tdms") if save_separate else src
 
-    new_entries = {lbl: _fit_result_properties(r) for lbl, r in ok_results}
+    new_entries = {lbl: _fit_result_properties(r) for lbl, r in persistent}
+
+    if not save_separate and same_group:
+        return _write_fit_report_same_group(report_path, new_entries)
 
     if save_separate:
         # Preserve FitResults channels from prior runs that this fit didn't touch
@@ -2394,25 +2883,31 @@ def run_fit(app):
         lines = []
         last_ok = None
         ok_results = []
+        all_results: list[tuple[str, object]] = []
         last_show_criterion = True
         last_show_ic = False
         for entry in included:
+            label = entry.get("label", "Curve")
             try:
                 result = run_full_fit(entry["t"], entry["x"], entry["y"], settings)
             except Exception as exc:
                 traceback.print_exc()
-                lines.append(f"[{entry['label']}] FAILED: {exc}")
-                continue
+                # Synthesise a failed FitResult so the channel still appears
+                # in the report with the exception text — matches the user's
+                # request to record an attempt even on total failure.
+                from .service import FitResult
+                result = FitResult(ok=False, message=f"Fit raised: {exc}")
             entry["fit_result"] = result
+            all_results.append((label, result))
             if result.ok:
                 last_ok = result
-                ok_results.append((entry.get("label", "Curve"), result))
+                ok_results.append((label, result))
                 last_show_criterion = bool(entry.get("show_criterion", False))
                 last_show_ic = bool(entry.get("show_ic", False))
                 _upsert_fit_curve_entry(app, entry, result)
-                lines.append(f"[{entry['label']}]\n" + _format_result(result) + "\n")
+                lines.append(f"[{label}]\n" + _format_result(result) + "\n")
             else:
-                lines.append(f"[{entry['label']}] {result.message}")
+                lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
         if last_ok is not None:
             _show_fit_overlays(
@@ -2421,15 +2916,17 @@ def run_fit(app):
             )
             _plot_residuals(app, last_ok)
             _post_fit_warnings(app, last_ok, settings)
-            report_path = _write_fit_report_tdms(app, ok_results)
-            if report_path:
-                current = app.data_fit_result_text.toPlainText()
-                app.data_fit_result_text.setPlainText(
-                    current + f"\nFit report written to: {report_path}"
-                )
         else:
             _hide_fit_overlays(app)
             _show_warning(app, "No curve produced a successful fit.", severity="error")
+        # Persist every attempt — including failed ones — so users can see a
+        # paper trail in the TDMS even when the fit didn't converge.
+        report_path = _write_fit_report_tdms(app, all_results)
+        if report_path:
+            current = app.data_fit_result_text.toPlainText()
+            app.data_fit_result_text.setPlainText(
+                current + f"\nFit report written to: {report_path}"
+            )
         return
 
     # Single-curve mode: use current channel selection.
@@ -2456,6 +2953,18 @@ def run_fit(app):
         app.data_fit_model_curve.setData([], [])
         _hide_fit_overlays(app)
         _show_warning(app, msg or "Fit failed.", severity="error")
+        if result is not None:
+            # Even a totally failed fit leaves a record in the TDMS so the
+            # user can tell, when re-opening the file later, that an attempt
+            # was made and what error it produced.
+            failed_path = _write_fit_report_tdms(
+                app, [(app.data_fit_y_cb.currentText(), result)]
+            )
+            if failed_path:
+                current = app.data_fit_result_text.toPlainText()
+                app.data_fit_result_text.setPlainText(
+                    current + f"\nFailed-fit metadata written to: {failed_path}"
+                )
         return
     app.data_fit_result_text.setPlainText(_format_result(result))
     if result.fit_x is not None and result.fit_y is not None:
@@ -3088,8 +3597,11 @@ def _open_plot_summary(app) -> None:
     dialog.setWindowTitle("Plot summary")
     dialog.resize(1080, 360)
     root = QVBoxLayout(dialog)
-    table = QTableWidget(len(curves), 8)
-    table.setHorizontalHeaderLabels(["Color", "Label", "Skip pts", "Avg", "Tap dist (cm)", "Effective rate", "Include", "Actions"])
+    table = QTableWidget(len(curves), 9)
+    table.setHorizontalHeaderLabels([
+        "Color", "Label", "Skip pts", "Avg", "Tap dist (cm)",
+        "Effective rate", "Show", "Include", "Actions",
+    ])
     table.horizontalHeader().setStretchLastSection(False)
     table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
     table.setColumnWidth(0, 90)
@@ -3097,8 +3609,9 @@ def _open_plot_summary(app) -> None:
     table.setColumnWidth(3, 70)
     table.setColumnWidth(4, 100)
     table.setColumnWidth(5, 130)
-    table.setColumnWidth(6, 70)
-    table.setColumnWidth(7, 250)
+    table.setColumnWidth(6, 60)
+    table.setColumnWidth(7, 70)
+    table.setColumnWidth(8, 250)
 
     def row_widgets(entry, row):
         is_preview = bool(entry.get("is_preview", False))
@@ -3199,13 +3712,50 @@ def _open_plot_summary(app) -> None:
         table.setCellWidget(row, 4, tap)
         rate_item.setText(_rate_text_for_entry())
         table.setCellWidget(row, 5, rate_item)
+        show_cb = QCheckBox()
+        show_cb.setToolTip(
+            "Show or hide this curve on the plot. Hidden curves are still "
+            "kept in memory and can be reshown — useful when an automatic "
+            "fit added several voltage channels and you only want to "
+            "compare two of them at a time."
+        )
+        if is_preview:
+            show_cb.setChecked(bool(getattr(app, "data_fit_preview_visible", True)))
+        else:
+            show_cb.setChecked(bool(entry.get("visible", True)))
+
+        def on_show(v, _entry=entry, _is_preview=is_preview):
+            checked = bool(v)
+            if _is_preview:
+                app.data_fit_preview_visible = checked
+                if checked:
+                    refresh_preview(app)
+                else:
+                    app.data_fit_raw_curve.setData([], [])
+                return
+            _entry["visible"] = checked
+            _apply_curve_visibility(_entry)
+            # When this curve has a paired fit overlay, follow it.
+            sig = _entry.get("signature")
+            if sig is None:
+                return
+            for paired in getattr(app, "data_fit_curves", []):
+                if (
+                    paired.get("is_fit_result")
+                    and paired.get("fit_parent_signature") == sig
+                ):
+                    paired["visible"] = checked
+                    _apply_curve_visibility(paired)
+
+        show_cb.toggled.connect(on_show)
+        table.setCellWidget(row, 6, show_cb)
         include = QCheckBox()
         include.setChecked(entry.get("include_in_fit", True))
         if is_preview:
             include.toggled.connect(lambda v: setattr(app, "data_fit_preview_include_in_fit", bool(v)))
         else:
             include.toggled.connect(lambda v: entry.update(include_in_fit=bool(v)))
-        table.setCellWidget(row, 6, include)
+        table.setCellWidget(row, 7, include)
         actions = QHBoxLayout()
         actions_widget = QWidget()
         actions_widget.setLayout(actions)
@@ -3228,7 +3778,7 @@ def _open_plot_summary(app) -> None:
         actions.setContentsMargins(0, 0, 0, 0)
         actions.addWidget(settings_btn)
         actions.addWidget(remove_btn)
-        table.setCellWidget(row, 7, actions_widget)
+        table.setCellWidget(row, 8, actions_widget)
 
     for i, entry in enumerate(curves):
         row_widgets(entry, i)
@@ -3287,6 +3837,14 @@ def _settings_to_preset(app) -> FitPreset:
         getattr(app, "data_fit_save_separate_cb", None) is not None
         and app.data_fit_save_separate_cb.isChecked()
     )
+    same_group = bool(
+        getattr(app, "data_fit_same_group_cb", None) is None
+        or app.data_fit_same_group_cb.isChecked()
+    )
+    auto_load = bool(
+        getattr(app, "data_fit_auto_load_cb", None) is None
+        or app.data_fit_auto_load_cb.isChecked()
+    )
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
         didt_high=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100),
@@ -3306,6 +3864,8 @@ def _settings_to_preset(app) -> FitPreset:
         time_channel=app.data_fit_time_cb.currentText(),
         fit_method=_active_fit_method(app),
         save_to_separate_tdms=save_separate,
+        save_fit_in_same_group=same_group,
+        auto_load_after_acquisition=auto_load,
     )
 
 
@@ -3337,6 +3897,14 @@ def _apply_preset(app, preset: FitPreset) -> None:
     if hasattr(app, "data_fit_save_separate_cb"):
         app.data_fit_save_separate_cb.setChecked(
             bool(getattr(preset, "save_to_separate_tdms", False))
+        )
+    if hasattr(app, "data_fit_same_group_cb"):
+        app.data_fit_same_group_cb.setChecked(
+            bool(getattr(preset, "save_fit_in_same_group", True))
+        )
+    if hasattr(app, "data_fit_auto_load_cb"):
+        app.data_fit_auto_load_cb.setChecked(
+            bool(getattr(preset, "auto_load_after_acquisition", True))
         )
     # Attempt to restore channel selections if they exist in the current file.
     for combo, name in (

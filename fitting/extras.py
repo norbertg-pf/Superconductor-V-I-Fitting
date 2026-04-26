@@ -1082,6 +1082,13 @@ class FitPreset:
     time_channel: str = "Time"
     fit_method: str = "log_log"
     save_to_separate_tdms: bool = False
+    # When True, fit metadata is attached as channel properties on the
+    # fitted voltage channel itself (no separate FitResults group). When
+    # False, a FitResults group is added with one channel per fitted curve.
+    save_fit_in_same_group: bool = True
+    # When True, loading a TDMS or finishing an acquisition auto-populates
+    # the Data Fitting tab with the source curves and any saved fit overlays.
+    auto_load_after_acquisition: bool = True
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:
