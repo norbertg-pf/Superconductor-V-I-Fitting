@@ -1543,6 +1543,32 @@ def _add_replayed_source_curve(app, name: str, x: np.ndarray, y: np.ndarray,
     return entry
 
 
+# Suffix appended to a fitted-channel label so it can be told apart from the
+# source channel in the channel combo box. Also serves as the marker used by
+# ``DataFittingController`` to remember which entries are reconstructed.
+_FITTED_CHANNEL_SUFFIX = " - fitted"
+
+
+def _sample_fit_curve_at(x_source: np.ndarray, fit_x: np.ndarray,
+                         fit_y: np.ndarray) -> Optional[np.ndarray]:
+    """Sample the smooth (fit_x, fit_y) model onto the source X positions.
+
+    The reconstructed fit-channel needs to be the same length as the
+    source data so it can be plotted as a regular Y channel. Uses linear
+    interpolation; values outside the fit's X range get NaN so they
+    don't pollute the plot range.
+    """
+    if x_source is None or fit_x is None or fit_y is None:
+        return None
+    if not (np.isfinite(fit_x).all() and np.isfinite(fit_y).all()):
+        return None
+    order = np.argsort(fit_x)
+    fx = fit_x[order]
+    fy = fit_y[order]
+    sampled = np.interp(x_source, fx, fy, left=float("nan"), right=float("nan"))
+    return sampled
+
+
 def _replay_saved_fits_into_plot(app) -> None:
     """Replay every saved fit overlay we found in the just-loaded TDMS.
 
@@ -1551,6 +1577,12 @@ def _replay_saved_fits_into_plot(app) -> None:
        curve (so the fit has something to overlay).
     2. Reconstruct a ``FitResult`` from the saved properties and call
        ``_upsert_fit_curve_entry`` to attach the model curve.
+    3. Register the reconstructed fit curve in the controller's channel
+       cache as ``"<name> - fitted"`` so it appears in the Y-axis combo
+       and can be selected like any other channel.
+    The full per-channel ``_format_result`` block is shown in the result
+    panel so users see the same parameter detail they would after running
+    the fit fresh — Ic ± σ, n ± σ, R, V_ofs, R², chi², ramp ratio, …
     Only the first source curve is shown by default — the rest are added
     hidden so the plot stays uncluttered. The user can toggle visibility
     from the Plot summary dialog.
@@ -1568,10 +1600,11 @@ def _replay_saved_fits_into_plot(app) -> None:
         app.data_fit_preview_visible = False
         app.data_fit_raw_curve.setData([], [])
 
-    fit_summary_lines: list[str] = []
+    summary_blocks: list[str] = []
     plotted = 0
     failed = 0
     first = True
+    new_fitted_channels: list[str] = []
     for name, props in saved.items():
         if not name:
             continue
@@ -1611,8 +1644,6 @@ def _replay_saved_fits_into_plot(app) -> None:
         source_entry = _add_replayed_source_curve(
             app, name, x_arr, y_arr, t_arr, meta, visible=first,
         )
-        # Only attach a model overlay when the saved fit converged. Failed
-        # fits are still acknowledged in the summary lines below.
         if result.ok and fit_x is not None and fit_y is not None:
             _upsert_fit_curve_entry(app, source_entry, result)
             for c in app.data_fit_curves:
@@ -1622,27 +1653,43 @@ def _replay_saved_fits_into_plot(app) -> None:
                 ):
                     c["visible"] = bool(first)
                     _apply_curve_visibility(c)
+            # Register the reconstructed fit curve as a regular channel so
+            # the user can pick it from the Y-axis combo. Sample the smooth
+            # fit_y at the source X positions so the array length matches
+            # the source channel — required for the channel combo flow.
+            fitted_name = f"{name}{_FITTED_CHANNEL_SUFFIX}"
+            sampled = _sample_fit_curve_at(x_arr, np.asarray(fit_x), np.asarray(fit_y))
+            if sampled is not None and sampled.size:
+                controller.channel_cache[fitted_name] = sampled
+                controller.channel_metadata[fitted_name] = {
+                    "scale": 1.0,
+                    "offset": 0.0,
+                    "voltage_tap_cm": meta.get("voltage_tap_cm"),
+                }
+                if fitted_name not in controller.channel_names:
+                    controller.channel_names.append(fitted_name)
+                    new_fitted_channels.append(fitted_name)
             plotted += 1
             first = False
-            fit_summary_lines.append(
-                f"[{name}] saved fit replayed: Ic = {result.Ic:.6g} A, n = {result.n_value:.2f}"
-            )
+            summary_blocks.append(f"[{name}] saved fit replayed:\n" + _format_result(result))
         else:
             failed += 1
             msg = _prop_lookup(props, "fit_message", "message") or "no parameters available"
-            fit_summary_lines.append(f"[{name}] saved fit FAILED ({msg})")
+            summary_blocks.append(f"[{name}] saved fit FAILED: {msg}")
             if first:
-                # Still show one source curve when nothing succeeded so the
-                # user has visual confirmation that the file was loaded.
                 first = False
+
+    # Refresh the channel combos so the new fitted entries are selectable.
+    if new_fitted_channels:
+        _populate_channel_combos(app)
     _refresh_curve_profile_selector(app)
-    if fit_summary_lines:
+    if summary_blocks:
         intro = (
             f"Replayed {plotted} saved fit{'s' if plotted != 1 else ''}"
             + (f", {failed} failed" if failed else "")
-            + ":\n"
+            + ".\n\n"
         )
-        app.data_fit_result_text.setPlainText(intro + "\n".join(fit_summary_lines))
+        app.data_fit_result_text.setPlainText(intro + "\n\n".join(summary_blocks))
     try:
         robust_view(app)
     except Exception:
@@ -1655,10 +1702,16 @@ def _guess_current_channel(controller, *, exclude: str) -> str:
     Used during fit replay when the user hasn't picked an X channel yet.
     Heuristic: prefer names containing 'I' or 'current' that aren't the
     excluded Y label; fall back to the first non-excluded channel.
+
+    Skips ``" - fitted"`` reconstructions added by the replay so a later
+    iteration doesn't pick a synthesised model curve as the current axis.
     """
     if not controller:
         return ""
-    candidates = [n for n in (controller.channel_names or []) if n and n != exclude]
+    candidates = [
+        n for n in (controller.channel_names or [])
+        if n and n != exclude and not n.endswith(_FITTED_CHANNEL_SUFFIX)
+    ]
     for needle in ("Current", "current", "_I", "AI0", "Ic"):
         for name in candidates:
             if needle in name:
@@ -2645,7 +2698,11 @@ def _fit_result_properties(result) -> dict:
         "fit_status": "ok" if ok else "failed",
         "fit_message": str(getattr(result, "message", "") or ""),
         "fit_timestamp": datetime.now().isoformat(timespec="seconds"),
-        "fit_method": str(getattr(result, "fit_method", FIT_METHOD_LOG_LOG)),
+        # ``method_id`` is the machine-readable identifier ("log_log" /
+        # "nonlinear"); ``method`` is the human-readable label. They are
+        # kept under different keys so the same-group writer can prefix
+        # both with ``fit_`` without collapsing them onto one final key.
+        "method_id": str(getattr(result, "fit_method", FIT_METHOD_LOG_LOG)),
         # Primary outputs per IEC 61788 / user request.
         "Ic_A": float(getattr(result, "Ic", 0.0)),
         "sigma_Ic_A": float(getattr(result, "sigma_Ic", 0.0)),
