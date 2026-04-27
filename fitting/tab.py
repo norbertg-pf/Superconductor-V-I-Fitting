@@ -215,6 +215,26 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
         widget.blockSignals(False)
 
 
+def _safe_is_checked(widget, default: bool = True) -> bool:
+    """Qt-safe checkbox read that tolerates deleted wrapped objects."""
+    if widget is None:
+        return bool(default)
+    try:
+        return bool(widget.isChecked())
+    except RuntimeError:
+        return bool(default)
+
+
+def _safe_set_checked(widget, value: bool) -> None:
+    """Qt-safe checkbox write that ignores deleted wrapped objects."""
+    if widget is None:
+        return
+    try:
+        widget.setChecked(bool(value))
+    except RuntimeError:
+        return
+
+
 def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
     """Snapshot the Active-fitting widgets into a per-curve profile dict.
 
@@ -717,7 +737,7 @@ def _reset_data_fitting_defaults(app) -> None:
     # Reset the Settings checkboxes to their defaults so a Clear gives the
     # user a clean slate for the next session.
     if hasattr(app, "data_fit_auto_load_cb"):
-        app.data_fit_auto_load_cb.setChecked(True)
+        _safe_set_checked(app.data_fit_auto_load_cb, True)
     if hasattr(app, "data_fit_autosave_cb"):
         app.data_fit_autosave_cb.setChecked(True)
     if hasattr(app, "data_fit_save_separate_cb"):
@@ -1885,7 +1905,7 @@ def open_file_dialog(app):
         # is shown, which always happens on a successful load.
         auto_load = bool(
             getattr(app, "data_fit_auto_load_cb", None) is None
-            or app.data_fit_auto_load_cb.isChecked()
+            or _safe_is_checked(app.data_fit_auto_load_cb, default=True)
         )
         _post_load_setup(app, auto_plot_fits=auto_load)
 
@@ -1914,7 +1934,7 @@ def refresh_current_recording(app, path: Optional[str] = None):
     if ok:
         auto_load = bool(
             getattr(app, "data_fit_auto_load_cb", None) is None
-            or app.data_fit_auto_load_cb.isChecked()
+            or _safe_is_checked(app.data_fit_auto_load_cb, default=True)
         )
         _post_load_setup(app, auto_plot_fits=auto_load)
 
@@ -5088,7 +5108,7 @@ def _settings_to_preset(app) -> FitPreset:
     )
     auto_load = bool(
         getattr(app, "data_fit_auto_load_cb", None) is None
-        or app.data_fit_auto_load_cb.isChecked()
+        or _safe_is_checked(app.data_fit_auto_load_cb, default=True)
     )
     autosave = bool(
         getattr(app, "data_fit_autosave_cb", None) is None
@@ -5153,8 +5173,9 @@ def _apply_preset(app, preset: FitPreset) -> None:
             bool(getattr(preset, "save_fit_in_same_group", True))
         )
     if hasattr(app, "data_fit_auto_load_cb"):
-        app.data_fit_auto_load_cb.setChecked(
-            bool(getattr(preset, "auto_load_after_acquisition", True))
+        _safe_set_checked(
+            app.data_fit_auto_load_cb,
+            bool(getattr(preset, "auto_load_after_acquisition", True)),
         )
     if hasattr(app, "data_fit_autosave_cb"):
         app.data_fit_autosave_cb.setChecked(
