@@ -314,8 +314,8 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
       2) Build a monotonic transition envelope and find first point reaching Ec2.
       3) Find the last point below Ec1 before that Ec2 crossing.
       4) Keep only points between Ec1 and Ec2 on that transition segment.
-      5) Fit log10(E_sc) vs log10(I), then report I(Ec1) and I(Ec2) from the
-         fitted line (more robust than direct pointwise threshold hits).
+      5) Fit log10(E_sc) vs log10(I), and report the I-window as the
+         min/max current of the data points actually used in the regression.
 
     Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi),
              sigma_Ic, sigma_n, r_squared).
@@ -401,17 +401,11 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    # Report decade-window currents from the fitted line itself:
-    # log10(E) = intercept + n*log10(I)  -> I(Ec) = 10^((log10(Ec)-intercept)/n)
-    # This is far less sensitive to pointwise noise than direct threshold hits.
-    log_I_lo = (float(np.log10(Ec1)) - intercept) / n_val
-    log_I_hi = (float(np.log10(Ec2)) - intercept) / n_val
-    I_lo = float(10.0 ** log_I_lo)
-    I_hi = float(10.0 ** log_I_hi)
-    x_lo_data = float(np.min(xs))
-    x_hi_data = float(np.max(xs))
-    I_lo = float(np.clip(I_lo, x_lo_data, x_hi_data))
-    I_hi = float(np.clip(I_hi, x_lo_data, x_hi_data))
+    # Report the actual current span used by the regression points.
+    # This keeps the printed I-window aligned with what is physically fitted.
+    I_used = x_seg[mask]
+    I_lo = float(np.min(I_used))
+    I_hi = float(np.max(I_used))
     if I_hi <= I_lo:
         I_lo = float(np.min(x_seg[mask]))
         I_hi = float(np.max(x_seg[mask]))
