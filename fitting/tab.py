@@ -118,10 +118,14 @@ class _FitParamTable(pg.TextItem):
                     "V0": _format_engineering(result.V0, v_unit, 2),
                 }
                 value = value_map[p]
+                if p == "R":
+                    value = f"{r_name}: {value}"
+                elif p == "Criterion":
+                    value = f"{v_name}: {value}"
                 row_cells.append(
                     f"<td style='padding:1px 8px; text-align:right; font-family:monospace;'>{value}</td>"
                 )
-            row_name = "R/Rho" if p == "R" else ("Vc/Ec" if p == "Criterion" else p)
+            row_name = "R/Rho" if p == "R" else ("Criterion" if p == "Criterion" else p)
             body_rows.append(
                 f"<tr><td style='padding-right:10px;'><b>{row_name}</b></td>{''.join(row_cells)}</tr>"
             )
@@ -216,6 +220,7 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
 
 def _capture_fit_window_profile(app) -> dict:
     return {
+        "fit_method": _active_fit_method(app),
         "didt_low": app.data_fit_didt_low.text(),
         "didt_high": app.data_fit_didt_high.text(),
         "linear_low": app.data_fit_linear_low.text(),
@@ -242,6 +247,15 @@ def _capture_fit_window_profile(app) -> dict:
 def _apply_fit_window_profile(app, profile: dict) -> None:
     if not profile:
         return
+    target_method = str(profile.get("fit_method", "") or "")
+    if target_method in (FIT_METHOD_LOG_LOG, FIT_METHOD_NONLINEAR):
+        app.data_fit_method_loglog_rb.blockSignals(True)
+        app.data_fit_method_nonlinear_rb.blockSignals(True)
+        app.data_fit_method_loglog_rb.setChecked(target_method == FIT_METHOD_LOG_LOG)
+        app.data_fit_method_nonlinear_rb.setChecked(target_method == FIT_METHOD_NONLINEAR)
+        app.data_fit_method_loglog_rb.blockSignals(False)
+        app.data_fit_method_nonlinear_rb.blockSignals(False)
+    _update_method_mode_ui(app)
     for widget, key in (
         (app.data_fit_didt_low, "didt_low"),
         (app.data_fit_didt_high, "didt_high"),
@@ -261,6 +275,8 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         app.data_fit_subtract_vofs_cb.setChecked(bool(profile["subtract_vofs"]))
     sync_region_to_inputs(app)
+    _update_band_states(app)
+    _update_equation_label(app)
 
 
 def _float_from(widget: QLineEdit, fallback: float, as_fraction: bool = False) -> float:
@@ -511,6 +527,24 @@ def _connect_data_fitting_actions(app):
             widget.currentIndexChanged.connect(lambda _: _on_transform_inputs_changed(app))
     for w in (app.data_fit_max_iter, app.data_fit_ic_tol, app.data_fit_chi_tol, app.data_fit_vc_input):
         w.editingFinished.connect(lambda: _save_active_curve_profile(app))
+    profile_live_widgets = (
+        app.data_fit_didt_low,
+        app.data_fit_didt_high,
+        app.data_fit_linear_low,
+        app.data_fit_linear_high,
+        app.data_fit_power_low,
+        app.data_fit_power_vfrac,
+        app.data_fit_max_iter,
+        app.data_fit_ic_tol,
+        app.data_fit_chi_tol,
+        app.data_fit_vc_input,
+    )
+    if getattr(app, "data_fit_zero_i_frac", None) is not None:
+        profile_live_widgets = profile_live_widgets + (app.data_fit_zero_i_frac,)
+    for w in profile_live_widgets:
+        w.textChanged.connect(lambda _=None: _save_active_curve_profile(app))
+    if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
+        app.data_fit_subtract_vofs_cb.toggled.connect(lambda _=None: _save_active_curve_profile(app))
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
@@ -637,12 +671,20 @@ def _curve_profile_key_from_ui(app) -> str:
 
 def _save_active_curve_profile(app) -> None:
     key = _curve_profile_key_from_ui(app)
+    _save_curve_profile_for_key(app, key)
+
+
+def _save_curve_profile_for_key(app, key: str) -> None:
+    key = str(key) if key else "__preview__"
     profiles = getattr(app, "data_fit_curve_profiles", {})
     profiles[key] = _capture_fit_window_profile(app)
     app.data_fit_curve_profiles = profiles
 
 
 def _on_curve_profile_changed(app) -> None:
+    previous_key = getattr(app, "data_fit_active_profile_key", None)
+    if previous_key and previous_key != "__none__":
+        _save_curve_profile_for_key(app, previous_key)
     key = _curve_profile_key_from_ui(app)
     profiles = getattr(app, "data_fit_curve_profiles", {})
     if key not in profiles:
@@ -650,6 +692,7 @@ def _on_curve_profile_changed(app) -> None:
         app.data_fit_curve_profiles = profiles
     _sync_active_length_settings_from_profile_key(app, key)
     _apply_fit_window_profile(app, profiles.get(key, {}))
+    app.data_fit_active_profile_key = key
 
 
 def _refresh_curve_profile_selector(app) -> None:
@@ -670,6 +713,7 @@ def _refresh_curve_profile_selector(app) -> None:
     idx = combo.findData(current_key)
     combo.setCurrentIndex(idx if idx >= 0 else 0)
     combo.blockSignals(False)
+    app.data_fit_active_profile_key = _curve_profile_key_from_ui(app)
 
 
 def _find_curve_for_profile_key(app, key: str) -> Optional[dict]:
