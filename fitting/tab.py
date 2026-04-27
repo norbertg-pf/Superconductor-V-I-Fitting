@@ -748,7 +748,26 @@ def _on_curve_profile_changed(app) -> None:
         app._data_fit_suspend_profile_save = False
     # Re-save once at the end so the active profile reflects exactly what
     # the widgets now show (idempotent for a clean apply).
+    _refresh_all_x_values(app)
+    ctx = _data_ctx(app)
+    if ctx is not None:
+        _, _, x_arr, y_arr, _ = ctx
+        _update_fit_bands(app, x_arr, y_arr)
     _save_active_curve_profile(app)
+
+
+def _set_active_curve_profile_key(app, key: str) -> None:
+    """Select an Active fitting settings profile and force a window refresh."""
+    combo = getattr(app, "data_fit_curve_profile_cb", None)
+    if combo is None:
+        return
+    idx = combo.findData(str(key))
+    if idx < 0:
+        return
+    combo.blockSignals(True)
+    combo.setCurrentIndex(idx)
+    combo.blockSignals(False)
+    _on_curve_profile_changed(app)
 
 
 def _refresh_curve_profile_selector(app) -> None:
@@ -2793,9 +2812,18 @@ def _on_band_dragged(app, window: str) -> None:
 
 
 def _data_ctx(app):
-    transformed = _apply_transforms(app)
-    x = transformed["x"]
-    y = transformed["y"]
+    x = None
+    y = None
+    key = _curve_profile_key_from_ui(app)
+    if key not in ("", "__preview__", "__none__"):
+        entry = _find_curve_for_profile_key(app, key)
+        if entry is not None:
+            x = np.asarray(entry.get("x", []), dtype=float)
+            y = np.asarray(entry.get("y", []), dtype=float)
+    if x is None or x.size == 0 or y is None or y.size == 0:
+        transformed = _apply_transforms(app)
+        x = transformed["x"]
+        y = transformed["y"]
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         ref = getattr(app, "data_fit_power_ref_curve", None) or {}
         ref_x = np.asarray(ref.get("x", []), dtype=float)
@@ -3644,6 +3672,7 @@ def run_fit(app):
         QMessageBox.warning(app, "Data Fitting", "No curve is selected in 'Include in fit'.")
         return
     if included:
+        original_profile_key = _curve_profile_key_from_ui(app)
         lines = []
         last_ok = None
         last_ok_settings: Optional[FitSettings] = None
@@ -3653,6 +3682,7 @@ def run_fit(app):
         last_show_ic = False
         for entry in included:
             label = entry.get("label", "Curve")
+            _set_active_curve_profile_key(app, _profile_key_for_entry(entry))
             # Each curve carries its own fit method / windows / criterion via
             # the per-curve profile stored in app.data_fit_curve_profiles.
             try:
@@ -3688,6 +3718,7 @@ def run_fit(app):
             else:
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
+        _set_active_curve_profile_key(app, original_profile_key)
         if last_ok is not None:
             controller.last_result = last_ok
             if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
