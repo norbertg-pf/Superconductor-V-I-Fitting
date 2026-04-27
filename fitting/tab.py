@@ -1731,6 +1731,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_fields(app)
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2580,9 +2581,6 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
                 if got is not None:
                     return got
 
-        last_result = getattr(controller, "last_result", None)
-        if getattr(last_result, "fit_method", "") == FIT_METHOD_LOG_LOG:
-            return _coerce_window(getattr(last_result, "n_window_I", None))
         return None
 
     ec1 = ec2 = None
@@ -2604,8 +2602,6 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
-            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
@@ -2909,6 +2905,32 @@ def _update_loglog_power_x_from_ec(app) -> bool:
     _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
     app.data_fit_power_window_manual = True
     return True
+
+
+def _set_loglog_power_x_from_window(app, n_window: Optional[tuple[float, float]]) -> None:
+    """Write Step-4 low/high X from an algorithm-derived current window."""
+    if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
+        return
+    if not n_window or len(n_window) != 2:
+        return
+    try:
+        lo = float(n_window[0])
+        hi = float(n_window[1])
+    except (TypeError, ValueError):
+        return
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return
+    lo, hi = sorted((lo, hi))
+    if hi <= lo:
+        return
+    _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
+    _set_silently(app.data_fit_power_high_x, f"{hi:.6g}")
+    app.data_fit_power_window_manual = False
+
+
+def _clear_loglog_power_x_fields(app) -> None:
+    _set_silently(app.data_fit_power_low_x, "")
+    _set_silently(app.data_fit_power_high_x, "")
 
 
 def _refresh_x_from_pct(app, window: str, which: str) -> None:
@@ -3684,6 +3706,7 @@ def run_fit(app):
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
             )
+            _set_loglog_power_x_from_window(app, getattr(last_ok, "n_window_I", None))
             _plot_residuals(app, last_ok)
             _post_fit_warnings(app, last_ok, last_ok_settings or settings)
         else:
@@ -3775,6 +3798,7 @@ def run_fit(app):
         show_criterion=True,
         show_ic=False,
     )
+    _set_loglog_power_x_from_window(app, getattr(result, "n_window_I", None))
     _plot_residuals(app, result)
     _post_fit_warnings(app, result, settings)
     if hasattr(app, "data_fit_save_metadata_btn"):
