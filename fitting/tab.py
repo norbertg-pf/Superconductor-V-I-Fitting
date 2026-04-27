@@ -2242,6 +2242,7 @@ def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
     is_log_y = settings is not None and settings.scale_v.scale_type == "Log10"
     auto_x = settings is None or settings.scale_h.auto_range
     auto_y = settings is None or settings.scale_v.auto_range
+    x_right_pad_frac = 0.04  # keep a little room on the right edge so peaks are not clipped
 
     # Honour user-specified ranges from the Graph-settings dialog: when
     # auto-range is off for an axis, leave whatever apply_graph_settings set.
@@ -2251,6 +2252,8 @@ def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
         else:
             x_lo, x_hi = robust_view_range(x)
         if x_lo is not None and x_hi is not None:
+            if x_hi > x_lo:
+                x_hi = x_hi + ((x_hi - x_lo) * x_right_pad_frac)
             view_box.setXRange(x_lo, x_hi, padding=0.0)
         else:
             view_box.enableAutoRange(axis="x")
