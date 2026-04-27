@@ -214,8 +214,20 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
         widget.blockSignals(False)
 
 
-def _capture_fit_window_profile(app) -> dict:
-    return {
+def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
+    """Snapshot the Active-fitting widgets into a per-curve profile dict.
+
+    The Step-4 power_low / power_vfrac widgets reuse the same QLineEdits for
+    both fit methods, but the values mean very different things (Ec1/Ec2 in
+    µV/cm for log-log; fractions of Imax/Vmax for non-linear). We keep
+    independent slots — ``loglog_low/high`` and ``nonlinear_low/high`` — so
+    switching methods on a curve restores that method's last-edited values
+    instead of clobbering them with defaults.
+    """
+    prior = prior or {}
+    method = _active_fit_method(app)
+    snapshot = {
+        "fit_method": method,
         "didt_low": app.data_fit_didt_low.text(),
         "didt_high": app.data_fit_didt_high.text(),
         "linear_low": app.data_fit_linear_low.text(),
@@ -236,19 +248,64 @@ def _capture_fit_window_profile(app) -> dict:
             if getattr(app, "data_fit_zero_i_frac", None) is not None
             else ""
         ),
+        "show_didt": (
+            app.data_fit_show_didt.isChecked()
+            if getattr(app, "data_fit_show_didt", None) is not None
+            else False
+        ),
+        "show_linear": (
+            app.data_fit_show_linear.isChecked()
+            if getattr(app, "data_fit_show_linear", None) is not None
+            else False
+        ),
+        "show_power": (
+            app.data_fit_show_power.isChecked()
+            if getattr(app, "data_fit_show_power", None) is not None
+            else False
+        ),
     }
+    # Method-specific Step-4 slots: active widget values go into the active
+    # method's slot; the inactive method's slot is preserved from the prior
+    # profile, falling back to the IEC/non-linear defaults.
+    default_loglog_low = f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
+    default_loglog_high = f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
+    default_nonlin_low = f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
+    default_nonlin_high = f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
+    if method == FIT_METHOD_LOG_LOG:
+        snapshot["loglog_low"] = app.data_fit_power_low.text()
+        snapshot["loglog_high"] = app.data_fit_power_vfrac.text()
+        snapshot["nonlinear_low"] = prior.get("nonlinear_low", default_nonlin_low)
+        snapshot["nonlinear_high"] = prior.get("nonlinear_high", default_nonlin_high)
+    else:
+        snapshot["nonlinear_low"] = app.data_fit_power_low.text()
+        snapshot["nonlinear_high"] = app.data_fit_power_vfrac.text()
+        snapshot["loglog_low"] = prior.get("loglog_low", default_loglog_low)
+        snapshot["loglog_high"] = prior.get("loglog_high", default_loglog_high)
+    return snapshot
 
 
 def _apply_fit_window_profile(app, profile: dict) -> None:
     if not profile:
         return
+    method = profile.get("fit_method", DEFAULT_FIT_METHOD)
+    rb_loglog = getattr(app, "data_fit_method_loglog_rb", None)
+    rb_nonlinear = getattr(app, "data_fit_method_nonlinear_rb", None)
+    if rb_loglog is not None and rb_nonlinear is not None:
+        rb_loglog.blockSignals(True)
+        rb_nonlinear.blockSignals(True)
+        try:
+            if method == FIT_METHOD_LOG_LOG:
+                rb_loglog.setChecked(True)
+            else:
+                rb_nonlinear.setChecked(True)
+        finally:
+            rb_loglog.blockSignals(False)
+            rb_nonlinear.blockSignals(False)
     for widget, key in (
         (app.data_fit_didt_low, "didt_low"),
         (app.data_fit_didt_high, "didt_high"),
         (app.data_fit_linear_low, "linear_low"),
         (app.data_fit_linear_high, "linear_high"),
-        (app.data_fit_power_low, "power_low"),
-        (app.data_fit_power_vfrac, "power_vfrac"),
         (app.data_fit_max_iter, "max_iter"),
         (app.data_fit_ic_tol, "ic_tol"),
         (app.data_fit_chi_tol, "chi_tol"),
@@ -256,10 +313,40 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
     ):
         if key in profile:
             _set_silently(widget, str(profile[key]))
+    if method == FIT_METHOD_LOG_LOG:
+        low_key, high_key = "loglog_low", "loglog_high"
+    else:
+        low_key, high_key = "nonlinear_low", "nonlinear_high"
+    low_val = profile.get(low_key, profile.get("power_low"))
+    high_val = profile.get(high_key, profile.get("power_vfrac"))
+    if low_val is not None:
+        _set_silently(app.data_fit_power_low, str(low_val))
+    if high_val is not None:
+        _set_silently(app.data_fit_power_vfrac, str(high_val))
     if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
         _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
-        app.data_fit_subtract_vofs_cb.setChecked(bool(profile["subtract_vofs"]))
+        cb = app.data_fit_subtract_vofs_cb
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(bool(profile["subtract_vofs"]))
+        finally:
+            cb.blockSignals(False)
+    for attr, key in (
+        ("data_fit_show_didt", "show_didt"),
+        ("data_fit_show_linear", "show_linear"),
+        ("data_fit_show_power", "show_power"),
+    ):
+        widget = getattr(app, attr, None)
+        if widget is not None and key in profile:
+            widget.blockSignals(True)
+            try:
+                widget.setChecked(bool(profile[key]))
+            finally:
+                widget.blockSignals(False)
+    _update_method_mode_ui(app)
+    _update_band_states(app)
+    _update_equation_label(app)
     sync_region_to_inputs(app)
 
 
@@ -515,9 +602,23 @@ def _connect_data_fitting_actions(app):
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
     app.data_fit_help_btn.clicked.connect(lambda: _open_help_dialog(app))
-    app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
-    app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
-    app.data_fit_show_power.toggled.connect(lambda checked: _on_show_power_toggled(app, checked))
+    app.data_fit_show_didt.toggled.connect(
+        lambda _: (_update_band_states(app), _save_active_curve_profile(app))
+    )
+    app.data_fit_show_linear.toggled.connect(
+        lambda _: (_update_band_states(app), _save_active_curve_profile(app))
+    )
+    app.data_fit_show_power.toggled.connect(
+        lambda checked: (_on_show_power_toggled(app, checked), _save_active_curve_profile(app))
+    )
+    if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
+        app.data_fit_subtract_vofs_cb.toggled.connect(
+            lambda _: _save_active_curve_profile(app)
+        )
+    if getattr(app, "data_fit_zero_i_frac", None) is not None:
+        app.data_fit_zero_i_frac.editingFinished.connect(
+            lambda: _save_active_curve_profile(app)
+        )
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -531,8 +632,15 @@ def _connect_data_fitting_actions(app):
     app.data_fit_add_corrected_btn.clicked.connect(lambda: (_add_corrected_curve_from_last_fit(app), robust_view(app)))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
-    app.data_fit_method_loglog_rb.toggled.connect(lambda _: _on_fit_method_changed(app))
-    app.data_fit_method_nonlinear_rb.toggled.connect(lambda _: _on_fit_method_changed(app))
+    # Mutually exclusive radios fire toggled() twice per click (deselect +
+    # select). Filter to the "checked" edge so the per-curve profile only
+    # snapshots once and we don't overwrite the just-loaded other-method slot.
+    app.data_fit_method_loglog_rb.toggled.connect(
+        lambda checked: _on_fit_method_changed(app) if checked else None
+    )
+    app.data_fit_method_nonlinear_rb.toggled.connect(
+        lambda checked: _on_fit_method_changed(app) if checked else None
+    )
     app.data_fit_plot_scale_btn.clicked.connect(lambda: _toggle_plot_scale(app))
 
 
@@ -578,17 +686,28 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
-    if DEFAULT_FIT_METHOD == FIT_METHOD_LOG_LOG:
-        app.data_fit_method_loglog_rb.setChecked(True)
-        app.data_fit_power_low.setText(f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
-        app.data_fit_power_vfrac.setText(f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
-    else:
-        app.data_fit_method_nonlinear_rb.setChecked(True)
-        app.data_fit_power_low.setText(f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
-        app.data_fit_power_vfrac.setText(f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
-    app.data_fit_show_didt.setChecked(False)
-    app.data_fit_show_linear.setChecked(False)
-    app.data_fit_show_power.setChecked(False)
+    # Block radio signals during reset so _on_fit_method_changed doesn't try
+    # to snapshot the half-reset profile.
+    app.data_fit_method_loglog_rb.blockSignals(True)
+    app.data_fit_method_nonlinear_rb.blockSignals(True)
+    try:
+        if DEFAULT_FIT_METHOD == FIT_METHOD_LOG_LOG:
+            app.data_fit_method_loglog_rb.setChecked(True)
+            app.data_fit_power_low.setText(f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
+            app.data_fit_power_vfrac.setText(f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+        else:
+            app.data_fit_method_nonlinear_rb.setChecked(True)
+            app.data_fit_power_low.setText(f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
+            app.data_fit_power_vfrac.setText(f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
+    finally:
+        app.data_fit_method_loglog_rb.blockSignals(False)
+        app.data_fit_method_nonlinear_rb.blockSignals(False)
+    for cb in (app.data_fit_show_didt, app.data_fit_show_linear, app.data_fit_show_power):
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(False)
+        finally:
+            cb.blockSignals(False)
     for entry in list(getattr(app, "data_fit_curves", [])):
         item = entry.get("plot_item")
         if item is not None:
@@ -636,9 +755,15 @@ def _curve_profile_key_from_ui(app) -> str:
 
 
 def _save_active_curve_profile(app) -> None:
+    # Suppressed while we're applying a profile to the widgets — otherwise
+    # downstream signal handlers would snapshot half-loaded state into the
+    # newly selected curve's slot and undo what we're about to load.
+    if getattr(app, "_data_fit_suspend_profile_save", False):
+        return
     key = _curve_profile_key_from_ui(app)
-    profiles = getattr(app, "data_fit_curve_profiles", {})
-    profiles[key] = _capture_fit_window_profile(app)
+    profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+    prior = profiles.get(key, {}) if isinstance(profiles, dict) else {}
+    profiles[key] = _capture_fit_window_profile(app, prior=prior)
     app.data_fit_curve_profiles = profiles
 
 
@@ -648,8 +773,18 @@ def _on_curve_profile_changed(app) -> None:
     if key not in profiles:
         profiles[key] = _capture_fit_window_profile(app)
         app.data_fit_curve_profiles = profiles
-    _sync_active_length_settings_from_profile_key(app, key)
-    _apply_fit_window_profile(app, profiles.get(key, {}))
+    # Snapshot the target profile up front so it survives the in-flight
+    # widget mutations driven by length-sync and apply.
+    target = dict(profiles.get(key, {}))
+    app._data_fit_suspend_profile_save = True
+    try:
+        _sync_active_length_settings_from_profile_key(app, key)
+        _apply_fit_window_profile(app, target)
+    finally:
+        app._data_fit_suspend_profile_save = False
+    # Re-save once at the end so the active profile reflects exactly what
+    # the widgets now show (idempotent for a clean apply).
+    _save_active_curve_profile(app)
 
 
 def _refresh_curve_profile_selector(app) -> None:
@@ -1408,6 +1543,130 @@ def _settings_from_inputs(app) -> FitSettings:
     return settings
 
 
+def _profile_text_float(profile: dict, key: str, fallback: float, as_fraction: bool = False) -> float:
+    raw = profile.get(key)
+    if raw is None or raw == "":
+        return fallback
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return v / 100.0 if as_fraction else v
+
+
+def _entry_length_settings(app, entry: dict) -> tuple[bool, float]:
+    """Return (use_length, length_cm) for a fit entry.
+
+    Stored curves carry their own length context in ``entry["source"]``;
+    fall back to the live UI for the preview / single-curve case.
+    """
+    src = entry.get("source") or {}
+    if "use_length" in src:
+        try:
+            length_cm = float(src.get("length_cm", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            length_cm = 1.0
+        return bool(src.get("use_length", False)), length_cm
+    use_length = bool(app.data_fit_use_length_cb.isChecked())
+    try:
+        length_cm = float(app.data_fit_length_input.text())
+    except (TypeError, ValueError):
+        length_cm = 1.0
+    return use_length, (length_cm if length_cm > 0 else 1.0)
+
+
+def _profile_key_for_entry(entry: dict) -> str:
+    sig = entry.get("signature")
+    if sig is None or sig == "__preview__":
+        return "__preview__"
+    return str(sig)
+
+
+def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float) -> FitSettings:
+    """Build a FitSettings from a per-curve profile dict.
+
+    The profile stores raw QLineEdit text plus the curve's chosen fit method,
+    so the same dict is sufficient to reproduce the fit on its own — no live
+    UI access needed. ``use_length`` / ``length_cm`` come from the entry's
+    captured source context (or the current UI for the preview).
+    """
+    sample_length = float(length_cm) if use_length and length_cm and length_cm > 0 else None
+    method = profile.get("fit_method", DEFAULT_FIT_METHOD)
+
+    if sample_length is not None:
+        # vc input is Ec in µV/cm → convert to V/cm.
+        ec_uv_per_cm = _profile_text_float(profile, "vc", DEFAULT_EC_V_PER_CM * 1.0e6)
+        criterion_value = ec_uv_per_cm * 1.0e-6
+    else:
+        # vc input is Vc in mV → convert to V.
+        vc_mv = _profile_text_float(profile, "vc", DEFAULT_VC_VOLTS * 1000.0)
+        criterion_value = vc_mv * 1.0e-3
+
+    if method == FIT_METHOD_LOG_LOG:
+        to_si = 1.0e-6 if sample_length is not None else 1.0e-3
+        ec1_uv = _profile_text_float(
+            profile, "loglog_low",
+            _profile_text_float(profile, "power_low", DEFAULT_EC1_V_PER_CM * 1.0e6),
+        )
+        ec2_uv = _profile_text_float(
+            profile, "loglog_high",
+            _profile_text_float(profile, "power_vfrac", DEFAULT_EC2_V_PER_CM * 1.0e6),
+        )
+        ec1 = ec1_uv * to_si
+        ec2 = ec2_uv * to_si
+        # In log-log mode the non-linear power_low_frac/power_v_frac are unused;
+        # leave them at defaults so the dataclass stays well-formed.
+        power_low_frac = DEFAULT_POWER_LOW_FRAC
+        power_v_frac = DEFAULT_POWER_V_FRAC
+    else:
+        ec1 = DEFAULT_EC1_V_PER_CM
+        ec2 = DEFAULT_EC2_V_PER_CM
+        power_low_frac = _profile_text_float(
+            profile, "nonlinear_low",
+            _profile_text_float(profile, "power_low", DEFAULT_POWER_LOW_FRAC * 100),
+            as_fraction=True,
+        )
+        power_v_frac = _profile_text_float(
+            profile, "nonlinear_high",
+            _profile_text_float(profile, "power_vfrac", DEFAULT_POWER_V_FRAC * 100),
+            as_fraction=True,
+        )
+
+    return FitSettings(
+        didt_low_frac=_profile_text_float(profile, "didt_low", DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
+        didt_high_frac=_profile_text_float(profile, "didt_high", DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
+        linear_low_frac=_profile_text_float(profile, "linear_low", DEFAULT_LINEAR_LOW_FRAC * 100, as_fraction=True),
+        linear_high_frac=_profile_text_float(profile, "linear_high", DEFAULT_LINEAR_HIGH_FRAC * 100, as_fraction=True),
+        power_low_frac=power_low_frac,
+        power_v_frac=power_v_frac,
+        max_iterations=int(_profile_text_float(profile, "max_iter", DEFAULT_MAX_ITERATIONS)),
+        ic_tolerance=_profile_text_float(profile, "ic_tol", DEFAULT_IC_TOLERANCE * 100, as_fraction=True),
+        chi_sqr_tolerance=_profile_text_float(profile, "chi_tol", DEFAULT_CHI_SQR_TOL),
+        criterion_voltage=criterion_value,
+        sample_length_cm=sample_length,
+        fit_method=method,
+        ec1=ec1,
+        ec2=ec2,
+        subtract_thermal_offset=bool(profile.get("subtract_vofs", True)),
+        zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
+    )
+
+
+def _settings_for_entry(app, entry: dict) -> FitSettings:
+    """Pick the right FitSettings for a single fit entry.
+
+    Looks up the curve's stored profile (or the preview profile, or finally
+    the live UI) so each curve can carry its own fit method and windows.
+    """
+    profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+    key = _profile_key_for_entry(entry)
+    profile = profiles.get(key) if isinstance(profiles, dict) else None
+    if not profile:
+        return _settings_from_inputs(app)
+    use_length, length_cm = _entry_length_settings(app, entry)
+    return _settings_from_profile(profile, use_length=use_length, length_cm=length_cm)
+
+
 def _populate_channel_combos(app):
     names = list(app.data_fit_controller.channel_names)
     time_options = ["Time"] + names
@@ -2007,15 +2266,42 @@ def _update_method_mode_ui(app) -> None:
 
 
 def _on_fit_method_changed(app) -> None:
-    """Switch Step-4 editors to the mode-specific default values."""
-    method = _active_fit_method(app)
-    if method == FIT_METHOD_LOG_LOG:
-        _set_silently(app.data_fit_power_low, f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
-        _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+    """Switch Step-4 editors to the mode-specific values for the active curve.
+
+    Each curve's profile remembers per-method Ec1/Ec2 (log-log) and
+    Imax/Vmax fractions (non-linear) so toggling between methods restores
+    the user's last-edited values for the new method instead of clobbering
+    them with defaults.
+    """
+    new_method = _active_fit_method(app)
+    old_method = (
+        FIT_METHOD_NONLINEAR if new_method == FIT_METHOD_LOG_LOG else FIT_METHOD_LOG_LOG
+    )
+    key = _curve_profile_key_from_ui(app)
+    profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+    profile = dict(profiles.get(key, {}))
+    # Snapshot the still-old widget contents into the OLD method's slot so
+    # they survive a later switch back.
+    if old_method == FIT_METHOD_LOG_LOG:
+        profile["loglog_low"] = app.data_fit_power_low.text()
+        profile["loglog_high"] = app.data_fit_power_vfrac.text()
+    else:
+        profile["nonlinear_low"] = app.data_fit_power_low.text()
+        profile["nonlinear_high"] = app.data_fit_power_vfrac.text()
+    if new_method == FIT_METHOD_LOG_LOG:
+        new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
+        new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
     else:
-        _set_silently(app.data_fit_power_low, f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
-        _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
+        new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
+        new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
+    _set_silently(app.data_fit_power_low, str(new_low))
+    _set_silently(app.data_fit_power_vfrac, str(new_high))
+    profile["fit_method"] = new_method
+    profile["power_low"] = str(new_low)
+    profile["power_vfrac"] = str(new_high)
+    profiles[key] = profile
+    app.data_fit_curve_profiles = profiles
     _update_method_mode_ui(app)
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
@@ -3318,6 +3604,8 @@ def run_fit(app):
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
     try:
+        # Live UI snapshot — used for the single-curve fallback and as the
+        # last-resort settings source for any entry without a saved profile.
         settings = _settings_from_inputs(app)
     except Exception as exc:
         QMessageBox.critical(app, "Data Fitting", f"Invalid input: {exc}")
@@ -3335,6 +3623,9 @@ def run_fit(app):
         pt = transformed.get("time")
         if px is not None and py is not None and pt is not None and px.size and py.size and pt.size:
             included = [{
+                # Tag the preview entry with the well-known profile key so
+                # _settings_for_entry can look up its per-curve fit memory.
+                "signature": "__preview__",
                 "label": app.data_fit_y_cb.currentText(),
                 "t": pt,
                 "x": px,
@@ -3347,14 +3638,27 @@ def run_fit(app):
     if included:
         lines = []
         last_ok = None
+        last_ok_settings: Optional[FitSettings] = None
         ok_results = []
         all_results: list[tuple[str, object]] = []
         last_show_criterion = True
         last_show_ic = False
         for entry in included:
             label = entry.get("label", "Curve")
+            # Each curve carries its own fit method / windows / criterion via
+            # the per-curve profile stored in app.data_fit_curve_profiles.
             try:
-                result = run_full_fit(entry["t"], entry["x"], entry["y"], settings)
+                entry_settings = _settings_for_entry(app, entry)
+            except Exception as exc:
+                traceback.print_exc()
+                from .service import FitResult
+                result = FitResult(ok=False, message=f"Bad settings for [{label}]: {exc}")
+                entry["fit_result"] = result
+                all_results.append((label, result))
+                lines.append(f"[{label}] FIT FAILED: {result.message}")
+                continue
+            try:
+                result = run_full_fit(entry["t"], entry["x"], entry["y"], entry_settings)
             except Exception as exc:
                 traceback.print_exc()
                 # Synthesise a failed FitResult so the channel still appears
@@ -3366,6 +3670,7 @@ def run_fit(app):
             all_results.append((label, result))
             if result.ok:
                 last_ok = result
+                last_ok_settings = entry_settings
                 ok_results.append((label, result))
                 last_show_criterion = bool(entry.get("show_criterion", False))
                 last_show_ic = bool(entry.get("show_ic", False))
@@ -3380,7 +3685,7 @@ def run_fit(app):
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
             )
             _plot_residuals(app, last_ok)
-            _post_fit_warnings(app, last_ok, settings)
+            _post_fit_warnings(app, last_ok, last_ok_settings or settings)
         else:
             _hide_fit_overlays(app)
             _show_warning(app, "No curve produced a successful fit.", severity="error")
