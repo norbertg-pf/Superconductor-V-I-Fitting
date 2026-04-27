@@ -1747,6 +1747,22 @@ def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
         _replay_saved_fits_into_plot(app)
 
 
+def _safe_checkbox_checked(app, attr_name: str, *, default: bool) -> bool:
+    """Return checkbox state without crashing when a stale Qt wrapper exists.
+
+    In some UI flows (e.g. settings widgets recreated), app attributes can
+    still point to already-deleted C++ QCheckBox objects. Calling methods on
+    those wrappers raises RuntimeError; treat that as missing and use default.
+    """
+    checkbox = getattr(app, attr_name, None)
+    if checkbox is None:
+        return bool(default)
+    try:
+        return bool(checkbox.isChecked())
+    except RuntimeError:
+        return bool(default)
+
+
 def open_file_dialog(app):
     runtime_state = getattr(app, "runtime_state", None)
     start_dir = getattr(runtime_state, "output_folder", "") or ""
@@ -1763,10 +1779,7 @@ def open_file_dialog(app):
         # Auto-load checkbox controls whether we also redraw any saved fit
         # overlays into the plot — separate from whether the preview itself
         # is shown, which always happens on a successful load.
-        auto_load = bool(
-            getattr(app, "data_fit_auto_load_cb", None) is None
-            or app.data_fit_auto_load_cb.isChecked()
-        )
+        auto_load = _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=True)
         _post_load_setup(app, auto_plot_fits=auto_load)
 
 
@@ -1792,10 +1805,7 @@ def refresh_current_recording(app, path: Optional[str] = None):
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
     if ok:
-        auto_load = bool(
-            getattr(app, "data_fit_auto_load_cb", None) is None
-            or app.data_fit_auto_load_cb.isChecked()
-        )
+        auto_load = _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=True)
         _post_load_setup(app, auto_plot_fits=auto_load)
 
 
@@ -3501,8 +3511,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     if not src_path or not persistent:
         return None
     autosave_on = bool(
-        getattr(app, "data_fit_autosave_cb", None) is None
-        or app.data_fit_autosave_cb.isChecked()
+        _safe_checkbox_checked(app, "data_fit_autosave_cb", default=True)
     )
     if not autosave_on and not force:
         return None
@@ -5007,12 +5016,10 @@ def _settings_to_preset(app) -> FitPreset:
         or app.data_fit_same_group_cb.isChecked()
     )
     auto_load = bool(
-        getattr(app, "data_fit_auto_load_cb", None) is None
-        or app.data_fit_auto_load_cb.isChecked()
+        _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=True)
     )
     autosave = bool(
-        getattr(app, "data_fit_autosave_cb", None) is None
-        or app.data_fit_autosave_cb.isChecked()
+        _safe_checkbox_checked(app, "data_fit_autosave_cb", default=True)
     )
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
