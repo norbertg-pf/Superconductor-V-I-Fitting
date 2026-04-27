@@ -3591,6 +3591,23 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
+
+    def _apply_step4_window_from_reference(result_obj) -> None:
+        """For log-log fits, recompute Step-4 window from the same
+        corrected+smoothed reference used by the Add/Show helper curve."""
+        if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
+            return
+        controller.last_result = result_obj
+        if not _update_loglog_power_x_from_ec(app, auto_run_fit=False):
+            return
+        try:
+            lo_w = float(app.data_fit_power_low_x.text())
+            hi_w = float(app.data_fit_power_high_x.text())
+        except (TypeError, ValueError):
+            return
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+            result_obj.n_window_I = (float(lo_w), float(hi_w))
+            result_obj.power_fit_window = (float(lo_w), float(hi_w))
     if not controller.channel_names:
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
@@ -3660,6 +3677,7 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
+                _apply_step4_window_from_reference(result)
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
@@ -3760,6 +3778,7 @@ def run_fit(app):
                 )
         return
     controller.last_result = result
+    _apply_step4_window_from_reference(result)
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
