@@ -1974,25 +1974,22 @@ def _update_method_mode_ui(app) -> None:
 
 
 def _on_fit_method_changed(app) -> None:
-    """Apply IEC-standard defaults when switching into log-log mode; restore
-    the legacy fractions when switching into non-linear mode. Only rewrite
-    the editors when their current content matches the other mode's default,
-    so user-customised values survive toggling back and forth.
-    """
+    """Switch Step-4 editors to the mode-specific default values."""
     method = _active_fit_method(app)
-    low_txt = app.data_fit_power_low.text().strip()
-    high_txt = app.data_fit_power_vfrac.text().strip()
     if method == FIT_METHOD_LOG_LOG:
-        if low_txt in ("", f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"):
-            _set_silently(app.data_fit_power_low, f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
-        if high_txt in ("", f"{DEFAULT_POWER_V_FRAC * 100:.2f}"):
-            _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+        _set_silently(app.data_fit_power_low, f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}")
+        _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}")
+        app.data_fit_power_window_manual = False
     else:
-        if low_txt in ("", f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"):
-            _set_silently(app.data_fit_power_low, f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
-        if high_txt in ("", f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"):
-            _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
+        _set_silently(app.data_fit_power_low, f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}")
+        _set_silently(app.data_fit_power_vfrac, f"{DEFAULT_POWER_V_FRAC * 100:.2f}")
     _update_method_mode_ui(app)
+    _refresh_all_x_values(app)
+    ctx = _data_ctx(app)
+    if ctx is not None:
+        _, _, x_arr, y_arr, _ = ctx
+        _update_fit_bands(app, x_arr, y_arr)
+    _update_band_states(app)
     _update_equation_label(app)
 
 
