@@ -284,10 +284,34 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
         raise ValueError("No points with I > 0; cannot fit on a log axis.")
     xs = xs[pos]
     e_sc = e_sc[pos]
-    # Build a monotonic upper envelope to suppress isolated noisy dips/spikes
-    # when locating the Ec1/Ec2 transition window on X. This keeps the
-    # window bounds stable on noisy ramps while the fit still uses raw E_sc.
-    e_sc_mono = np.maximum.accumulate(e_sc)
+    def _adaptive_smooth_for_bounds(em: np.ndarray, ec_low: float, ec_high: float) -> np.ndarray:
+        """Adaptive smoothing used only for Ec-window edge detection.
+
+        The filter strength grows with measured high-frequency noise and stays
+        near-zero on clean traces. The actual log-log fit still uses raw E_sc.
+        """
+        if em.size < 7:
+            return em
+        span = max(float(ec_high - ec_low), abs(float(ec_low)), 1e-30)
+        diffs = np.diff(em)
+        if diffs.size < 5:
+            return em
+        mad = float(np.median(np.abs(diffs - np.median(diffs))))
+        sigma_hf = 1.4826 * mad / np.sqrt(2.0)  # robust point-noise estimate
+        noise_ratio = float(np.clip(sigma_hf / span, 0.0, 10.0))
+        # 0.0 -> 1 sample (off), 0.05 -> ~7, 0.2 -> ~17, 0.5 -> ~41
+        win = 1 + int(round(80.0 * noise_ratio))
+        win = max(1, min(win, 101))
+        if win % 2 == 0:
+            win += 1
+        if win <= 1:
+            return em
+        kernel = np.ones(win, dtype=float) / float(win)
+        return np.convolve(em, kernel, mode="same")
+
+    e_sc_bounds = _adaptive_smooth_for_bounds(e_sc, Ec1, Ec2)
+    # Monotonic envelope of the (optionally smoothed) trace for robust Ec2 pick.
+    e_sc_mono = np.maximum.accumulate(e_sc_bounds)
     # Transition onset: first index where the monotonic envelope reaches Ec2.
     # We then require points used in the fit to lie at or after the last
     # sub-Ec1 point before this onset — i.e. inside the transition rise.
@@ -298,10 +322,9 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             "ramp further or lower Ec2."
         )
     idx_Ec2 = int(above_Ec2[0])
-    # For the lower edge keep the original "last raw sub-Ec1 point" rule.
-    # Using the monotonic envelope here can lock idx_lo to 0 after a single
-    # early spike, which may include an unrealistically large part of the ramp.
-    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
+    # Lower edge uses the smoothed (non-monotonic) trace to suppress isolated
+    # spikes while still allowing the boundary to move with local data.
+    below_Ec1_before = np.where(e_sc_bounds[:idx_Ec2] < Ec1)[0]
     idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
     seg = slice(idx_lo, idx_Ec2 + 1)
     e_sc_seg = e_sc[seg]
