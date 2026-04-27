@@ -3621,10 +3621,6 @@ def run_fit(app):
     except Exception as exc:
         QMessageBox.critical(app, "Data Fitting", f"Invalid input: {exc}")
         return
-    # In log-log mode, calculate and populate Low/High X values from Ec1/Ec2
-    # before running the fit
-    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _update_loglog_power_x_from_ec(app)
 
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
@@ -3727,6 +3723,10 @@ def run_fit(app):
             app.data_fit_result_text.setPlainText(
                 current + f"\nFit report written to: {report_path}"
             )
+        # In log-log mode, populate Low/High X values from Ec1/Ec2 now that the
+        # reference curve should be available
+        if _active_fit_method(app) == FIT_METHOD_LOG_LOG and last_ok is not None:
+            _update_loglog_power_x_from_ec(app)
         return
 
     # Single-curve mode: use current channel selection.
@@ -3807,6 +3807,10 @@ def run_fit(app):
         app.data_fit_result_text.setPlainText(
             current + f"\nFit report written to: {report_path}"
         )
+    # In log-log mode, populate Low/High X values from Ec1/Ec2 now that the
+    # reference curve should be available
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG and result.ok:
+        _update_loglog_power_x_from_ec(app)
 
 
 def _hide_fit_overlays(app) -> None:
