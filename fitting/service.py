@@ -314,8 +314,9 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
       2) Build a monotonic transition envelope and find first point reaching Ec2.
       3) Find the last point below Ec1 before that Ec2 crossing.
       4) Keep only points between Ec1 and Ec2 on that transition segment.
-      5) Fit log10(E_sc) vs log10(I), and report the I-window as the
-         min/max current of the data points actually used in the regression.
+      5) Fit log10(E_sc) vs log10(I), and report the I-window from the same
+         smoothed-threshold crossing rule used by the Step-4 UI:
+         first I where E_sc_smooth >= Ec1 and first I where E_sc_smooth >= Ec2.
 
     Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi),
              sigma_Ic, sigma_n, r_squared).
@@ -401,14 +402,14 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    # Report the actual current span used by the regression points.
-    # This keeps the printed I-window aligned with what is physically fitted.
-    I_used = x_seg[mask]
-    I_lo = float(np.min(I_used))
-    I_hi = float(np.max(I_used))
+    # Report I-window with the same rule used by Step-4 Low(X)/High(X):
+    # first threshold crossings on the corrected+smoothed reference trace.
+    idx_lo_all = np.where(e_sc_bounds >= Ec1)[0]
+    idx_hi_all = np.where(e_sc_bounds >= Ec2)[0]
+    I_lo = float(xs[idx_lo_all[0]]) if idx_lo_all.size else float(xs[-1])
+    I_hi = float(xs[idx_hi_all[0]]) if idx_hi_all.size else float(xs[-1])
     if I_hi <= I_lo:
-        I_lo = float(np.min(x_seg[mask]))
-        I_hi = float(np.max(x_seg[mask]))
+        I_hi = I_lo + max(1e-12, 0.01 * (float(np.max(xs)) - float(np.min(xs))))
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
