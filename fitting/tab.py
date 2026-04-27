@@ -517,7 +517,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_help_btn.clicked.connect(lambda: _open_help_dialog(app))
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
-    app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
+    app.data_fit_show_power.toggled.connect(lambda checked: _on_show_power_toggled(app, checked))
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -2439,6 +2439,14 @@ def _update_band_states(app) -> None:
         band.setVisible(checked)
 
 
+def _on_show_power_toggled(app, checked: bool) -> None:
+    """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
+    if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    _update_band_states(app)
+    refresh_preview(app)
+
+
 def _on_band_dragged(app, window: str) -> None:
     """A band was dragged — write its new region back to that step's textboxes."""
     band = {
@@ -3728,62 +3736,21 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using the most relevant successful fit."""
-    result = None
-    parent_entry = None
-    active_key = _curve_profile_key_from_ui(app)
-    for entry in getattr(app, "data_fit_curves", []):
-        if str(entry.get("signature")) != str(active_key):
-            continue
-        fit_result = entry.get("fit_result")
-        if fit_result is not None and getattr(fit_result, "ok", False):
-            result = fit_result
-            parent_entry = entry
-            break
-
-    if result is None:
-        for entry in getattr(app, "data_fit_curves", []):
-            if bool(entry.get("is_fit_result", False)):
-                continue
-            fit_result = entry.get("fit_result")
-            if fit_result is not None and getattr(fit_result, "ok", False):
-                result = fit_result
-                parent_entry = entry
-                break
-
-    if result is None:
-        fit_result = getattr(getattr(app, "data_fit_controller", None), "last_result", None)
-        if fit_result is not None and getattr(fit_result, "ok", False):
-            result = fit_result
-
-    if result is None:
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        _ensure_fit_for_reference(app)
+        resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Run a successful fit first, then click 'Add corrected curve'.",
+            "Could not build corrected curve because no successful fit is available.",
         )
         return
-
-    if parent_entry is not None:
-        x = np.asarray(parent_entry.get("x", []), dtype=float)
-        y = np.asarray(parent_entry.get("y", []), dtype=float)
-        t = np.asarray(parent_entry.get("t", []), dtype=float)
-        base_sig = parent_entry.get("signature", parent_entry.get("label", "curve"))
-        base_label = parent_entry.get("label", "Curve")
-    else:
-        transformed = _apply_transforms(app)
-        x = np.asarray(transformed.get("x", []), dtype=float)
-        y = np.asarray(transformed.get("y", []), dtype=float)
-        t = np.asarray(transformed.get("time", []), dtype=float)
-        base_sig = ("__preview__", app.data_fit_y_cb.currentText())
-        base_label = app.data_fit_y_cb.currentText() or "Preview"
-
-    n = int(min(x.size, y.size))
-    if n == 0:
+    result, _parent_entry, base_sig, base_label, x, y, t = resolved
+    if int(min(x.size, y.size)) == 0:
         QMessageBox.warning(app, "Data Fitting", "No points available to build corrected curve.")
         return
-    x = x[:n]
-    y = y[:n]
-    t = t[:n] if t.size else np.asarray([])
     y_corr = y - (float(result.V0) + float(result.R) * x)
 
     sig = ("__corrected__", str(base_sig))
@@ -3876,16 +3843,23 @@ def _resolve_fit_parent_and_result(app):
     return result, parent_entry, base_sig, base_label, x[:n], y[:n], (t[:n] if t.size else np.asarray([]))
 
 
-def _add_smoothed_curve_from_current(app) -> None:
-    """Create corrected+smoothed Step-4 reference curve and plot a copy."""
+def _ensure_fit_for_reference(app) -> bool:
+    """Ensure Step-3/Step-4 fit values exist; auto-runs fit once if needed."""
+    if _resolve_fit_parent_and_result(app) is not None:
+        return True
+    run_fit(app)
+    return _resolve_fit_parent_and_result(app) is not None
+
+
+def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit: bool) -> bool:
+    """Build corrected+smoothed Step-4 reference from latest successful fit."""
     resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None and auto_run_fit:
+        _ensure_fit_for_reference(app)
+        resolved = _resolve_fit_parent_and_result(app)
     if resolved is None:
-        QMessageBox.warning(
-            app,
-            "Data Fitting",
-            "Run a successful fit first, then click 'Add smoothed and corrected curve'.",
-        )
-        return
+        return False
+
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
     y_corr = y - (float(result.V0) + float(result.R) * x)
     has_length = app.data_fit_use_length_cb.isChecked()
@@ -3893,8 +3867,10 @@ def _add_smoothed_curve_from_current(app) -> None:
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
     y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
-
     app.data_fit_power_ref_curve = {"x": np.asarray(x), "y": np.asarray(y_sm)}
+
+    if not create_plot_entry:
+        return True
 
     sig = (
         "__smoothed_corrected__",
@@ -3938,6 +3914,18 @@ def _add_smoothed_curve_from_current(app) -> None:
     existing["fit_result"] = result
     _refresh_curve_item(existing)
     _refresh_curve_profile_selector(app)
+    return True
+
+
+def _add_smoothed_curve_from_current(app) -> None:
+    """Create corrected+smoothed Step-4 reference curve and plot a copy."""
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=True, auto_run_fit=True)
+    if not ok:
+        QMessageBox.warning(
+            app,
+            "Data Fitting",
+            "Could not build smoothed+corrected curve because no successful fit is available.",
+        )
 
 
 def _add_plot_from_current(app) -> None:
