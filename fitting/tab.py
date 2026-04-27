@@ -264,6 +264,12 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_show_power", None) is not None
             else False
         ),
+        "didt_low_x": app.data_fit_didt_low_x.text(),
+        "didt_high_x": app.data_fit_didt_high_x.text(),
+        "linear_low_x": app.data_fit_linear_low_x.text(),
+        "linear_high_x": app.data_fit_linear_high_x.text(),
+        "power_low_x": app.data_fit_power_low_x.text(),
+        "power_high_x": app.data_fit_power_high_x.text(),
     }
     # Method-specific Step-4 slots: active widget values go into the active
     # method's slot; the inactive method's slot is preserved from the prior
@@ -324,6 +330,16 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         _set_silently(app.data_fit_power_low, str(low_val))
     if high_val is not None:
         _set_silently(app.data_fit_power_vfrac, str(high_val))
+    for widget, key in (
+        (app.data_fit_didt_low_x, "didt_low_x"),
+        (app.data_fit_didt_high_x, "didt_high_x"),
+        (app.data_fit_linear_low_x, "linear_low_x"),
+        (app.data_fit_linear_high_x, "linear_high_x"),
+        (app.data_fit_power_low_x, "power_low_x"),
+        (app.data_fit_power_high_x, "power_high_x"),
+    ):
+        if key in profile:
+            _set_silently(widget, str(profile[key]))
     if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
         _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
@@ -744,6 +760,25 @@ def _on_curve_profile_changed(app) -> None:
     try:
         _sync_active_length_settings_from_profile_key(app, key)
         _apply_fit_window_profile(app, target)
+        if str(key) == "__preview__":
+            transformed = _apply_transforms(app)
+            x_vals = transformed.get("x")
+            y_vals = transformed.get("y")
+            use_length = bool(app.data_fit_use_length_cb.isChecked())
+        else:
+            curve = _find_curve_for_profile_key(app, key) or {}
+            x_vals = curve.get("x")
+            y_vals = curve.get("y")
+            use_length, _ = _entry_length_settings(app, curve)
+        if x_vals is not None and y_vals is not None:
+            _recalculate_profile_x_windows(
+                app,
+                key=str(key),
+                x_values=x_vals,
+                y_values=y_vals,
+                use_length=use_length,
+                update_widgets=True,
+            )
     finally:
         app._data_fit_suspend_profile_save = False
     # Re-save once at the end so the active profile reflects exactly what
@@ -1629,6 +1664,100 @@ def _settings_for_entry(app, entry: dict) -> FitSettings:
         return _settings_from_inputs(app)
     use_length, length_cm = _entry_length_settings(app, entry)
     return _settings_from_profile(profile, use_length=use_length, length_cm=length_cm)
+
+
+def _recalculate_profile_x_windows(
+    app,
+    *,
+    key: str,
+    x_values,
+    y_values,
+    use_length: bool,
+    update_widgets: bool,
+) -> None:
+    profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+    profile = dict(profiles.get(key, {}))
+    if not profile:
+        return
+    x_arr = np.asarray(x_values, dtype=float)
+    y_arr = np.asarray(y_values, dtype=float)
+    n = int(min(x_arr.size, y_arr.size))
+    if n <= 0:
+        return
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    x_min = float(np.min(x_arr))
+    x_max = float(np.max(x_arr))
+    span = x_max - x_min
+    if not np.isfinite(span) or span <= 0:
+        return
+    y_max = float(np.max(y_arr)) if y_arr.size else 0.0
+
+    def _set_x(field: str, value: float, widget: Optional[QLineEdit] = None) -> None:
+        text = f"{float(value):.6g}"
+        profile[field] = text
+        if update_widgets and widget is not None:
+            _set_silently(widget, text)
+
+    didt_lo = _profile_text_float(profile, "didt_low", DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True)
+    didt_hi = _profile_text_float(profile, "didt_high", DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True)
+    lin_lo = _profile_text_float(profile, "linear_low", DEFAULT_LINEAR_LOW_FRAC * 100, as_fraction=True)
+    lin_hi = _profile_text_float(profile, "linear_high", DEFAULT_LINEAR_HIGH_FRAC * 100, as_fraction=True)
+    _set_x("didt_low_x", x_min + didt_lo * span, app.data_fit_didt_low_x)
+    _set_x("didt_high_x", x_min + didt_hi * span, app.data_fit_didt_high_x)
+    _set_x("linear_low_x", x_min + lin_lo * span, app.data_fit_linear_low_x)
+    _set_x("linear_high_x", x_min + lin_hi * span, app.data_fit_linear_high_x)
+
+    method = profile.get("fit_method", DEFAULT_FIT_METHOD)
+    if method == FIT_METHOD_LOG_LOG:
+        to_si = 1.0e-6 if use_length else 1.0e-3
+        ec1 = _profile_text_float(
+            profile, "loglog_low",
+            _profile_text_float(profile, "power_low", DEFAULT_EC1_V_PER_CM * 1.0e6),
+        ) * to_si
+        ec2 = _profile_text_float(
+            profile, "loglog_high",
+            _profile_text_float(profile, "power_vfrac", DEFAULT_EC2_V_PER_CM * 1.0e6),
+        ) * to_si
+        ec1 = max(float(ec1), 1.0e-30)
+        ec2 = max(float(ec2), ec1 * 1.000001)
+        valid = np.isfinite(x_arr) & np.isfinite(y_arr) & (x_arr > 0)
+        if np.any(valid):
+            x_log = x_arr[valid]
+            y_log = y_arr[valid]
+            order = np.argsort(x_log)
+            x_log = x_log[order]
+            y_log = y_log[order]
+            idx_lo = np.where(y_log >= ec1)[0]
+            idx_hi = np.where(y_log >= ec2)[0]
+            p_lo = float(x_log[idx_lo[0]]) if idx_lo.size else x_max
+            p_hi = float(x_log[idx_hi[0]]) if idx_hi.size else x_max
+        else:
+            p_lo = x_max
+            p_hi = x_max
+        if p_hi <= p_lo:
+            p_hi = p_lo + max(1e-12, 0.01 * span)
+        _set_x("power_low_x", p_lo, app.data_fit_power_low_x)
+        _set_x("power_high_x", p_hi, app.data_fit_power_high_x)
+    else:
+        p_lo = _profile_text_float(
+            profile, "nonlinear_low",
+            _profile_text_float(profile, "power_low", DEFAULT_POWER_LOW_FRAC * 100),
+            as_fraction=True,
+        )
+        v_frac = _profile_text_float(
+            profile, "nonlinear_high",
+            _profile_text_float(profile, "power_vfrac", DEFAULT_POWER_V_FRAC * 100),
+            as_fraction=True,
+        )
+        threshold = v_frac * y_max
+        above = np.where(y_arr >= threshold)[0]
+        p_hi = float(x_arr[above[0]]) if above.size else x_max
+        _set_x("power_low_x", x_min + p_lo * span, app.data_fit_power_low_x)
+        _set_x("power_high_x", p_hi, app.data_fit_power_high_x)
+
+    profiles[key] = profile
+    app.data_fit_curve_profiles = profiles
 
 
 def _populate_channel_combos(app):
@@ -3653,6 +3782,16 @@ def run_fit(app):
         last_show_ic = False
         for entry in included:
             label = entry.get("label", "Curve")
+            profile_key = _profile_key_for_entry(entry)
+            use_length, _ = _entry_length_settings(app, entry)
+            _recalculate_profile_x_windows(
+                app,
+                key=profile_key,
+                x_values=entry.get("x"),
+                y_values=entry.get("y"),
+                use_length=use_length,
+                update_widgets=(profile_key == _curve_profile_key_from_ui(app)),
+            )
             # Each curve carries its own fit method / windows / criterion via
             # the per-curve profile stored in app.data_fit_curve_profiles.
             try:
