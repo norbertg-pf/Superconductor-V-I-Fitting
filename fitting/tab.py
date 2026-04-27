@@ -1271,7 +1271,15 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot.setLabel("bottom", "Current (A)")
     app.data_fit_plot.setLabel("left", "Voltage (V)")
     app.data_fit_plot.showGrid(x=True, y=True)
-    app.data_fit_plot.getPlotItem().getViewBox().setMouseMode(pg.ViewBox.PanMode)
+    plot_item = app.data_fit_plot.getPlotItem()
+    # Reserve a little space on the right so right-edge labels are visible.
+    plot_item.layout.setContentsMargins(0, 0, 24, 0)
+    plot_item.getAxis("right").setWidth(58)
+    plot_view_box = plot_item.getViewBox()
+    # Leave extra headroom around data so right-edge labels/markers are easier
+    # to read and do not sit on the window border.
+    plot_view_box.setDefaultPadding(0.08)
+    plot_view_box.setMouseMode(pg.ViewBox.PanMode)
     app.data_fit_raw_curve = app.data_fit_plot.plot(pen=pg.mkPen("b", width=1.5), name="Raw")
     app.data_fit_model_curve = app.data_fit_plot.plot(pen=pg.mkPen("r", width=2), name="Fit")
 
@@ -1345,6 +1353,9 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_resid_plot.setLabel("bottom", "Current (A)")
     app.data_fit_resid_plot.setLabel("left", "Residual")
     app.data_fit_resid_plot.showGrid(x=True, y=True)
+    resid_item = app.data_fit_resid_plot.getPlotItem()
+    resid_item.layout.setContentsMargins(0, 0, 24, 0)
+    resid_item.getAxis("right").setWidth(58)
     app.data_fit_resid_plot.setXLink(app.data_fit_plot)
     app.data_fit_resid_curve = app.data_fit_resid_plot.plot(
         pen=None, symbol="o", symbolSize=3,
@@ -2655,7 +2666,10 @@ def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
         else:
             x_lo, x_hi = robust_view_range(x)
         if x_lo is not None and x_hi is not None:
-            view_box.setXRange(x_lo, x_hi, padding=0.0)
+            span = max(1e-12, x_hi - x_lo)
+            # Slightly bias padding to the right so labels at high current are
+            # not clipped by the plot edge.
+            view_box.setXRange(x_lo - 0.03 * span, x_hi + 0.10 * span, padding=0.0)
         else:
             view_box.enableAutoRange(axis="x")
     if auto_y:
