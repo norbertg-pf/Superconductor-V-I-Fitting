@@ -4284,9 +4284,9 @@ def _open_plot_summary(app) -> None:
     dialog.setWindowTitle("Plot summary")
     dialog.resize(1080, 360)
     root = QVBoxLayout(dialog)
-    table = QTableWidget(len(curves), 9)
+    table = QTableWidget(len(curves), 10)
     table.setHorizontalHeaderLabels([
-        "Color", "Label", "Skip pts", "Avg", "Tap dist (cm)",
+        "Color", "Label", "Skip pts", "Avg", "Use tap", "Tap dist (cm)",
         "Effective rate", "Show", "Include", "Actions",
     ])
     table.horizontalHeader().setStretchLastSection(False)
@@ -4294,11 +4294,12 @@ def _open_plot_summary(app) -> None:
     table.setColumnWidth(0, 90)
     table.setColumnWidth(2, 72)
     table.setColumnWidth(3, 70)
-    table.setColumnWidth(4, 100)
-    table.setColumnWidth(5, 130)
-    table.setColumnWidth(6, 60)
-    table.setColumnWidth(7, 70)
-    table.setColumnWidth(8, 250)
+    table.setColumnWidth(4, 70)
+    table.setColumnWidth(5, 100)
+    table.setColumnWidth(6, 130)
+    table.setColumnWidth(7, 60)
+    table.setColumnWidth(8, 70)
+    table.setColumnWidth(9, 250)
 
     def row_widgets(entry, row):
         is_preview = bool(entry.get("is_preview", False))
@@ -4346,8 +4347,7 @@ def _open_plot_summary(app) -> None:
         tap_value = src.get("length_cm")
         if tap_value is not None:
             tap.setText(f"{float(tap_value):g}")
-        if bool(entry.get("is_fit_result", False)):
-            tap.setEnabled(False)
+        is_fit_result = bool(entry.get("is_fit_result", False))
 
         def _rate_text_for_entry() -> str:
             t_local = entry.get("t")
@@ -4374,9 +4374,47 @@ def _open_plot_summary(app) -> None:
             rate_item.setText(_rate_text_for_entry())
         avg.editingFinished.connect(on_avg)
         table.setCellWidget(row, 3, avg)
+        use_tap_cb = QCheckBox()
+        if is_preview:
+            use_tap_cb.setChecked(bool(app.data_fit_use_length_cb.isChecked()))
+        else:
+            use_tap_cb.setChecked(bool(src.get("use_length", False)))
+        if is_fit_result:
+            use_tap_cb.setEnabled(False)
+
+        def _apply_tap_enabled_state() -> None:
+            tap.setEnabled(bool(use_tap_cb.isChecked()) and not is_fit_result)
+
+        def on_use_tap(v):
+            checked = bool(v)
+            _apply_tap_enabled_state()
+            if is_fit_result:
+                return
+            if is_preview:
+                app.data_fit_use_length_cb.setChecked(checked)
+                if checked:
+                    try:
+                        updated = float(tap.text())
+                        if updated <= 0:
+                            raise ValueError
+                    except ValueError:
+                        updated = _float_from(app.data_fit_length_input, 1.0)
+                        tap.setText(f"{updated:g}")
+                    _set_silently(app.data_fit_length_input, f"{updated:g}")
+                refresh_preview(app)
+                return
+            src["use_length"] = checked
+            _recompute_curve_from_source(app, entry)
+            _refresh_curve_item(entry)
+
+        use_tap_cb.toggled.connect(on_use_tap)
+        table.setCellWidget(row, 4, use_tap_cb)
+
         def on_tap():
-            if bool(entry.get("is_fit_result", False)):
+            if is_fit_result:
                 tap.setText("—")
+                return
+            if not use_tap_cb.isChecked():
                 return
             previous = src.get("length_cm", 1.0)
             try:
@@ -4396,9 +4434,10 @@ def _open_plot_summary(app) -> None:
             _recompute_curve_from_source(app, entry)
             _refresh_curve_item(entry)
         tap.editingFinished.connect(on_tap)
-        table.setCellWidget(row, 4, tap)
+        _apply_tap_enabled_state()
+        table.setCellWidget(row, 5, tap)
         rate_item.setText(_rate_text_for_entry())
-        table.setCellWidget(row, 5, rate_item)
+        table.setCellWidget(row, 6, rate_item)
         show_cb = QCheckBox()
         show_cb.setToolTip(
             "Show or hide this curve on the plot. Hidden curves are still "
@@ -4435,14 +4474,14 @@ def _open_plot_summary(app) -> None:
                     _apply_curve_visibility(paired)
 
         show_cb.toggled.connect(on_show)
-        table.setCellWidget(row, 6, show_cb)
+        table.setCellWidget(row, 7, show_cb)
         include = QCheckBox()
         include.setChecked(entry.get("include_in_fit", True))
         if is_preview:
             include.toggled.connect(lambda v: setattr(app, "data_fit_preview_include_in_fit", bool(v)))
         else:
             include.toggled.connect(lambda v: entry.update(include_in_fit=bool(v)))
-        table.setCellWidget(row, 7, include)
+        table.setCellWidget(row, 8, include)
         actions = QHBoxLayout()
         actions_widget = QWidget()
         actions_widget.setLayout(actions)
@@ -4465,7 +4504,7 @@ def _open_plot_summary(app) -> None:
         actions.setContentsMargins(0, 0, 0, 0)
         actions.addWidget(settings_btn)
         actions.addWidget(remove_btn)
-        table.setCellWidget(row, 8, actions_widget)
+        table.setCellWidget(row, 9, actions_widget)
 
     for i, entry in enumerate(curves):
         row_widgets(entry, i)
