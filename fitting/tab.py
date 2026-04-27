@@ -274,25 +274,45 @@ def _float_from(widget: QLineEdit, fallback: float, as_fraction: bool = False) -
 
 
 def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray:
-    """Noise-adaptive 1D smoothing for visual Ec1/Ec2 guidance."""
+    """Adaptive moving-average smoothing for visual Ec1/Ec2 guidance.
+
+    Target: reduce residual high-frequency noise to roughly 8 % of Ec1
+    (about 0.008 µV/cm when Ec1 = 0.1 µV/cm).
+    """
     arr = np.asarray(y, dtype=float)
     if arr.size < 7:
         return arr
-    span = max(float(ec2 - ec1), abs(float(ec1)), 1e-30)
     diffs = np.diff(arr)
     if diffs.size < 5:
         return arr
     mad = float(np.median(np.abs(diffs - np.median(diffs))))
     sigma_hf = 1.4826 * mad / np.sqrt(2.0)
-    noise_ratio = float(np.clip(sigma_hf / span, 0.0, 10.0))
-    win = 1 + int(round(80.0 * noise_ratio))
-    win = max(1, min(win, 101))
+
+    ec1_abs = max(abs(float(ec1)), 1e-30)
+    target_sigma = 0.08 * ec1_abs
+    if sigma_hf <= target_sigma:
+        return arr
+
+    # For moving-average filters, sigma_out ≈ sigma_in / sqrt(N).
+    win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
+    win = max(3, min(win, 2001))
     if win % 2 == 0:
         win += 1
-    if win <= 1:
-        return arr
     kernel = np.ones(win, dtype=float) / float(win)
-    return np.convolve(arr, kernel, mode="same")
+    sm = np.convolve(arr, kernel, mode="same")
+
+    # One optional refinement step if still too noisy.
+    diffs_sm = np.diff(sm)
+    if diffs_sm.size >= 5:
+        mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
+        sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
+        if sigma_sm > target_sigma and win < 2001:
+            win2 = min(2001, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
+            if win2 % 2 == 0:
+                win2 += 1
+            kernel2 = np.ones(win2, dtype=float) / float(win2)
+            sm = np.convolve(arr, kernel2, mode="same")
+    return sm
 
 
 def _read_time_channel(tdms_file):
@@ -498,8 +518,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
-    if hasattr(app, "data_fit_show_ec_smooth"):
-        app.data_fit_show_ec_smooth.toggled.connect(lambda _: refresh_preview(app))
+    app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
     app.data_fit_save_metadata_btn.clicked.connect(lambda: _save_metadata_clicked(app))
@@ -958,6 +977,12 @@ def setup_data_fitting_tab_layout(app):
         "Add the baseline-corrected curve from the last successful fit:\n"
         "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 4 window."
     )
+    app.data_fit_add_smoothed_btn = QPushButton("Add smoothed curve")
+    app.data_fit_add_smoothed_btn.setToolTip(
+        "Add a static noise-smoothed copy of the current curve using the\n"
+        "Ec-aware moving-average filter used for Step 4 guidance."
+    )
+    power_layout.addWidget(app.data_fit_add_smoothed_btn, 5, 2)
     power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 3)
 
     # --- window editors (rows 2-4) ---
@@ -968,12 +993,6 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_show_power = QCheckBox("Show / edit")
     app.data_fit_show_power.setChecked(False)
     app.data_fit_show_power.setToolTip("Show/hide the orange band for this window on the plot.")
-    app.data_fit_show_ec_smooth = QCheckBox("Show smoothed Ec curve")
-    app.data_fit_show_ec_smooth.setChecked(False)
-    app.data_fit_show_ec_smooth.setToolTip(
-        "Show/hide the orange dashed smoothed curve used as a visual guide\n"
-        "for Ec1/Ec2 window editing in log-log mode."
-    )
     # Pre-fill the low/high editors with the IEC Ec1/Ec2 defaults so they
     # are correct the first time the user sees them with the log-log
     # method (the default). The labels switch via _update_method_mode_ui.
@@ -985,7 +1004,6 @@ def setup_data_fitting_tab_layout(app):
         low_label="Ec1 (µV/cm)", low_pct=app.data_fit_power_low, low_x=app.data_fit_power_low_x,
         high_label="Ec2 (µV/cm)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
         base_row=2,
-        extra_widget=app.data_fit_show_ec_smooth,
     )
     # Keep references to the text labels so the method-mode handler can
     # swap them when the user switches between IEC and non-linear modes.
@@ -1120,11 +1138,6 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot.getPlotItem().getViewBox().setMouseMode(pg.ViewBox.PanMode)
     app.data_fit_raw_curve = app.data_fit_plot.plot(pen=pg.mkPen("b", width=1.5), name="Raw")
     app.data_fit_model_curve = app.data_fit_plot.plot(pen=pg.mkPen("r", width=2), name="Fit")
-    app.data_fit_ec_smooth_curve = app.data_fit_plot.plot(
-        pen=pg.mkPen(230, 120, 0, 210, width=1.3, style=Qt.DashLine),
-        name="Ec smooth",
-    )
-    app.data_fit_ec_smooth_curve.setVisible(False)
 
     # One band per step. It is BOTH the colored tint and the draggable editor
     # for that step (when "Edit visually" is selected). No separate gray region.
@@ -2251,40 +2264,27 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         return None
 
     ec1 = ec2 = None
-    ec_smooth_curve = getattr(app, "data_fit_ec_smooth_curve", None)
-    show_smooth = bool(getattr(app, "data_fit_show_ec_smooth", None) and app.data_fit_show_ec_smooth.isChecked())
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         has_length = app.data_fit_use_length_cb.isChecked()
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        y_smooth = _adaptive_smooth_visual(y, ec1, ec2) if (y is not None and y.size) else y
-        if ec_smooth_curve is not None:
-            if show_smooth and y_smooth is not None and y_smooth.size:
-                ec_smooth_curve.setData(x, y_smooth)
-                ec_smooth_curve.setVisible(True)
-            else:
-                ec_smooth_curve.setData([], [])
-                ec_smooth_curve.setVisible(False)
         exact_window = _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
-            # Pre-fit fallback: estimate from smoothed Y crossings.
-            if y_smooth is not None and y_smooth.size:
-                above_1 = np.where(y_smooth >= ec1)[0]
-                above_2 = np.where(y_smooth >= ec2)[0]
+            # Pre-fit fallback: cheap raw crossing estimate.
+            if y is not None and y.size:
+                above_1 = np.where(y >= ec1)[0]
+                above_2 = np.where(y >= ec2)[0]
                 pow_lo = float(x[above_1[0]]) if above_1.size else x_max
                 pow_hi = float(x[above_2[0]]) if above_2.size else x_max
                 if pow_hi <= pow_lo:
                     pow_hi = pow_lo + max(1e-12, 0.01 * span)
                 band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
     else:
-        if ec_smooth_curve is not None:
-            ec_smooth_curve.setData([], [])
-            ec_smooth_curve.setVisible(False)
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
             app.data_fit_power_vfrac, DEFAULT_POWER_V_FRAC * 100, as_fraction=True
@@ -3790,6 +3790,67 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     existing["t"] = t
     existing["fit_result"] = result
     existing["label"] = f"{base_label} corrected"
+    _refresh_curve_item(existing)
+    _refresh_curve_profile_selector(app)
+
+
+def _add_smoothed_curve_from_current(app) -> None:
+    """Snapshot current curve and add a smoothed variant as a separate plot."""
+    transformed = _apply_transforms(app)
+    x = np.asarray(transformed.get("x", []), dtype=float)
+    y = np.asarray(transformed.get("y", []), dtype=float)
+    t = np.asarray(transformed.get("time", []), dtype=float)
+    n = int(min(x.size, y.size))
+    if n == 0:
+        QMessageBox.warning(app, "Data Fitting", "No points available to build smoothed curve.")
+        return
+    x = x[:n]
+    y = y[:n]
+    t = t[:n] if t.size else np.asarray([])
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    y_sm = _adaptive_smooth_visual(y, ec1, ec2)
+
+    sig = (
+        "__smoothed__",
+        _curve_signature(app),
+        round(float(ec1), 18),
+        round(float(ec2), 18),
+    )
+    existing = None
+    for entry in getattr(app, "data_fit_curves", []):
+        if entry.get("signature") == sig:
+            existing = entry
+            break
+    if existing is None:
+        color = "#ff9f1a"
+        item = app.data_fit_plot.plot([], [], pen=pg.mkPen(color, width=1.6, style=Qt.DashLine), symbol=None)
+        existing = {
+            "signature": sig,
+            "label": f"{app.data_fit_y_cb.currentText() or 'Curve'} smoothed",
+            "color": color,
+            "alpha_pct": 100,
+            "skip_points": 1,
+            "include_in_fit": False,
+            "x": np.asarray([]),
+            "y": np.asarray([]),
+            "t": np.asarray([]),
+            "plot_item": item,
+            "fit_result": None,
+            "curve_style": {"draw_mode": "Lines only", "line_width": 1.6, "point_size": 3},
+            "avg_window": 1,
+            "show_criterion": False,
+            "show_ic": False,
+            "source": {},
+            "is_smoothed_curve": True,
+        }
+        app.data_fit_curves.append(existing)
+    existing["x"] = x
+    existing["y"] = y_sm
+    existing["t"] = t
+    existing["label"] = f"{app.data_fit_y_cb.currentText() or 'Curve'} smoothed"
     _refresh_curve_item(existing)
     _refresh_curve_profile_selector(app)
 
