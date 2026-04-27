@@ -2867,6 +2867,16 @@ def _update_loglog_power_x_from_ec(app) -> bool:
         return False
     x_arr = x_arr[:n]
     y_arr = y_arr[:n]
+    # Align UI threshold picking with service.fit_n_value_log_log:
+    # use positive-current points and sort by current before searching Ec hits.
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr) & (x_arr > 0)
+    if not np.any(valid):
+        return False
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
+    order = np.argsort(x_arr)
+    x_arr = x_arr[order]
+    y_arr = y_arr[order]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
