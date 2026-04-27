@@ -1515,6 +1515,17 @@ def _settings_from_inputs(app) -> FitSettings:
     # In log-log mode the user-entered Ec/Vc is the criterion at which Ic is
     # reported. Ec1/Ec2 only define the fit window for the n-value slope.
 
+    # In log-log mode, if Low/High X values are populated, use them as the fit window
+    power_fit_window = None
+    if method == FIT_METHOD_LOG_LOG:
+        try:
+            x_lo = float(app.data_fit_power_low_x.text())
+            x_hi = float(app.data_fit_power_high_x.text())
+            if np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo:
+                power_fit_window = (x_lo, x_hi)
+        except (ValueError, TypeError):
+            pass
+
     settings = FitSettings(
         didt_low_frac=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
         didt_high_frac=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
@@ -1530,6 +1541,7 @@ def _settings_from_inputs(app) -> FitSettings:
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        power_fit_window=power_fit_window,
         subtract_thermal_offset=bool(
             getattr(app, "data_fit_subtract_vofs_cb", None) is None
             or app.data_fit_subtract_vofs_cb.isChecked()
@@ -1731,6 +1743,11 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    # Clear Low/High X values when loading new data — in log-log mode these should
+    # only be populated when the user explicitly changes Ec1/Ec2 or presses Run Fit
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _set_silently(app.data_fit_power_low_x, "")
+        _set_silently(app.data_fit_power_high_x, "")
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2292,6 +2309,10 @@ def _on_fit_method_changed(app) -> None:
         new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
         new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
+        # Clear Low/High X values in log-log mode — they should only be calculated
+        # when the user explicitly changes Ec1/Ec2 or presses Run Fit
+        _set_silently(app.data_fit_power_low_x, "")
+        _set_silently(app.data_fit_power_high_x, "")
     else:
         new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
         new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
@@ -2604,8 +2625,10 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
-            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
+            # Don't automatically populate Low/High X values in log-log mode — these should
+            # only be set when the user explicitly changes Ec1/Ec2 or runs Fit.
+            # _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
+            # _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
@@ -2760,7 +2783,9 @@ def _update_band_states(app) -> None:
 def _on_show_power_toggled(app, checked: bool) -> None:
     """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+        # Don't auto-run fit when toggling show — just try to use existing result.
+        # User must explicitly press Run Fit to trigger calculations.
+        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
     _update_band_states(app)
     refresh_preview(app)
 
@@ -2878,7 +2903,7 @@ def _update_loglog_power_x_from_ec(app) -> bool:
     """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
     if not ok:
         return False
     ref = getattr(app, "data_fit_power_ref_curve", None) or {}
@@ -3792,7 +3817,6 @@ def run_fit(app):
         app.data_fit_result_text.setPlainText(
             current + f"\nFit report written to: {report_path}"
         )
-
 
 def _hide_fit_overlays(app) -> None:
     app.data_fit_ic_line.setVisible(False)

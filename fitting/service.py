@@ -58,6 +58,9 @@ class FitSettings:
     fit_method: str = DEFAULT_FIT_METHOD
     ec1: float = DEFAULT_EC1_V_PER_CM
     ec2: float = DEFAULT_EC2_V_PER_CM
+    # Optional user-specified power fit window for log-log mode (I_lo, I_hi).
+    # When provided, overrides the window calculated from Ec1/Ec2.
+    power_fit_window: Optional[tuple[float, float]] = None
     # Step 1 — thermal offset subtraction.
     subtract_thermal_offset: bool = True
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
@@ -252,6 +255,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         V0: float, R: float,
                         Ec1: float, Ec2: float,
                         criterion_E: Optional[float] = None,
+                        user_window: Optional[tuple[float, float]] = None,
                         ) -> tuple[float, float, float, int, tuple[float, float],
                                    float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
@@ -376,20 +380,24 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    # Report decade-window currents from the fitted line itself:
-    # log10(E) = intercept + n*log10(I)  -> I(Ec) = 10^((log10(Ec)-intercept)/n)
-    # This is far less sensitive to pointwise noise than direct threshold hits.
-    log_I_lo = (float(np.log10(Ec1)) - intercept) / n_val
-    log_I_hi = (float(np.log10(Ec2)) - intercept) / n_val
-    I_lo = float(10.0 ** log_I_lo)
-    I_hi = float(10.0 ** log_I_hi)
-    x_lo_data = float(np.min(xs))
-    x_hi_data = float(np.max(xs))
-    I_lo = float(np.clip(I_lo, x_lo_data, x_hi_data))
-    I_hi = float(np.clip(I_hi, x_lo_data, x_hi_data))
-    if I_hi <= I_lo:
-        I_lo = float(np.min(x_seg[mask]))
-        I_hi = float(np.max(x_seg[mask]))
+    # If user provided a window, use it; otherwise calculate from Ec1/Ec2.
+    if user_window is not None and len(user_window) == 2:
+        I_lo, I_hi = float(user_window[0]), float(user_window[1])
+    else:
+        # Report decade-window currents from the fitted line itself:
+        # log10(E) = intercept + n*log10(I)  -> I(Ec) = 10^((log10(Ec)-intercept)/n)
+        # This is far less sensitive to pointwise noise than direct threshold hits.
+        log_I_lo = (float(np.log10(Ec1)) - intercept) / n_val
+        log_I_hi = (float(np.log10(Ec2)) - intercept) / n_val
+        I_lo = float(10.0 ** log_I_lo)
+        I_hi = float(10.0 ** log_I_hi)
+        x_lo_data = float(np.min(xs))
+        x_hi_data = float(np.max(xs))
+        I_lo = float(np.clip(I_lo, x_lo_data, x_hi_data))
+        I_hi = float(np.clip(I_hi, x_lo_data, x_hi_data))
+        if I_hi <= I_lo:
+            I_lo = float(np.min(x_seg[mask]))
+            I_hi = float(np.max(x_seg[mask]))
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
@@ -469,11 +477,12 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         # fall back to Ec2 (the legacy default) when criterion_voltage is
         # not set or non-positive.
         crit_for_ic = Vc if (Vc is not None and Vc > 0) else settings.ec2
+        user_provided_window = getattr(settings, "power_fit_window", None)
         try:
             (Ic, n_value, chi_sqr, n_pts, n_window,
              sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
-                criterion_E=crit_for_ic,
+                criterion_E=crit_for_ic, user_window=user_provided_window,
             )
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
             return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
