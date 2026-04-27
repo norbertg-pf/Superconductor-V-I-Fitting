@@ -123,6 +123,48 @@ def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
     return lo - pad, hi + pad
 
 
+def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray:
+    """Adaptive smoothing shared by Step-4 UI and IEC log-log fit windowing.
+
+    Goal: suppress high-frequency noise so Ec1/Ec2 crossing detection is stable.
+    """
+    arr = np.asarray(y, dtype=float)
+    if arr.size < 7:
+        return arr
+    diffs = np.diff(arr)
+    if diffs.size < 5:
+        return arr
+    mad = float(np.median(np.abs(diffs - np.median(diffs))))
+    sigma_hf = 1.4826 * mad / np.sqrt(2.0)
+
+    ec1_abs = max(abs(float(ec1)), 1e-30)
+    # Keep this target aligned with the Step-4 UI guidance curve behavior.
+    target_sigma = 0.005 * ec1_abs
+    if sigma_hf <= target_sigma:
+        return arr
+
+    # Moving-average approximation: sigma_out ≈ sigma_in / sqrt(N).
+    win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
+    win = max(3, min(win, 2001))
+    if win % 2 == 0:
+        win += 1
+    kernel = np.ones(win, dtype=float) / float(win)
+    sm = np.convolve(arr, kernel, mode="same")
+
+    # Optional second pass if still above target noise.
+    diffs_sm = np.diff(sm)
+    if diffs_sm.size >= 5:
+        mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
+        sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
+        if sigma_sm > target_sigma and win < 2001:
+            win2 = min(2001, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
+            if win2 % 2 == 0:
+                win2 += 1
+            kernel2 = np.ones(win2, dtype=float) / float(win2)
+            sm = np.convolve(arr, kernel2, mode="same")
+    return sm
+
+
 def _clean_arrays(*arrs):
     arrs = [np.asarray(a, dtype=float) for a in arrs]
     if not arrs:
@@ -267,6 +309,14 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     The slope of log10(E_sc) vs log10(I) on this segment is the n-index;
     Ic is reported at E = Ec2 (the IEC criterion for HTS at 77 K).
 
+    How the I-window is computed for this log-log power-law fit:
+      1) Sort by current and compute E_sc = y - (V0 + R*I).
+      2) Build a monotonic transition envelope and find first point reaching Ec2.
+      3) Find the last point below Ec1 before that Ec2 crossing.
+      4) Keep only points between Ec1 and Ec2 on that transition segment.
+      5) Fit log10(E_sc) vs log10(I), then report I(Ec1) and I(Ec2) from the
+         fitted line (more robust than direct pointwise threshold hits).
+
     Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi),
              sigma_Ic, sigma_n, r_squared).
     Standard errors are derived from the log-space polyfit covariance;
@@ -284,32 +334,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
         raise ValueError("No points with I > 0; cannot fit on a log axis.")
     xs = xs[pos]
     e_sc = e_sc[pos]
-    def _adaptive_smooth_for_bounds(em: np.ndarray, ec_low: float, ec_high: float) -> np.ndarray:
-        """Adaptive smoothing used only for Ec-window edge detection.
-
-        The filter strength grows with measured high-frequency noise and stays
-        near-zero on clean traces. The actual log-log fit still uses raw E_sc.
-        """
-        if em.size < 7:
-            return em
-        span = max(float(ec_high - ec_low), abs(float(ec_low)), 1e-30)
-        diffs = np.diff(em)
-        if diffs.size < 5:
-            return em
-        mad = float(np.median(np.abs(diffs - np.median(diffs))))
-        sigma_hf = 1.4826 * mad / np.sqrt(2.0)  # robust point-noise estimate
-        noise_ratio = float(np.clip(sigma_hf / span, 0.0, 10.0))
-        # 0.0 -> 1 sample (off), 0.05 -> ~7, 0.2 -> ~17, 0.5 -> ~41
-        win = 1 + int(round(80.0 * noise_ratio))
-        win = max(1, min(win, 101))
-        if win % 2 == 0:
-            win += 1
-        if win <= 1:
-            return em
-        kernel = np.ones(win, dtype=float) / float(win)
-        return np.convolve(em, kernel, mode="same")
-
-    e_sc_bounds = _adaptive_smooth_for_bounds(e_sc, Ec1, Ec2)
+    e_sc_bounds = adaptive_smooth_for_ec_window(e_sc, Ec1, Ec2)
     # Monotonic envelope of the (optionally smoothed) trace for robust Ec2 pick.
     e_sc_mono = np.maximum.accumulate(e_sc_bounds)
     # Transition onset: first index where the monotonic envelope reaches Ec2.
