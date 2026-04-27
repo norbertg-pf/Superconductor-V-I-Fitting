@@ -1897,8 +1897,7 @@ def _update_method_mode_ui(app) -> None:
     # IEC default (Ec2) and report Ic at any criterion value of their choice.
     app.data_fit_vc_input.setEnabled(True)
     app.data_fit_vc_label.setEnabled(True)
-    # The X-value editors in Step 4 map a percentage to a current, which is
-    # meaningless when the editors hold Ec1/Ec2. Disable them in log-log mode.
+    # Keep X-value editors enabled so users can view/edit I(Ec1)/I(Ec2).
     for widget in (
         app.data_fit_power_low_x,
         app.data_fit_power_high_x,
@@ -1906,7 +1905,7 @@ def _update_method_mode_ui(app) -> None:
         getattr(app, "data_fit_power_high_x_label", None),
     ):
         if widget is not None:
-            widget.setEnabled(not is_loglog)
+            widget.setEnabled(True)
     # In log-log mode the Show checkbox controls the Step 4 shaded region and
     # dragging it updates Ec1/Ec2 directly.
     app.data_fit_show_power.setEnabled(True)
@@ -2168,7 +2167,10 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        if y is not None and y.size:
+        fit_window = _active_loglog_fit_window(app)
+        if fit_window is not None:
+            band_pairs.append((app.data_fit_band_power, fit_window))
+        elif y is not None and y.size:
             above_1 = np.where(y >= ec1)[0]
             above_2 = np.where(y >= ec2)[0]
             pow_lo = float(x[above_1[0]]) if above_1.size else x_max
@@ -2402,10 +2404,60 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
     return float(y[idx]) / y_max * 100.0
 
 
+def _loglog_threshold_x_window(app, x: np.ndarray, y: np.ndarray) -> Optional[tuple[float, float]]:
+    """Best-effort I(Ec1), I(Ec2) from the current displayed curve."""
+    if x is None or y is None or x.size == 0 or y.size == 0:
+        return None
+    to_si = 1.0e-6 if app.data_fit_use_length_cb.isChecked() else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    ec1 = max(float(ec1), 0.0)
+    ec2 = max(float(ec2), ec1)
+    above_1 = np.where(y >= ec1)[0]
+    above_2 = np.where(y >= ec2)[0]
+    if above_1.size == 0 or above_2.size == 0:
+        return None
+    lo = float(x[int(above_1[0])])
+    hi = float(x[int(above_2[0])])
+    if hi < lo:
+        lo, hi = hi, lo
+    return lo, hi
+
+
+def _active_loglog_fit_window(app) -> Optional[tuple[float, float]]:
+    """Return the exact I-window used by the active fitted curve, if present."""
+    key = _curve_profile_key_from_ui(app)
+    for entry in getattr(app, "data_fit_curves", []):
+        if bool(entry.get("is_fit_result", False)):
+            continue
+        if str(entry.get("signature", entry.get("label", ""))) != key:
+            continue
+        result = entry.get("fit_result")
+        if result is None or not getattr(result, "ok", False):
+            return None
+        if getattr(result, "fit_method", FIT_METHOD_NONLINEAR) != FIT_METHOD_LOG_LOG:
+            return None
+        lo, hi = getattr(result, "n_window_I", (0.0, 0.0)) or (0.0, 0.0)
+        lo = float(lo)
+        hi = float(hi)
+        if hi < lo:
+            lo, hi = hi, lo
+        return (lo, hi) if hi > lo else None
+    return None
+
+
 def _refresh_x_from_pct(app, window: str, which: str) -> None:
-    # In log-log mode the Step 4 editors hold Ec1/Ec2 (µV/cm), not a
-    # percentage of Imax — no meaningful X mapping until a fit has run.
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        ctx = _data_ctx(app)
+        if ctx is None:
+            return
+        _, _, x, y, _ = ctx
+        win = _active_loglog_fit_window(app) or _loglog_threshold_x_window(app, x, y)
+        if win is None:
+            return
+        lo, hi = win
+        _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
+        _set_silently(app.data_fit_power_high_x, f"{hi:.6g}")
         return
     ctx = _data_ctx(app)
     if ctx is None:
@@ -2422,6 +2474,22 @@ def _refresh_x_from_pct(app, window: str, which: str) -> None:
 
 def _refresh_pct_from_x(app, window: str, which: str) -> None:
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        ctx = _data_ctx(app)
+        if ctx is None:
+            return
+        _, _, x, y, _ = ctx
+        if y is None or y.size == 0:
+            return
+        x_widget = app.data_fit_power_low_x if which == "low" else app.data_fit_power_high_x
+        target_widget = app.data_fit_power_low if which == "low" else app.data_fit_power_vfrac
+        try:
+            x_val = float(x_widget.text())
+        except ValueError:
+            return
+        idx = int(np.argmin(np.abs(np.asarray(x, dtype=float) - x_val)))
+        y_val = max(float(np.asarray(y, dtype=float)[idx]), 0.0)
+        from_si = 1.0e6 if app.data_fit_use_length_cb.isChecked() else 1.0e3
+        _set_silently(target_widget, f"{y_val * from_si:.6g}")
         return
     ctx = _data_ctx(app)
     if ctx is None:
@@ -2469,6 +2537,11 @@ def region_mode_changed(app, _button=None):
 
 def sync_region_to_inputs(app):
     _update_band_states(app)
+    _refresh_all_x_values(app)
+    ctx = _data_ctx(app)
+    if ctx is not None:
+        _, _, x_arr, y_arr, _ = ctx
+        _update_fit_bands(app, x_arr, y_arr)
 
 
 def load_metadata_from_tdms(app):
@@ -3145,6 +3218,11 @@ def run_fit(app):
             )
             _plot_residuals(app, last_ok)
             _post_fit_warnings(app, last_ok, settings)
+            ctx = _data_ctx(app)
+            if ctx is not None:
+                _, _, x_arr, y_arr, _ = ctx
+                _refresh_all_x_values(app)
+                _update_fit_bands(app, x_arr, y_arr)
         else:
             _hide_fit_overlays(app)
             _show_warning(app, "No curve produced a successful fit.", severity="error")
@@ -3236,6 +3314,11 @@ def run_fit(app):
     )
     _plot_residuals(app, result)
     _post_fit_warnings(app, result, settings)
+    ctx = _data_ctx(app)
+    if ctx is not None:
+        _, _, x_arr, y_arr, _ = ctx
+        _refresh_all_x_values(app)
+        _update_fit_bands(app, x_arr, y_arr)
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(True)
     # Cache the single-curve result so manual Save metadata can re-persist
