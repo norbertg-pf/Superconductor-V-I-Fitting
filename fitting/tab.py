@@ -1657,9 +1657,23 @@ def _replay_saved_fits_into_plot(app) -> None:
             # the user can pick it from the Y-axis combo. Sample the smooth
             # fit_y at the source X positions so the array length matches
             # the source channel — required for the channel combo flow.
+            #
+            # Storage units matter: ``_apply_transforms`` divides Y by the
+            # active sample length when the voltage-tap checkbox is on. The
+            # fit was already in V/cm when ``uses_sample_length`` is True,
+            # so storing it as-is would make the display pipeline divide
+            # by the tap distance a second time and flatten the transition
+            # off-screen. Multiply by the tap distance here so the cached
+            # values are in raw V, mirroring how the source channel is
+            # stored, and the standard transform reproduces the V/cm scale.
             fitted_name = f"{name}{_FITTED_CHANNEL_SUFFIX}"
             sampled = _sample_fit_curve_at(x_arr, np.asarray(fit_x), np.asarray(fit_y))
             if sampled is not None and sampled.size:
+                if (
+                    v_tap and float(v_tap) > 0
+                    and _coerce_bool(_prop_lookup(props, "uses_sample_length"))
+                ):
+                    sampled = sampled * float(v_tap)
                 controller.channel_cache[fitted_name] = sampled
                 controller.channel_metadata[fitted_name] = {
                     "scale": 1.0,
@@ -2859,7 +2873,11 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
     x_arr = np.asarray(x_data, dtype=float)
     if x_arr.size < 2:
         return None, None
-    x_min = max(float(np.min(x_arr)), 1e-12)
+    # Cover the full source range so callers that resample the smooth
+    # curve onto x_arr (np.interp) don't get NaN at the endpoints. The
+    # power-law term is well-defined at I = 0 (clipped to 1e-30/Ic ≈ 0)
+    # so we no longer need to clamp x_min away from zero.
+    x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
     if x_max <= x_min:
         return None, None
@@ -2868,7 +2886,10 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
     V0 = float(getattr(result, "V0", 0.0))
     R = float(getattr(result, "R", 0.0))
     n_val = float(getattr(result, "n_value", 0.0))
-    fit_y = V0 + R * fit_x + crit * np.power(np.clip(fit_x / Ic, 1e-30, None), n_val)
+    # ``np.maximum`` keeps the ratio non-negative so fractional powers
+    # behave for the rare cases where x dips below zero on noisy data.
+    ratio = np.maximum(fit_x / Ic, 0.0)
+    fit_y = V0 + R * fit_x + crit * np.power(ratio, n_val)
     if getattr(result, "thermal_offset_applied", False):
         fit_y = fit_y + float(getattr(result, "V_ofs", 0.0))
     # If the saved fit was per-unit-length but the user is loading without
