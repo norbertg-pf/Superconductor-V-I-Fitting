@@ -214,6 +214,14 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
         widget.blockSignals(False)
 
 
+def _clear_loglog_power_x_values(app) -> None:
+    """Clear Step-4 Low/High X fields used by Ec1/Ec2 in log-log mode."""
+    if getattr(app, "data_fit_power_low_x", None) is not None:
+        _set_silently(app.data_fit_power_low_x, "")
+    if getattr(app, "data_fit_power_high_x", None) is not None:
+        _set_silently(app.data_fit_power_high_x, "")
+
+
 def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
     """Snapshot the Active-fitting widgets into a per-curve profile dict.
 
@@ -718,6 +726,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_values(app)
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
     app.data_fit_preview_color = "#1f77b4"
@@ -1731,6 +1740,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_values(app)
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2292,6 +2302,7 @@ def _on_fit_method_changed(app) -> None:
         new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
         new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
+        _clear_loglog_power_x_values(app)
     else:
         new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
         new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
@@ -2607,6 +2618,8 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
+            if not bool(getattr(app, "data_fit_power_window_manual", False)):
+                _clear_loglog_power_x_values(app)
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
                 above_1 = np.where(y_for_power >= ec1)[0]
@@ -2982,6 +2995,10 @@ def _refresh_all_x_values(app) -> None:
         return
     for (window, which) in app.data_fit_window_inputs:
         _refresh_x_from_pct(app, window, which)
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG and not bool(
+        getattr(app, "data_fit_power_window_manual", False)
+    ):
+        _clear_loglog_power_x_values(app)
 
 
 def region_mode_changed(app, _button=None):
