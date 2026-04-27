@@ -2585,37 +2585,12 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             return _coerce_window(getattr(last_result, "n_window_I", None))
         return None
 
-    ec1 = ec2 = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-        ref_x = np.asarray(ref.get("x", []), dtype=float)
-        ref_y = np.asarray(ref.get("y", []), dtype=float)
-        if ref_x.size and ref_y.size:
-            n_ref = int(min(ref_x.size, ref_y.size))
-            x_for_power = ref_x[:n_ref]
-            y_for_power = ref_y[:n_ref]
-        else:
-            x_for_power = x
-            y_for_power = y
-        has_length = app.data_fit_use_length_cb.isChecked()
-        to_si = 1.0e-6 if has_length else 1.0e-3
-        ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
-        ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
-        else:
-            # Pre-fit fallback: cheap raw crossing estimate.
-            if y_for_power is not None and y_for_power.size:
-                above_1 = np.where(y_for_power >= ec1)[0]
-                above_2 = np.where(y_for_power >= ec2)[0]
-                pow_lo = float(x_for_power[above_1[0]]) if above_1.size else x_max
-                pow_hi = float(x_for_power[above_2[0]]) if above_2.size else x_max
-                if pow_hi <= pow_lo:
-                    pow_hi = pow_lo + max(1e-12, 0.01 * span)
-                band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
     else:
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
@@ -2875,39 +2850,28 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
 
 
 def _update_loglog_power_x_from_ec(app) -> bool:
-    """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
+    """Update Step-4 low/high X from Ec1/Ec2 using the fitted IEC window."""
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
-    if not ok:
+    # Re-run so the latest Ec1/Ec2 edits are reflected in n_window_I.
+    run_fit(app)
+    controller = getattr(app, "data_fit_controller", None)
+    result = getattr(controller, "last_result", None) if controller is not None else None
+    if getattr(result, "fit_method", "") != FIT_METHOD_LOG_LOG:
         return False
-    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-    x_arr = np.asarray(ref.get("x", []), dtype=float)
-    y_arr = np.asarray(ref.get("y", []), dtype=float)
-    n = int(min(x_arr.size, y_arr.size))
-    if n == 0:
+    n_window = getattr(result, "n_window_I", None)
+    if not n_window or len(n_window) != 2:
         return False
-    x_arr = x_arr[:n]
-    y_arr = y_arr[:n]
-    has_length = app.data_fit_use_length_cb.isChecked()
-    to_si = 1.0e-6 if has_length else 1.0e-3
-    ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
-    ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
-    idx_lo_all = np.where(y_arr >= ec1)[0]
-    idx_hi_all = np.where(y_arr >= ec2)[0]
-    x_min = float(np.min(x_arr))
-    x_max = float(np.max(x_arr))
-    x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
-    x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
-    if not np.isfinite(x_lo):
-        x_lo = x_min
-    if not np.isfinite(x_hi):
-        x_hi = x_max
-    if x_hi <= x_lo:
-        x_hi = x_lo + max(1e-12, 0.01 * (x_max - x_min if x_max > x_min else 1.0))
+    try:
+        x_lo = float(n_window[0])
+        x_hi = float(n_window[1])
+    except (TypeError, ValueError):
+        return False
+    if not (np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo):
+        return False
     _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
     _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
-    app.data_fit_power_window_manual = True
+    app.data_fit_power_window_manual = False
     return True
 
 
