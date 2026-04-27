@@ -648,6 +648,7 @@ def _on_curve_profile_changed(app) -> None:
     if key not in profiles:
         profiles[key] = _capture_fit_window_profile(app)
         app.data_fit_curve_profiles = profiles
+    _sync_active_length_settings_from_profile_key(app, key)
     _apply_fit_window_profile(app, profiles.get(key, {}))
 
 
@@ -669,6 +670,38 @@ def _refresh_curve_profile_selector(app) -> None:
     idx = combo.findData(current_key)
     combo.setCurrentIndex(idx if idx >= 0 else 0)
     combo.blockSignals(False)
+
+
+def _find_curve_for_profile_key(app, key: str) -> Optional[dict]:
+    key_str = str(key or "")
+    for entry in getattr(app, "data_fit_curves", []):
+        if bool(entry.get("is_fit_result", False)):
+            continue
+        signature = str(entry.get("signature", entry.get("label", "Curve")))
+        if signature == key_str:
+            return entry
+    return None
+
+
+def _sync_active_length_settings(app, *, use_length: bool, length_cm: float) -> None:
+    app.data_fit_use_length_cb.blockSignals(True)
+    app.data_fit_use_length_cb.setChecked(bool(use_length))
+    app.data_fit_use_length_cb.blockSignals(False)
+    if length_cm > 0:
+        _set_silently(app.data_fit_length_input, f"{float(length_cm):g}")
+    _on_use_length_changed(app)
+
+
+def _sync_active_length_settings_from_profile_key(app, key: str) -> None:
+    if str(key) == "__preview__":
+        return
+    entry = _find_curve_for_profile_key(app, key)
+    if entry is None:
+        return
+    src = entry.get("source") or {}
+    use_length = bool(src.get("use_length", False))
+    length_cm = float(src.get("length_cm", 1.0) or 1.0)
+    _sync_active_length_settings(app, use_length=use_length, length_cm=length_cm)
 
 
 def setup_data_fitting_tab_layout(app):
@@ -4406,6 +4439,12 @@ def _open_plot_summary(app) -> None:
             src["use_length"] = checked
             _recompute_curve_from_source(app, entry)
             _refresh_curve_item(entry)
+            if _curve_profile_key_from_ui(app) == str(entry.get("signature", "")):
+                _sync_active_length_settings(
+                    app,
+                    use_length=checked,
+                    length_cm=float(src.get("length_cm", 1.0) or 1.0),
+                )
 
         use_tap_cb.toggled.connect(on_use_tap)
         table.setCellWidget(row, 4, use_tap_cb)
@@ -4433,6 +4472,8 @@ def _open_plot_summary(app) -> None:
             src["length_cm"] = updated
             _recompute_curve_from_source(app, entry)
             _refresh_curve_item(entry)
+            if _curve_profile_key_from_ui(app) == str(entry.get("signature", "")):
+                _sync_active_length_settings(app, use_length=True, length_cm=updated)
         tap.editingFinished.connect(on_tap)
         _apply_tap_enabled_state()
         table.setCellWidget(row, 5, tap)
