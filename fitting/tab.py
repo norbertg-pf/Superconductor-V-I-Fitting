@@ -289,7 +289,7 @@ def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray
     sigma_hf = 1.4826 * mad / np.sqrt(2.0)
 
     ec1_abs = max(abs(float(ec1)), 1e-30)
-    target_sigma = 0.08 * ec1_abs
+    target_sigma = 0.005 * ec1_abs
     if sigma_hf <= target_sigma:
         return arr
 
