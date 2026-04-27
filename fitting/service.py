@@ -58,6 +58,8 @@ class FitSettings:
     fit_method: str = DEFAULT_FIT_METHOD
     ec1: float = DEFAULT_EC1_V_PER_CM
     ec2: float = DEFAULT_EC2_V_PER_CM
+    # Optional explicit I-window override for log-log mode.
+    loglog_i_window: Optional[tuple[float, float]] = None
     # Step 1 — thermal offset subtraction.
     subtract_thermal_offset: bool = True
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
@@ -252,6 +254,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         V0: float, R: float,
                         Ec1: float, Ec2: float,
                         criterion_E: Optional[float] = None,
+                        i_window: Optional[tuple[float, float]] = None,
                         ) -> tuple[float, float, float, int, tuple[float, float],
                                    float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
@@ -312,24 +315,37 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     e_sc_bounds = _adaptive_smooth_for_bounds(e_sc, Ec1, Ec2)
     # Monotonic envelope of the (optionally smoothed) trace for robust Ec2 pick.
     e_sc_mono = np.maximum.accumulate(e_sc_bounds)
-    # Transition onset: first index where the monotonic envelope reaches Ec2.
-    # We then require points used in the fit to lie at or after the last
-    # sub-Ec1 point before this onset — i.e. inside the transition rise.
-    above_Ec2 = np.where(e_sc_mono >= Ec2)[0]
-    if above_Ec2.size == 0:
-        raise ValueError(
-            f"Data never reaches Ec2 = {Ec2:.3g} after baseline subtraction; "
-            "ramp further or lower Ec2."
-        )
-    idx_Ec2 = int(above_Ec2[0])
-    # Lower edge: use raw E_sc so Ec1 is not shifted upward by smoothing.
-    # This keeps I(Ec1) closer to the physical decade boundary on clean ramps.
-    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
-    idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
-    seg = slice(idx_lo, idx_Ec2 + 1)
-    e_sc_seg = e_sc[seg]
-    e_sc_mono_seg = e_sc_mono[seg]
-    x_seg = xs[seg]
+    window_mask = np.ones(xs.size, dtype=bool)
+    if i_window is not None:
+        try:
+            i_lo, i_hi = float(i_window[0]), float(i_window[1])
+        except (TypeError, ValueError, IndexError):
+            i_lo, i_hi = float("nan"), float("nan")
+        if np.isfinite(i_lo) and np.isfinite(i_hi):
+            if i_hi < i_lo:
+                i_lo, i_hi = i_hi, i_lo
+            if i_hi > i_lo:
+                window_mask = (xs >= i_lo) & (xs <= i_hi)
+    if np.count_nonzero(window_mask) >= 4:
+        e_sc_seg = e_sc[window_mask]
+        x_seg = xs[window_mask]
+    else:
+        # Transition onset: first index where the monotonic envelope reaches Ec2.
+        # We then require points used in the fit to lie at or after the last
+        # sub-Ec1 point before this onset — i.e. inside the transition rise.
+        above_Ec2 = np.where(e_sc_mono >= Ec2)[0]
+        if above_Ec2.size == 0:
+            raise ValueError(
+                f"Data never reaches Ec2 = {Ec2:.3g} after baseline subtraction; "
+                "ramp further or lower Ec2."
+            )
+        idx_Ec2 = int(above_Ec2[0])
+        # Lower edge: use smoothed monotonic envelope for robustness.
+        below_Ec1_before = np.where(e_sc_mono[:idx_Ec2] < Ec1)[0]
+        idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
+        seg = slice(idx_lo, idx_Ec2 + 1)
+        e_sc_seg = e_sc[seg]
+        x_seg = xs[seg]
     mask = (e_sc_seg >= Ec1) & (e_sc_seg <= Ec2) & np.isfinite(e_sc_seg)
     n_pts = int(np.count_nonzero(mask))
     if n_pts < 4:
@@ -474,6 +490,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
              sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
                 criterion_E=crit_for_ic,
+                i_window=settings.loglog_i_window,
             )
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
             return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")

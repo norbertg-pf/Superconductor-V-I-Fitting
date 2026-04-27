@@ -214,6 +214,14 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
         widget.blockSignals(False)
 
 
+def _clear_loglog_power_x_values(app) -> None:
+    """Clear Step-4 Low/High X fields used by Ec1/Ec2 in log-log mode."""
+    if getattr(app, "data_fit_power_low_x", None) is not None:
+        _set_silently(app.data_fit_power_low_x, "")
+    if getattr(app, "data_fit_power_high_x", None) is not None:
+        _set_silently(app.data_fit_power_high_x, "")
+
+
 def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
     """Snapshot the Active-fitting widgets into a per-curve profile dict.
 
@@ -263,6 +271,17 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_show_power", None) is not None
             else False
         ),
+        "power_low_x": (
+            app.data_fit_power_low_x.text()
+            if getattr(app, "data_fit_power_low_x", None) is not None
+            else ""
+        ),
+        "power_high_x": (
+            app.data_fit_power_high_x.text()
+            if getattr(app, "data_fit_power_high_x", None) is not None
+            else ""
+        ),
+        "power_window_manual": bool(getattr(app, "data_fit_power_window_manual", False)),
     }
     # Method-specific Step-4 slots: active widget values go into the active
     # method's slot; the inactive method's slot is preserved from the prior
@@ -718,6 +737,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_values(app)
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
     app.data_fit_preview_color = "#1f77b4"
@@ -1512,6 +1532,15 @@ def _settings_from_inputs(app) -> FitSettings:
     to_si = 1.0e-6 if sample_length is not None else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    loglog_i_window = None
+    if method == FIT_METHOD_LOG_LOG and bool(getattr(app, "data_fit_power_window_manual", False)):
+        try:
+            i_lo = float(app.data_fit_power_low_x.text())
+            i_hi = float(app.data_fit_power_high_x.text())
+        except (TypeError, ValueError, AttributeError):
+            i_lo = i_hi = float("nan")
+        if np.isfinite(i_lo) and np.isfinite(i_hi) and i_hi > i_lo:
+            loglog_i_window = (i_lo, i_hi)
     # In log-log mode the user-entered Ec/Vc is the criterion at which Ic is
     # reported. Ec1/Ec2 only define the fit window for the n-value slope.
 
@@ -1530,6 +1559,7 @@ def _settings_from_inputs(app) -> FitSettings:
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        loglog_i_window=loglog_i_window,
         subtract_thermal_offset=bool(
             getattr(app, "data_fit_subtract_vofs_cb", None) is None
             or app.data_fit_subtract_vofs_cb.isChecked()
@@ -1614,6 +1644,15 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         )
         ec1 = ec1_uv * to_si
         ec2 = ec2_uv * to_si
+        loglog_i_window = None
+        if bool(profile.get("power_window_manual", False)):
+            try:
+                i_lo = float(profile.get("power_low_x", ""))
+                i_hi = float(profile.get("power_high_x", ""))
+            except (TypeError, ValueError):
+                i_lo = i_hi = float("nan")
+            if np.isfinite(i_lo) and np.isfinite(i_hi) and i_hi > i_lo:
+                loglog_i_window = (i_lo, i_hi)
         # In log-log mode the non-linear power_low_frac/power_v_frac are unused;
         # leave them at defaults so the dataclass stays well-formed.
         power_low_frac = DEFAULT_POWER_LOW_FRAC
@@ -1621,6 +1660,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
     else:
         ec1 = DEFAULT_EC1_V_PER_CM
         ec2 = DEFAULT_EC2_V_PER_CM
+        loglog_i_window = None
         power_low_frac = _profile_text_float(
             profile, "nonlinear_low",
             _profile_text_float(profile, "power_low", DEFAULT_POWER_LOW_FRAC * 100),
@@ -1647,6 +1687,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        loglog_i_window=loglog_i_window,
         subtract_thermal_offset=bool(profile.get("subtract_vofs", True)),
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
     )
@@ -1731,6 +1772,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_values(app)
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2292,6 +2334,7 @@ def _on_fit_method_changed(app) -> None:
         new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
         new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
+        _clear_loglog_power_x_values(app)
     else:
         new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
         new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
@@ -2607,6 +2650,8 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
+            if not bool(getattr(app, "data_fit_power_window_manual", False)):
+                _clear_loglog_power_x_values(app)
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
                 above_1 = np.where(y_for_power >= ec1)[0]
@@ -2874,11 +2919,11 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
     return float(y[idx]) / y_max * 100.0
 
 
-def _update_loglog_power_x_from_ec(app) -> bool:
+def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=auto_run_fit)
     if not ok:
         return False
     ref = getattr(app, "data_fit_power_ref_curve", None) or {}
@@ -2982,6 +3027,10 @@ def _refresh_all_x_values(app) -> None:
         return
     for (window, which) in app.data_fit_window_inputs:
         _refresh_x_from_pct(app, window, which)
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG and not bool(
+        getattr(app, "data_fit_power_window_manual", False)
+    ):
+        _clear_loglog_power_x_values(app)
 
 
 def region_mode_changed(app, _button=None):
@@ -3599,7 +3648,11 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 
 def run_fit(app):
     controller = app.data_fit_controller
-    app.data_fit_power_window_manual = False
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
+    else:
+        app.data_fit_power_window_manual = False
+    _save_active_curve_profile(app)
     if not controller.channel_names:
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
@@ -3702,6 +3755,9 @@ def run_fit(app):
             controller_obj.last_fit_results = list(all_results)
             if last_ok is not None:
                 controller_obj.last_result = last_ok
+        if _active_fit_method(app) == FIT_METHOD_LOG_LOG and last_ok is not None:
+            _update_loglog_power_x_from_ec(app, auto_run_fit=False)
+            _save_active_curve_profile(app)
         # Persist every attempt — including failed ones — so users can see a
         # paper trail in the TDMS even when the fit didn't converge. The
         # writer respects the Autosave toggle in Settings; a no-op return
@@ -3784,6 +3840,9 @@ def run_fit(app):
     label = app.data_fit_y_cb.currentText() or "Curve"
     controller.last_fit_results = [(label, result)]
     controller.last_result = result
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
+        _save_active_curve_profile(app)
     report_path = _write_fit_report_tdms(
         app, [(label, result)]
     )
