@@ -2540,7 +2540,6 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         Priority:
         1) Saved metadata for the active Y channel (loaded/replayed files).
         2) Fresh run-fit cache keyed by curve label.
-        3) Last single-result fallback (only when clearly valid).
         """
         if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
             return None
@@ -2579,43 +2578,19 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
                 got = _coerce_window(getattr(result, "n_window_I", None))
                 if got is not None:
                     return got
-
-        last_result = getattr(controller, "last_result", None)
-        if getattr(last_result, "fit_method", "") == FIT_METHOD_LOG_LOG:
-            return _coerce_window(getattr(last_result, "n_window_I", None))
         return None
 
-    ec1 = ec2 = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-        ref_x = np.asarray(ref.get("x", []), dtype=float)
-        ref_y = np.asarray(ref.get("y", []), dtype=float)
-        if ref_x.size and ref_y.size:
-            n_ref = int(min(ref_x.size, ref_y.size))
-            x_for_power = ref_x[:n_ref]
-            y_for_power = ref_y[:n_ref]
-        else:
-            x_for_power = x
-            y_for_power = y
-        has_length = app.data_fit_use_length_cb.isChecked()
-        to_si = 1.0e-6 if has_length else 1.0e-3
-        ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
-        ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
-            # Pre-fit fallback: cheap raw crossing estimate.
-            if y_for_power is not None and y_for_power.size:
-                above_1 = np.where(y_for_power >= ec1)[0]
-                above_2 = np.where(y_for_power >= ec2)[0]
-                pow_lo = float(x_for_power[above_1[0]]) if above_1.size else x_max
-                pow_hi = float(x_for_power[above_2[0]]) if above_2.size else x_max
-                if pow_hi <= pow_lo:
-                    pow_hi = pow_lo + max(1e-12, 0.01 * span)
-                band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+            # Keep Step-4 Low/High(X) empty until user explicitly computes the
+            # IEC window (Run Fit, smoothing workflow, or Ec1/Ec2 edit).
+            _set_silently(app.data_fit_power_low_x, "")
+            _set_silently(app.data_fit_power_high_x, "")
     else:
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
