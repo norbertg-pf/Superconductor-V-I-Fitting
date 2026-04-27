@@ -3588,6 +3588,18 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
+
+    def _window_from_step4_inputs() -> Optional[tuple[float, float]]:
+        if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
+            return None
+        try:
+            lo_w = float(app.data_fit_power_low_x.text())
+            hi_w = float(app.data_fit_power_high_x.text())
+        except (TypeError, ValueError):
+            return None
+        if not (np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w):
+            return None
+        return float(lo_w), float(hi_w)
     if not controller.channel_names:
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
@@ -3657,6 +3669,11 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
+                if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+                    picked_window = _window_from_step4_inputs()
+                    if picked_window is not None:
+                        result.n_window_I = picked_window
+                        result.power_fit_window = picked_window
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
@@ -3755,6 +3772,11 @@ def run_fit(app):
                     current + f"\nFailed-fit metadata written to: {failed_path}"
                 )
         return
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+        picked_window = _window_from_step4_inputs()
+        if picked_window is not None:
+            result.n_window_I = picked_window
+            result.power_fit_window = picked_window
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
