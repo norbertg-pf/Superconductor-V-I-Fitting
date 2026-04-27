@@ -3668,6 +3668,17 @@ def run_fit(app):
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
         if last_ok is not None:
+            if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
+                n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
+                try:
+                    lo_w = float(n_window[0])
+                    hi_w = float(n_window[1])
+                except (TypeError, ValueError, IndexError):
+                    lo_w = hi_w = 0.0
+                if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                    _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+                    _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+                    app.data_fit_power_window_manual = False
             _show_fit_overlays(
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
@@ -3745,6 +3756,17 @@ def run_fit(app):
                 )
         return
     app.data_fit_result_text.setPlainText(_format_result(result))
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+        n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
+        try:
+            lo_w = float(n_window[0])
+            hi_w = float(n_window[1])
+        except (TypeError, ValueError, IndexError):
+            lo_w = hi_w = 0.0
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+            _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+            _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+            app.data_fit_power_window_manual = False
     if result.fit_x is not None and result.fit_y is not None:
         app.data_fit_model_curve.setData(result.fit_x, result.fit_y)
     _upsert_fit_curve_entry(
