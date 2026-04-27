@@ -322,9 +322,9 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             "ramp further or lower Ec2."
         )
     idx_Ec2 = int(above_Ec2[0])
-    # Lower edge uses the smoothed (non-monotonic) trace to suppress isolated
-    # spikes while still allowing the boundary to move with local data.
-    below_Ec1_before = np.where(e_sc_bounds[:idx_Ec2] < Ec1)[0]
+    # Lower edge: use raw E_sc so Ec1 is not shifted upward by smoothing.
+    # This keeps I(Ec1) closer to the physical decade boundary on clean ramps.
+    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
     idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
     seg = slice(idx_lo, idx_Ec2 + 1)
     e_sc_seg = e_sc[seg]
@@ -376,24 +376,17 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    def _crossing_current(xm: np.ndarray, em: np.ndarray, level: float) -> float:
-        """Current at first envelope crossing of `level` via linear interpolation."""
-        hit = np.where(em >= level)[0]
-        if hit.size == 0:
-            return float(xm[-1])
-        idx = int(hit[0])
-        if idx <= 0:
-            return float(xm[0])
-        x0, x1 = float(xm[idx - 1]), float(xm[idx])
-        e0, e1 = float(em[idx - 1]), float(em[idx])
-        if not np.isfinite(e0) or not np.isfinite(e1) or e1 <= e0:
-            return x1
-        frac = (float(level) - e0) / (e1 - e0)
-        frac = float(np.clip(frac, 0.0, 1.0))
-        return x0 + frac * (x1 - x0)
-
-    I_lo = _crossing_current(x_seg, e_sc_mono_seg, Ec1)
-    I_hi = _crossing_current(x_seg, e_sc_mono_seg, Ec2)
+    # Report decade-window currents from the fitted line itself:
+    # log10(E) = intercept + n*log10(I)  -> I(Ec) = 10^((log10(Ec)-intercept)/n)
+    # This is far less sensitive to pointwise noise than direct threshold hits.
+    log_I_lo = (float(np.log10(Ec1)) - intercept) / n_val
+    log_I_hi = (float(np.log10(Ec2)) - intercept) / n_val
+    I_lo = float(10.0 ** log_I_lo)
+    I_hi = float(10.0 ** log_I_hi)
+    x_lo_data = float(np.min(xs))
+    x_hi_data = float(np.max(xs))
+    I_lo = float(np.clip(I_lo, x_lo_data, x_hi_data))
+    I_hi = float(np.clip(I_hi, x_lo_data, x_hi_data))
     if I_hi <= I_lo:
         I_lo = float(np.min(x_seg[mask]))
         I_hi = float(np.max(x_seg[mask]))
