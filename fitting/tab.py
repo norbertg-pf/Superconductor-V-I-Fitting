@@ -3686,11 +3686,16 @@ def run_fit(app):
     if included:
         lines = []
         last_ok = None
+        preferred_ok = None
         last_ok_settings: Optional[FitSettings] = None
+        preferred_ok_settings: Optional[FitSettings] = None
         ok_results = []
         all_results: list[tuple[str, object]] = []
         last_show_criterion = True
         last_show_ic = False
+        active_label = (app.data_fit_y_cb.currentText() or "").strip()
+        if active_label.endswith(_FITTED_CHANNEL_SUFFIX):
+            active_label = active_label[: -len(_FITTED_CHANNEL_SUFFIX)]
         for entry in included:
             label = entry.get("label", "Curve")
             # Each curve carries its own fit method / windows / criterion via
@@ -3724,17 +3729,22 @@ def run_fit(app):
                 last_show_ic = bool(entry.get("show_ic", False))
                 _upsert_fit_curve_entry(app, entry, result)
                 lines.append(f"[{label}]\n" + _format_result(result) + "\n")
+                if active_label and str(label).strip() == active_label:
+                    preferred_ok = result
+                    preferred_ok_settings = entry_settings
             else:
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
-        if last_ok is not None:
+        result_for_ui = preferred_ok if preferred_ok is not None else last_ok
+        settings_for_ui = preferred_ok_settings if preferred_ok_settings is not None else last_ok_settings
+        if result_for_ui is not None:
             _show_fit_overlays(
-                app, last_ok, table_entries=ok_results,
+                app, result_for_ui, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
             )
-            _set_loglog_power_x_from_fit_result(app, last_ok)
-            _plot_residuals(app, last_ok)
-            _post_fit_warnings(app, last_ok, last_ok_settings or settings)
+            _set_loglog_power_x_from_fit_result(app, result_for_ui)
+            _plot_residuals(app, result_for_ui)
+            _post_fit_warnings(app, result_for_ui, settings_for_ui or settings)
         else:
             _hide_fit_overlays(app)
             _show_warning(app, "No curve produced a successful fit.", severity="error")
