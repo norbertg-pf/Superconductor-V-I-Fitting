@@ -1731,6 +1731,11 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    # Clear Low/High X values when loading new data — in log-log mode these should
+    # only be populated when the user explicitly changes Ec1/Ec2 or presses Run Fit
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _set_silently(app.data_fit_power_low_x, "")
+        _set_silently(app.data_fit_power_high_x, "")
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2292,6 +2297,10 @@ def _on_fit_method_changed(app) -> None:
         new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
         new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
+        # Clear Low/High X values in log-log mode — they should only be calculated
+        # when the user explicitly changes Ec1/Ec2 or presses Run Fit
+        _set_silently(app.data_fit_power_low_x, "")
+        _set_silently(app.data_fit_power_high_x, "")
     else:
         new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
         new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
@@ -2604,8 +2613,10 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
-            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
+            # Don't automatically populate Low/High X values in log-log mode — these should
+            # only be set when the user explicitly changes Ec1/Ec2 or runs Fit.
+            # _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
+            # _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
@@ -3610,6 +3621,10 @@ def run_fit(app):
     except Exception as exc:
         QMessageBox.critical(app, "Data Fitting", f"Invalid input: {exc}")
         return
+    # In log-log mode, calculate and populate Low/High X values from Ec1/Ec2
+    # before running the fit
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _update_loglog_power_x_from_ec(app)
 
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
