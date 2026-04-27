@@ -2769,7 +2769,7 @@ def _update_band_states(app) -> None:
 def _on_show_power_toggled(app, checked: bool) -> None:
     """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
     _update_band_states(app)
     refresh_preview(app)
 
@@ -2887,21 +2887,30 @@ def _update_loglog_power_x_from_ec(app) -> bool:
     """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
-    if not ok:
-        return False
-    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-    x_arr = np.asarray(ref.get("x", []), dtype=float)
-    y_arr = np.asarray(ref.get("y", []), dtype=float)
-    n = int(min(x_arr.size, y_arr.size))
-    if n == 0:
-        return False
-    x_arr = x_arr[:n]
-    y_arr = y_arr[:n]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
+    if ok:
+        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+        x_arr = np.asarray(ref.get("x", []), dtype=float)
+        y_arr = np.asarray(ref.get("y", []), dtype=float)
+        n = int(min(x_arr.size, y_arr.size))
+        if n:
+            x_arr = x_arr[:n]
+            y_arr = y_arr[:n]
+        else:
+            ok = False
+    if not ok:
+        transformed = _apply_transforms(app)
+        x_arr = np.asarray(transformed.get("x", []), dtype=float)
+        y_raw = np.asarray(transformed.get("y", []), dtype=float)
+        n = int(min(x_arr.size, y_raw.size))
+        if n == 0:
+            return False
+        x_arr = x_arr[:n]
+        y_arr = _adaptive_smooth_visual(y_raw[:n], ec1, ec2)
     idx_lo_all = np.where(y_arr >= ec1)[0]
     idx_hi_all = np.where(y_arr >= ec2)[0]
     x_min = float(np.min(x_arr))
@@ -2926,7 +2935,7 @@ def _set_loglog_power_x_from_fit_result(app, result) -> bool:
         return False
     if getattr(result, "fit_method", "") != FIT_METHOD_LOG_LOG:
         return False
-    raw = getattr(result, "n_window_I", None)
+    raw = getattr(result, "power_fit_window", None) or getattr(result, "n_window_I", None)
     if not raw or len(raw) != 2:
         return False
     try:
@@ -2938,6 +2947,15 @@ def _set_loglog_power_x_from_fit_result(app, result) -> bool:
         return False
     _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
     _set_silently(app.data_fit_power_high_x, f"{hi:.6g}")
+    app.data_fit_power_window_manual = False
+    band = getattr(app, "data_fit_band_power", None)
+    if band is not None:
+        is_loglog = _plot_is_loglog(app)
+        band.blockSignals(True)
+        try:
+            band.setRegion((_xform_for_view(lo, is_loglog), _xform_for_view(hi, is_loglog)))
+        finally:
+            band.blockSignals(False)
     return True
 
 
