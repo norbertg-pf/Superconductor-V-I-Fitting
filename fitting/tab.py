@@ -986,8 +986,8 @@ def setup_data_fitting_tab_layout(app):
         "The Show/edit Step-4 window uses this corrected+smoothed curve,\n"
         "even if it is hidden from the graph."
     )
-    power_layout.addWidget(app.data_fit_add_smoothed_btn, 5, 2)
-    power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 3)
+    power_layout.addWidget(app.data_fit_add_smoothed_btn, 5, 0, 1, 2)
+    power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 2, 1, 2)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
