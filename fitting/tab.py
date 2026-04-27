@@ -2783,7 +2783,9 @@ def _update_band_states(app) -> None:
 def _on_show_power_toggled(app, checked: bool) -> None:
     """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+        # Don't auto-run fit when toggling show — just try to use existing result.
+        # User must explicitly press Run Fit to trigger calculations.
+        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
     _update_band_states(app)
     refresh_preview(app)
 
@@ -3735,10 +3737,6 @@ def run_fit(app):
             app.data_fit_result_text.setPlainText(
                 current + f"\nFit report written to: {report_path}"
             )
-        # In log-log mode, populate Low/High X values from Ec1/Ec2 now that the
-        # reference curve should be available
-        if _active_fit_method(app) == FIT_METHOD_LOG_LOG and last_ok is not None:
-            _update_loglog_power_x_from_ec(app)
         return
 
     # Single-curve mode: use current channel selection.
@@ -3819,11 +3817,6 @@ def run_fit(app):
         app.data_fit_result_text.setPlainText(
             current + f"\nFit report written to: {report_path}"
         )
-    # In log-log mode, populate Low/High X values from Ec1/Ec2 now that the
-    # reference curve should be available
-    if _active_fit_method(app) == FIT_METHOD_LOG_LOG and result.ok:
-        _update_loglog_power_x_from_ec(app)
-
 
 def _hide_fit_overlays(app) -> None:
     app.data_fit_ic_line.setVisible(False)
