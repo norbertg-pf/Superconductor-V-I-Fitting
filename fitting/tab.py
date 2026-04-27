@@ -3591,18 +3591,6 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
-
-    def _window_from_step4_inputs() -> Optional[tuple[float, float]]:
-        if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
-            return None
-        try:
-            lo_w = float(app.data_fit_power_low_x.text())
-            hi_w = float(app.data_fit_power_high_x.text())
-        except (TypeError, ValueError):
-            return None
-        if not (np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w):
-            return None
-        return float(lo_w), float(hi_w)
     if not controller.channel_names:
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
@@ -3613,10 +3601,6 @@ def run_fit(app):
     except Exception as exc:
         QMessageBox.critical(app, "Data Fitting", f"Invalid input: {exc}")
         return
-    # Run Fit should always refresh Step-4 Low/High X in log-log mode before
-    # solving. Use existing fit context only (no auto-run recursion here).
-    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
 
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
@@ -3676,11 +3660,6 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
-                if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
-                    picked_window = _window_from_step4_inputs()
-                    if picked_window is not None:
-                        result.n_window_I = picked_window
-                        result.power_fit_window = picked_window
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
@@ -3693,8 +3672,6 @@ def run_fit(app):
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
         if last_ok is not None:
             controller.last_result = last_ok
-            if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
-                _update_loglog_power_x_from_ec(app, auto_run_fit=False)
             if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
                 n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
                 try:
@@ -3783,13 +3760,6 @@ def run_fit(app):
                 )
         return
     controller.last_result = result
-    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
-        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
-    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
-        picked_window = _window_from_step4_inputs()
-        if picked_window is not None:
-            result.n_window_I = picked_window
-            result.power_fit_window = picked_window
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
