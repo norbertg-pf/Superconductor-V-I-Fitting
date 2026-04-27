@@ -264,6 +264,11 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_show_power", None) is not None
             else False
         ),
+        # Step-4 I-window fields (Low/High X) are persisted per curve so
+        # the Active fitting settings selector can restore the latest
+        # recalculated window for each plotted curve.
+        "power_low_x": app.data_fit_power_low_x.text(),
+        "power_high_x": app.data_fit_power_high_x.text(),
     }
     # Method-specific Step-4 slots: active widget values go into the active
     # method's slot; the inactive method's slot is preserved from the prior
@@ -324,6 +329,10 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         _set_silently(app.data_fit_power_low, str(low_val))
     if high_val is not None:
         _set_silently(app.data_fit_power_vfrac, str(high_val))
+    if "power_low_x" in profile:
+        _set_silently(app.data_fit_power_low_x, str(profile["power_low_x"]))
+    if "power_high_x" in profile:
+        _set_silently(app.data_fit_power_high_x, str(profile["power_high_x"]))
     if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
         _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
@@ -3592,6 +3601,56 @@ def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
 
+    def _recompute_loglog_i_window_for_entry(result_obj, entry_obj, entry_settings_obj) -> None:
+        """Recompute IEC I-window for one fitted curve and persist to its profile."""
+        if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
+            return
+        x_raw = np.asarray(entry_obj.get("x", []), dtype=float)
+        y_raw = np.asarray(entry_obj.get("y", []), dtype=float)
+        n = int(min(x_raw.size, y_raw.size))
+        if n == 0:
+            return
+        x_arr = x_raw[:n]
+        y_arr = y_raw[:n]
+        y_corr = y_arr - (float(result_obj.V0) + float(result_obj.R) * x_arr)
+        y_sm = _adaptive_smooth_visual(y_corr, float(entry_settings_obj.ec1), float(entry_settings_obj.ec2))
+
+        valid = np.isfinite(x_arr) & np.isfinite(y_sm) & (x_arr > 0)
+        if not np.any(valid):
+            return
+        x_arr = x_arr[valid]
+        y_sm = y_sm[valid]
+        order = np.argsort(x_arr)
+        x_arr = x_arr[order]
+        y_sm = y_sm[order]
+        x_min = float(np.min(x_arr))
+        x_max = float(np.max(x_arr))
+        span = max(0.0, x_max - x_min)
+        x_guard_lo = x_min + 0.10 * span
+        ec1 = max(float(entry_settings_obj.ec1), 1.0e-30)
+        ec2 = max(float(entry_settings_obj.ec2), ec1 * 1.000001)
+        idx_lo_all = np.where((y_sm >= ec1) & (x_arr >= x_guard_lo))[0]
+        idx_hi_all = np.where(y_sm >= ec2)[0]
+        x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
+        x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
+        if not np.isfinite(x_lo):
+            x_lo = x_min
+        if not np.isfinite(x_hi):
+            x_hi = x_max
+        if x_hi <= x_lo:
+            x_hi = x_lo + max(1e-12, 0.01 * (span if span > 0 else 1.0))
+
+        result_obj.n_window_I = (float(x_lo), float(x_hi))
+        result_obj.power_fit_window = (float(x_lo), float(x_hi))
+        profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+        key = _profile_key_for_entry(entry_obj)
+        profile = dict(profiles.get(key, {})) if isinstance(profiles, dict) else {}
+        profile["power_low_x"] = f"{x_lo:.6g}"
+        profile["power_high_x"] = f"{x_hi:.6g}"
+        if isinstance(profiles, dict):
+            profiles[key] = profile
+            app.data_fit_curve_profiles = profiles
+
     def _apply_step4_window_from_reference(result_obj) -> None:
         """For log-log fits, recompute Step-4 window from the same
         corrected+smoothed reference used by the Add/Show helper curve."""
@@ -3677,7 +3736,7 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
-                _apply_step4_window_from_reference(result)
+                _recompute_loglog_i_window_for_entry(result, entry, entry_settings)
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
