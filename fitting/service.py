@@ -284,21 +284,25 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
         raise ValueError("No points with I > 0; cannot fit on a log axis.")
     xs = xs[pos]
     e_sc = e_sc[pos]
-    # Transition onset: the last index where E_sc is still below Ec2
-    # (i.e. just before the curve crosses the Ic criterion). We then
-    # require points used in the fit to lie at or after the last sub-Ec1
-    # point before this onset — i.e. within the monotonic rise.
-    above_Ec2 = np.where(e_sc >= Ec2)[0]
+    # Build a monotonic upper envelope to suppress isolated noisy dips/spikes
+    # when locating the Ec1/Ec2 transition window on X. This keeps the
+    # window bounds stable on noisy ramps while the fit still uses raw E_sc.
+    e_sc_mono = np.maximum.accumulate(e_sc)
+    # Transition onset: first index where the monotonic envelope reaches Ec2.
+    # We then require points used in the fit to lie at or after the last
+    # sub-Ec1 point before this onset — i.e. inside the transition rise.
+    above_Ec2 = np.where(e_sc_mono >= Ec2)[0]
     if above_Ec2.size == 0:
         raise ValueError(
             f"Data never reaches Ec2 = {Ec2:.3g} after baseline subtraction; "
             "ramp further or lower Ec2."
         )
     idx_Ec2 = int(above_Ec2[0])
-    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
+    below_Ec1_before = np.where(e_sc_mono[:idx_Ec2] < Ec1)[0]
     idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
     seg = slice(idx_lo, idx_Ec2 + 1)
     e_sc_seg = e_sc[seg]
+    e_sc_mono_seg = e_sc_mono[seg]
     x_seg = xs[seg]
     mask = (e_sc_seg >= Ec1) & (e_sc_seg <= Ec2) & np.isfinite(e_sc_seg)
     n_pts = int(np.count_nonzero(mask))
@@ -346,8 +350,27 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    I_lo = float(np.min(x_seg[mask]))
-    I_hi = float(np.max(x_seg[mask]))
+    def _crossing_current(xm: np.ndarray, em: np.ndarray, level: float) -> float:
+        """Current at first envelope crossing of `level` via linear interpolation."""
+        hit = np.where(em >= level)[0]
+        if hit.size == 0:
+            return float(xm[-1])
+        idx = int(hit[0])
+        if idx <= 0:
+            return float(xm[0])
+        x0, x1 = float(xm[idx - 1]), float(xm[idx])
+        e0, e1 = float(em[idx - 1]), float(em[idx])
+        if not np.isfinite(e0) or not np.isfinite(e1) or e1 <= e0:
+            return x1
+        frac = (float(level) - e0) / (e1 - e0)
+        frac = float(np.clip(frac, 0.0, 1.0))
+        return x0 + frac * (x1 - x0)
+
+    I_lo = _crossing_current(x_seg, e_sc_mono_seg, Ec1)
+    I_hi = _crossing_current(x_seg, e_sc_mono_seg, Ec2)
+    if I_hi <= I_lo:
+        I_lo = float(np.min(x_seg[mask]))
+        I_hi = float(np.max(x_seg[mask]))
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
