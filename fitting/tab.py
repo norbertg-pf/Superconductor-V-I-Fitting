@@ -214,6 +214,14 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
         widget.blockSignals(False)
 
 
+def _clear_loglog_power_x_fields(app) -> None:
+    """Clear Step-4 Low/High (X) textboxes used in log-log mode."""
+    if getattr(app, "data_fit_power_low_x", None) is not None:
+        _set_silently(app.data_fit_power_low_x, "")
+    if getattr(app, "data_fit_power_high_x", None) is not None:
+        _set_silently(app.data_fit_power_high_x, "")
+
+
 def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
     """Snapshot the Active-fitting widgets into a per-curve profile dict.
 
@@ -718,6 +726,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_fields(app)
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
     app.data_fit_preview_color = "#1f77b4"
@@ -1731,6 +1740,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_fields(app)
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2292,6 +2302,7 @@ def _on_fit_method_changed(app) -> None:
         new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
         new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
+        _clear_loglog_power_x_fields(app)
     else:
         new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
         new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
@@ -2604,8 +2615,6 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
-            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
@@ -2908,6 +2917,27 @@ def _update_loglog_power_x_from_ec(app) -> bool:
     _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
     _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
     app.data_fit_power_window_manual = True
+    return True
+
+
+def _set_loglog_power_x_from_fit_result(app, result) -> bool:
+    """Fill Step-4 Low/High (X) from a successful log-log fit result."""
+    if _active_fit_method(app) != FIT_METHOD_LOG_LOG or result is None:
+        return False
+    if getattr(result, "fit_method", "") != FIT_METHOD_LOG_LOG:
+        return False
+    raw = getattr(result, "n_window_I", None)
+    if not raw or len(raw) != 2:
+        return False
+    try:
+        lo = float(raw[0])
+        hi = float(raw[1])
+    except (TypeError, ValueError):
+        return False
+    if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+        return False
+    _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
+    _set_silently(app.data_fit_power_high_x, f"{hi:.6g}")
     return True
 
 
@@ -3684,6 +3714,7 @@ def run_fit(app):
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
             )
+            _set_loglog_power_x_from_fit_result(app, last_ok)
             _plot_residuals(app, last_ok)
             _post_fit_warnings(app, last_ok, last_ok_settings or settings)
         else:
@@ -3775,6 +3806,7 @@ def run_fit(app):
         show_criterion=True,
         show_ic=False,
     )
+    _set_loglog_power_x_from_fit_result(app, result)
     _plot_residuals(app, result)
     _post_fit_warnings(app, result, settings)
     if hasattr(app, "data_fit_save_metadata_btn"):
