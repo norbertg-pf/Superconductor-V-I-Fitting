@@ -61,6 +61,7 @@ from .service import (
     RAMP_INDUCTIVE_WARN_RATIO,
     robust_view_range,
     run_full_fit,
+    fit_n_value_log_log,
 )
 from .extras import (
     ExportPlotDialog,
@@ -2756,7 +2757,7 @@ def _update_band_states(app) -> None:
 def _on_show_power_toggled(app, checked: bool) -> None:
     """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
     _update_band_states(app)
     refresh_preview(app)
 
@@ -2871,39 +2872,43 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
 
 
 def _update_loglog_power_x_from_ec(app) -> bool:
-    """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
+    """Update Step-4 low/high X from Ec1/Ec2 using the Step-4 fit algorithm."""
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
-    if not ok:
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        _clear_loglog_power_x_fields(app)
         return False
-    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-    x_arr = np.asarray(ref.get("x", []), dtype=float)
-    y_arr = np.asarray(ref.get("y", []), dtype=float)
+    result, _parent_entry, _base_sig, _base_label, x_arr, y_arr, _t_arr = resolved
     n = int(min(x_arr.size, y_arr.size))
     if n == 0:
         return False
     x_arr = x_arr[:n]
     y_arr = y_arr[:n]
+    if bool(getattr(result, "thermal_offset_applied", False)):
+        y_arr = y_arr - float(getattr(result, "V_ofs", 0.0))
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
-    idx_lo_all = np.where(y_arr >= ec1)[0]
-    idx_hi_all = np.where(y_arr >= ec2)[0]
-    x_min = float(np.min(x_arr))
-    x_max = float(np.max(x_arr))
-    x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
-    x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
-    if not np.isfinite(x_lo):
-        x_lo = x_min
-    if not np.isfinite(x_hi):
-        x_hi = x_max
-    if x_hi <= x_lo:
-        x_hi = x_lo + max(1e-12, 0.01 * (x_max - x_min if x_max > x_min else 1.0))
+    try:
+        (_ic, _n, _chi, _npts, n_window,
+         _sigma_ic, _sigma_n, _r2) = fit_n_value_log_log(
+            x_arr,
+            y_arr,
+            V0=float(result.V0),
+            R=float(result.R),
+            Ec1=float(ec1),
+            Ec2=float(ec2),
+            criterion_E=float(result.criterion),
+        )
+    except (ValueError, RuntimeError, np.linalg.LinAlgError):
+        _clear_loglog_power_x_fields(app)
+        return False
+    x_lo, x_hi = float(n_window[0]), float(n_window[1])
     _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
     _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
-    app.data_fit_power_window_manual = True
+    app.data_fit_power_window_manual = False
     return True
 
 
@@ -4152,13 +4157,10 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using the most relevant successful fit."""
     resolved = _resolve_fit_parent_and_result(app)
     if resolved is None:
-        _ensure_fit_for_reference(app)
-        resolved = _resolve_fit_parent_and_result(app)
-    if resolved is None:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Could not build corrected curve because no successful fit is available.",
+            "Run Fit once first, then add corrected curve.",
         )
         return
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
@@ -4333,12 +4335,12 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 def _add_smoothed_curve_from_current(app) -> None:
     """Create corrected+smoothed Step-4 reference curve and plot a copy."""
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=True, auto_run_fit=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=True, auto_run_fit=False)
     if not ok:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Could not build smoothed+corrected curve because no successful fit is available.",
+            "Run Fit once first, then add smoothed+corrected curve.",
         )
 
 
