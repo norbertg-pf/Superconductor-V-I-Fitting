@@ -1515,6 +1515,17 @@ def _settings_from_inputs(app) -> FitSettings:
     # In log-log mode the user-entered Ec/Vc is the criterion at which Ic is
     # reported. Ec1/Ec2 only define the fit window for the n-value slope.
 
+    # In log-log mode, if Low/High X values are populated, use them as the fit window
+    power_fit_window = None
+    if method == FIT_METHOD_LOG_LOG:
+        try:
+            x_lo = float(app.data_fit_power_low_x.text())
+            x_hi = float(app.data_fit_power_high_x.text())
+            if np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo:
+                power_fit_window = (x_lo, x_hi)
+        except (ValueError, TypeError):
+            pass
+
     settings = FitSettings(
         didt_low_frac=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
         didt_high_frac=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
@@ -1530,6 +1541,7 @@ def _settings_from_inputs(app) -> FitSettings:
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        power_fit_window=power_fit_window,
         subtract_thermal_offset=bool(
             getattr(app, "data_fit_subtract_vofs_cb", None) is None
             or app.data_fit_subtract_vofs_cb.isChecked()
@@ -2889,7 +2901,7 @@ def _update_loglog_power_x_from_ec(app) -> bool:
     """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
     if not ok:
         return False
     ref = getattr(app, "data_fit_power_ref_curve", None) or {}
