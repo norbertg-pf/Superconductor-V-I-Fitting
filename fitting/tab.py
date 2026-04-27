@@ -626,6 +626,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
+    app.data_fit_active_profile_key = "__preview__"
     app.data_fit_plot_dirty = True
     app.data_fit_raw_curve.setData([], [])
     app.data_fit_model_curve.setData([], [])
@@ -656,14 +657,16 @@ def _curve_profile_key_from_ui(app) -> str:
     return str(key) if key else "__preview__"
 
 
-def _save_active_curve_profile(app) -> None:
-    key = _curve_profile_key_from_ui(app)
+def _save_active_curve_profile(app, key: Optional[str] = None) -> None:
+    key = str(key) if key is not None else _curve_profile_key_from_ui(app)
     profiles = getattr(app, "data_fit_curve_profiles", {})
     profiles[key] = _capture_fit_window_profile(app)
     app.data_fit_curve_profiles = profiles
 
 
 def _on_curve_profile_changed(app) -> None:
+    previous_key = str(getattr(app, "data_fit_active_profile_key", "__preview__"))
+    _save_active_curve_profile(app, key=previous_key)
     key = _curve_profile_key_from_ui(app)
     profiles = getattr(app, "data_fit_curve_profiles", {})
     if key not in profiles:
@@ -671,11 +674,14 @@ def _on_curve_profile_changed(app) -> None:
         app.data_fit_curve_profiles = profiles
     _sync_active_length_settings_from_profile_key(app, key)
     _apply_fit_window_profile(app, profiles.get(key, {}))
+    app.data_fit_active_profile_key = key
 
 
 def _refresh_curve_profile_selector(app) -> None:
     combo = app.data_fit_curve_profile_cb
     current_key = combo.currentData()
+    if current_key is None:
+        current_key = getattr(app, "data_fit_active_profile_key", "__preview__")
     combo.blockSignals(True)
     combo.clear()
     if getattr(app, "data_fit_preview_visible", True):
@@ -690,6 +696,7 @@ def _refresh_curve_profile_selector(app) -> None:
         combo.addItem("No plotted curve", "__none__")
     idx = combo.findData(current_key)
     combo.setCurrentIndex(idx if idx >= 0 else 0)
+    app.data_fit_active_profile_key = _curve_profile_key_from_ui(app)
     combo.blockSignals(False)
 
 
@@ -1295,6 +1302,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
+    app.data_fit_active_profile_key = "__preview__"
     _on_use_length_changed(app)
     _update_method_mode_ui(app)
     _update_plot_scale_button_text(app)
@@ -1556,6 +1564,7 @@ def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
+    app.data_fit_active_profile_key = "__preview__"
     app.data_fit_plot_dirty = True
     _populate_channel_combos(app)
     load_metadata_from_tdms(app)
