@@ -5851,17 +5851,53 @@ def _open_help_dialog(app) -> None:
     <h1>Fit results stored in metadata</h1>
     <p>Every successful fit is written as a channel under the
     <code>FitResults</code> group of the side&#8209;car
-    <code>&lt;source&gt;_fit_report.tdms</code>. Each channel has the parameters
-    below attached as TDMS properties, so they survive round&#8209;trips through
-    LabVIEW, OriginLab and Python consumers.</p>
+    <code>&lt;source&gt;_fit_report.tdms</code> (or, when "same group" is
+    enabled, prefixed with <code>fit_</code> on the source channel itself).
+    Each channel has the parameters below attached as TDMS properties, so they
+    survive round&#8209;trips through LabVIEW, OriginLab and Python
+    consumers.</p>
+
+    <h2>Run identification</h2>
+    <table>
+      <tr><th>Property</th><th>Type</th><th>Description</th></tr>
+      <tr><td><code>method</code></td><td>str</td>
+        <td>Human&#8209;readable label, e.g. <i>"IEC 61788 log-log
+          (decade n-value)"</i> or <i>"Non-linear V-I"</i>.</td></tr>
+      <tr><td><code>method_id</code></td><td>str</td>
+        <td>Machine&#8209;readable id: <code>log_log</code> or
+          <code>nonlinear</code>. Used by re&#8209;loaders.</td></tr>
+      <tr><td><code>method_compliant</code></td><td>str</td>
+        <td><code>IEC 61788-3</code> for the log&ndash;log method, otherwise
+          <code>legacy</code>.</td></tr>
+      <tr><td><code>fit_status</code></td><td>str</td>
+        <td><code>ok</code> or <code>failed</code>.</td></tr>
+      <tr><td><code>fit_message</code></td><td>str</td>
+        <td>Diagnostic / error string (empty on success).</td></tr>
+      <tr><td><code>fit_timestamp</code></td><td>ISO&#8209;8601</td>
+        <td>Local time at which Run Fit produced this record.</td></tr>
+    </table>
 
     <h2>Primary parameters</h2>
     <table>
       <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
-      <tr><td><code>Ic</code></td><td>A</td><td>Critical current at the chosen criterion.</td></tr>
-      <tr><td><code>n</code></td><td>&mdash;</td><td>n&#8209;value (transition sharpness).</td></tr>
-      <tr><td><code>sigma_Ic</code> / <code>sigma_n</code></td><td>A / &mdash;</td><td>1&#8209;σ uncertainties from the covariance matrix.</td></tr>
-      <tr><td><code>R_squared</code></td><td>&mdash;</td><td>Coefficient of determination of the power&#8209;law fit.</td></tr>
+      <tr><td><code>Ic_A</code></td><td>A</td>
+        <td>Critical current at the chosen criterion.</td></tr>
+      <tr><td><code>sigma_Ic_A</code></td><td>A</td>
+        <td>1&#8209;σ uncertainty on <span class="mono">I<sub>c</sub></span>
+          (covariance matrix / propagated polyfit error).</td></tr>
+      <tr><td><code>n_value</code></td><td>&mdash;</td>
+        <td>n&#8209;value (transition sharpness).</td></tr>
+      <tr><td><code>sigma_n</code></td><td>&mdash;</td>
+        <td>1&#8209;σ uncertainty on <span class="mono">n</span>.</td></tr>
+      <tr><td><code>r_squared</code></td><td>&mdash;</td>
+        <td>Coefficient of determination of the power&#8209;law fit (in
+          log&ndash;log space for the IEC method).</td></tr>
+      <tr><td><code>chi_squared</code></td><td>&mdash;</td>
+        <td>Sum of squared residuals (LM) or log&#8209;space residual sum
+          (log&ndash;log). Smaller is better; always read together with
+          <code>r_squared</code>.</td></tr>
+      <tr><td><code>di_dt_A_per_s</code></td><td>A/s</td>
+        <td>Mean ramp rate measured inside the dI/dt window.</td></tr>
     </table>
 
     <h2>Criterion &amp; n&#8209;window</h2>
@@ -5870,13 +5906,19 @@ def _open_help_dialog(app) -> None:
       <tr><td><code>criterion_value</code></td><td>V or V/cm</td>
         <td>The applied <span class="mono">V<sub>c</sub></span> /
           <span class="mono">E<sub>c</sub></span>.</td></tr>
-      <tr><td><code>criterion_name</code> / <code>criterion_unit</code></td><td>&mdash;</td>
-        <td>Human&#8209;readable label and unit.</td></tr>
+      <tr><td><code>criterion_name</code></td><td>str</td>
+        <td><code>Ec</code> when a sample length is given, else
+          <code>Vc</code>.</td></tr>
+      <tr><td><code>criterion_unit</code></td><td>str</td>
+        <td><code>V/cm</code> for E&#8209;field fits, <code>V</code>
+          otherwise.</td></tr>
       <tr><td><code>Ec1</code>, <code>Ec2</code></td><td>V/cm</td>
-        <td>IEC decade window (only set for log&ndash;log fits).</td></tr>
-      <tr><td><code>n_window_I_lo_A</code>, <code>n_window_I_hi_A</code></td><td>A</td>
+        <td>IEC decade window (only set for log&ndash;log fits; 0 for
+          non&#8209;linear).</td></tr>
+      <tr><td><code>n_window_I_lo_A</code>, <code>n_window_I_hi_A</code></td>
+        <td>A</td>
         <td>Current bounds of the n&#8209;value window actually used.</td></tr>
-      <tr><td><code>n_points_used</code></td><td>&mdash;</td>
+      <tr><td><code>n_points_used</code></td><td>int</td>
         <td>Number of samples that entered the power&#8209;law fit.</td></tr>
     </table>
 
@@ -5885,26 +5927,98 @@ def _open_help_dialog(app) -> None:
        V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
     <table>
       <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
-      <tr><td><code>V_ofs</code></td><td>V</td><td>Thermal/instrumental offset.</td></tr>
-      <tr><td><code>V0_inductive</code></td><td>V</td><td>Inductive voltage at the dI/dt&nbsp;window center.</td></tr>
-      <tr><td><code>inductance_L_H</code></td><td>H</td><td>Effective lead/sample inductance.</td></tr>
-      <tr><td><code>R_or_rho</code></td><td>Ω or Ω/cm</td><td>Resistive baseline; unit follows <code>R_unit</code>.</td></tr>
+      <tr><td><code>V_ofs</code></td><td>V</td>
+        <td>Thermal/instrumental offset (median of the I&nbsp;≈&nbsp;0
+          segment).</td></tr>
+      <tr><td><code>V0_inductive</code></td><td>V</td>
+        <td>Inductive voltage at the dI/dt&nbsp;window center
+          (<code>L · dI/dt</code>).</td></tr>
+      <tr><td><code>inductance_L_H</code></td><td>H</td>
+        <td>Effective lead/sample inductance.</td></tr>
+      <tr><td><code>R_or_rho</code></td><td>Ω or Ω/cm</td>
+        <td>Resistive baseline; unit follows <code>R_unit</code>.</td></tr>
+      <tr><td><code>R_unit</code></td><td>str</td>
+        <td><code>Ω/cm</code> for E&#8209;field fits, <code>Ω</code>
+          otherwise.</td></tr>
     </table>
 
     <h2>Diagnostic flags</h2>
     <table>
       <tr><th>Property</th><th>Type</th><th>Meaning</th></tr>
       <tr><td><code>ramp_inductive_ratio</code></td><td>float</td>
-        <td>Inductive&nbsp;voltage / criterion&nbsp;voltage.</td></tr>
+        <td>Inductive&nbsp;voltage / criterion&nbsp;voltage
+          (<code>|L · dI/dt| / V<sub>c</sub></code>).</td></tr>
       <tr><td><code>ramp_too_fast</code></td><td>True/False</td>
-        <td>Set if the inductive term dominates &mdash; lower dI/dt.</td></tr>
+        <td>Set when the inductive term dominates &mdash; lower dI/dt or
+          extend the ramp.</td></tr>
       <tr><td><code>insufficient_n_points</code></td><td>True/False</td>
-        <td>Set if the power&#8209;law window has too few samples.</td></tr>
+        <td>Set if the power&#8209;law window has too few samples
+          (&lt;&nbsp;50 per IEC 61788).</td></tr>
       <tr><td><code>thermal_offset_applied</code></td><td>True/False</td>
-        <td>Set if a non&#8209;zero <code>V<sub>ofs</sub></code> was subtracted.</td></tr>
+        <td>Set if a non&#8209;zero <code>V<sub>ofs</sub></code> was
+          subtracted.</td></tr>
       <tr><td><code>uses_sample_length</code></td><td>True/False</td>
-        <td>True for E&#8209;field fits (with L<sub>s</sub>), False for V&#8209;based fits.</td></tr>
+        <td>True for E&#8209;field fits (with L<sub>s</sub>), False for
+          V&#8209;based fits.</td></tr>
     </table>
+
+    <h2>Recommended boundaries for a good fit</h2>
+    <p>Use these ranges as a quality gate when reviewing a fit. They are
+    derived from IEC&nbsp;61788&#8209;3 acceptance criteria and from typical
+    HTS / LTS conductor performance at 77&nbsp;K&nbsp;/&nbsp;4.2&nbsp;K.</p>
+    <table>
+      <tr><th>Quantity</th><th>Excellent</th><th>Acceptable</th>
+        <th>Suspect &mdash; recheck windows</th></tr>
+      <tr><td><b>n&#8209;value</b><br><span style="color:#5a6472;">HTS tape
+        (e.g. REBCO, BSCCO) at 77&nbsp;K</span></td>
+        <td>30 – 60</td><td>20 – 30</td><td>&lt;&nbsp;15 or &gt;&nbsp;80</td></tr>
+      <tr><td><b>n&#8209;value</b><br><span style="color:#5a6472;">LTS wire
+        (e.g. NbTi, Nb<sub>3</sub>Sn) at 4.2&nbsp;K</span></td>
+        <td>40 – 80</td><td>25 – 40</td><td>&lt;&nbsp;20 or &gt;&nbsp;120</td></tr>
+      <tr><td><b>σ(n)&nbsp;/&nbsp;n</b><br>relative uncertainty on the
+        n&#8209;value</td>
+        <td>&lt;&nbsp;1&nbsp;%</td><td>1&nbsp;%&nbsp;–&nbsp;5&nbsp;%</td>
+        <td>&gt;&nbsp;5&nbsp;%</td></tr>
+      <tr><td><b>σ(I<sub>c</sub>)&nbsp;/&nbsp;I<sub>c</sub></b><br>relative
+        uncertainty on the critical current</td>
+        <td>&lt;&nbsp;0.1&nbsp;%</td><td>0.1&nbsp;%&nbsp;–&nbsp;0.5&nbsp;%</td>
+        <td>&gt;&nbsp;1&nbsp;%</td></tr>
+      <tr><td><b>R²</b> in log&#8209;log space</td>
+        <td>&gt;&nbsp;0.999</td><td>0.99&nbsp;–&nbsp;0.999</td>
+        <td>&lt;&nbsp;0.99</td></tr>
+      <tr><td><b>n&#8209;window points</b> (<code>n_points_used</code>)</td>
+        <td>≥&nbsp;200</td><td>50&nbsp;–&nbsp;200</td>
+        <td>&lt;&nbsp;50 (IEC minimum)</td></tr>
+      <tr><td><b>Ramp inductive ratio</b><br>
+        (<code>ramp_inductive_ratio</code>)</td>
+        <td>&lt;&nbsp;0.01</td><td>0.01&nbsp;–&nbsp;0.1</td>
+        <td>&gt;&nbsp;0.1 → <code>ramp_too_fast</code></td></tr>
+      <tr><td><b>Resistive baseline R</b><br>before the transition</td>
+        <td>≲&nbsp;1&nbsp;µΩ (clean joint)</td>
+        <td>1&nbsp;–&nbsp;100&nbsp;µΩ</td>
+        <td>&gt;&nbsp;1&nbsp;mΩ (joint or contact problem)</td></tr>
+      <tr><td><b>V<sub>ofs</sub></b> (thermal offset)</td>
+        <td>|V<sub>ofs</sub>| &lt; 0.1·V<sub>c</sub></td>
+        <td>0.1·V<sub>c</sub> – 0.5·V<sub>c</sub></td>
+        <td>&gt;&nbsp;0.5·V<sub>c</sub> → recheck zero&#8209;I window</td></tr>
+      <tr><td><b>I<sub>c</sub>&nbsp;/&nbsp;I<sub>max</sub></b></td>
+        <td>0.6&nbsp;–&nbsp;0.9</td><td>0.4&nbsp;–&nbsp;0.95</td>
+        <td>&lt;&nbsp;0.3 (under&#8209;driven) or &gt;&nbsp;0.98
+          (no headroom above the criterion)</td></tr>
+    </table>
+
+    <div class="warn"><b>Reading these together:</b>
+      <ul>
+        <li>A small σ(n) but R² &lt; 0.99 usually means a wrong baseline,
+          not a noisy n&#8209;value &mdash; widen the linear window.</li>
+        <li>A large σ(I<sub>c</sub>) with a normal n typically points at too
+          few points in the decade &mdash; sample faster or slow the
+          ramp.</li>
+        <li><code>ramp_too_fast = True</code> invalidates the n&#8209;value
+          regardless of σ(n); the inductive term is contaminating the
+          transition.</li>
+      </ul>
+    </div>
 
     <div class="tip"><b>Note:</b> Booleans are stored as the strings
     <code>"True"</code>/<code>"False"</code> for round&#8209;trip safety with
