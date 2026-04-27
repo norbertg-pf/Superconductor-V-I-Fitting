@@ -746,6 +746,14 @@ def _on_curve_profile_changed(app) -> None:
         _apply_fit_window_profile(app, target)
     finally:
         app._data_fit_suspend_profile_save = False
+    # Recompute Low(X)/High(X) editors for the newly selected curve profile
+    # so each curve shows its own current window values immediately.
+    _refresh_all_x_values(app)
+    ctx = _data_ctx(app)
+    if ctx is not None:
+        _, _, x_arr, y_arr, _ = ctx
+        _update_fit_bands(app, x_arr, y_arr)
+    _update_band_states(app)
     # Re-save once at the end so the active profile reflects exactly what
     # the widgets now show (idempotent for a clean apply).
     _save_active_curve_profile(app)
@@ -780,6 +788,20 @@ def _find_curve_for_profile_key(app, key: str) -> Optional[dict]:
         if signature == key_str:
             return entry
     return None
+
+
+def _active_curve_arrays_from_profile(app) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Return (x, y) for the currently selected Active-fitting curve profile."""
+    key = _curve_profile_key_from_ui(app)
+    entry = _find_curve_for_profile_key(app, key)
+    if entry is None:
+        return None
+    x = np.asarray(entry.get("x", []), dtype=float)
+    y = np.asarray(entry.get("y", []), dtype=float)
+    n = int(min(x.size, y.size))
+    if n <= 0:
+        return None
+    return x[:n], y[:n]
 
 
 def _sync_active_length_settings(app, *, use_length: bool, length_cm: float) -> None:
@@ -2793,9 +2815,13 @@ def _on_band_dragged(app, window: str) -> None:
 
 
 def _data_ctx(app):
-    transformed = _apply_transforms(app)
-    x = transformed["x"]
-    y = transformed["y"]
+    active_curve = _active_curve_arrays_from_profile(app)
+    if active_curve is not None:
+        x, y = active_curve
+    else:
+        transformed = _apply_transforms(app)
+        x = transformed["x"]
+        y = transformed["y"]
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         ref = getattr(app, "data_fit_power_ref_curve", None) or {}
         ref_x = np.asarray(ref.get("x", []), dtype=float)
@@ -2838,7 +2864,9 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
     return float(y[idx]) / y_max * 100.0
 
 
-def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
+def _update_loglog_power_x_from_ec(
+    app, *, auto_run_fit: bool = True, x_override: Optional[np.ndarray] = None, y_override: Optional[np.ndarray] = None
+) -> bool:
     """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference.
 
     Mapping used by the UI in log-log mode:
@@ -2854,19 +2882,28 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     """
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=auto_run_fit)
-    if not ok:
-        return False
-    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-    # ``ref`` is the corrected+smoothed Step-4 reference from
-    # ``_ensure_step4_reference_curve``.
-    x_arr = np.asarray(ref.get("x", []), dtype=float)
-    y_arr = np.asarray(ref.get("y", []), dtype=float)
-    n = int(min(x_arr.size, y_arr.size))
-    if n == 0:
-        return False
-    x_arr = x_arr[:n]
-    y_arr = y_arr[:n]
+    if x_override is not None and y_override is not None:
+        x_arr = np.asarray(x_override, dtype=float)
+        y_arr = np.asarray(y_override, dtype=float)
+        n = int(min(x_arr.size, y_arr.size))
+        if n == 0:
+            return False
+        x_arr = x_arr[:n]
+        y_arr = y_arr[:n]
+    else:
+        ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=auto_run_fit)
+        if not ok:
+            return False
+        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+        # ``ref`` is the corrected+smoothed Step-4 reference from
+        # ``_ensure_step4_reference_curve``.
+        x_arr = np.asarray(ref.get("x", []), dtype=float)
+        y_arr = np.asarray(ref.get("y", []), dtype=float)
+        n = int(min(x_arr.size, y_arr.size))
+        if n == 0:
+            return False
+        x_arr = x_arr[:n]
+        y_arr = y_arr[:n]
     # Align UI threshold picking with service.fit_n_value_log_log:
     # use positive-current points and sort by current before searching Ec hits.
     valid = np.isfinite(x_arr) & np.isfinite(y_arr) & (x_arr > 0)
@@ -2906,6 +2943,10 @@ def _refresh_x_from_pct(app, window: str, which: str) -> None:
     # In log-log mode the Step 4 editors hold Ec1/Ec2 (µV/cm), not a
     # percentage of Imax — no meaningful X mapping until a fit has run.
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        active_curve = _active_curve_arrays_from_profile(app)
+        if active_curve is not None:
+            x_arr, y_arr = active_curve
+            _update_loglog_power_x_from_ec(app, auto_run_fit=False, x_override=x_arr, y_override=y_arr)
         return
     ctx = _data_ctx(app)
     if ctx is None:
