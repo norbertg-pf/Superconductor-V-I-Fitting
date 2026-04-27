@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
 )
 
 from .service import (
+    adaptive_smooth_for_ec_window,
     DEFAULT_CHI_SQR_TOL,
     DEFAULT_DIDT_HIGH_FRAC,
     DEFAULT_DIDT_LOW_FRAC,
@@ -361,45 +362,8 @@ def _float_from(widget: QLineEdit, fallback: float, as_fraction: bool = False) -
 
 
 def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray:
-    """Adaptive moving-average smoothing for visual Ec1/Ec2 guidance.
-
-    Target: reduce residual high-frequency noise to roughly 8 % of Ec1
-    (about 0.008 µV/cm when Ec1 = 0.1 µV/cm).
-    """
-    arr = np.asarray(y, dtype=float)
-    if arr.size < 7:
-        return arr
-    diffs = np.diff(arr)
-    if diffs.size < 5:
-        return arr
-    mad = float(np.median(np.abs(diffs - np.median(diffs))))
-    sigma_hf = 1.4826 * mad / np.sqrt(2.0)
-
-    ec1_abs = max(abs(float(ec1)), 1e-30)
-    target_sigma = 0.005 * ec1_abs
-    if sigma_hf <= target_sigma:
-        return arr
-
-    # For moving-average filters, sigma_out ≈ sigma_in / sqrt(N).
-    win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
-    win = max(3, min(win, 2001))
-    if win % 2 == 0:
-        win += 1
-    kernel = np.ones(win, dtype=float) / float(win)
-    sm = np.convolve(arr, kernel, mode="same")
-
-    # One optional refinement step if still too noisy.
-    diffs_sm = np.diff(sm)
-    if diffs_sm.size >= 5:
-        mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
-        sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
-        if sigma_sm > target_sigma and win < 2001:
-            win2 = min(2001, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
-            if win2 % 2 == 0:
-                win2 += 1
-            kernel2 = np.ones(win2, dtype=float) / float(win2)
-            sm = np.convolve(arr, kernel2, mode="same")
-    return sm
+    """UI wrapper around the shared Ec-window smoothing implementation."""
+    return adaptive_smooth_for_ec_window(y, ec1, ec2)
 
 
 def _read_time_channel(tdms_file):
@@ -2874,14 +2838,28 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
     return float(y[idx]) / y_max * 100.0
 
 
-def _update_loglog_power_x_from_ec(app) -> bool:
-    """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
+def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
+    """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference.
+
+    Mapping used by the UI in log-log mode:
+      0) Call ``_ensure_step4_reference_curve(...)``. That helper applies
+         baseline correction ``y - (V0 + R·I)`` and adaptive smoothing, then
+         stores the result in ``app.data_fit_power_ref_curve``.
+      1) Convert Ec1/Ec2 from displayed units (µV/cm or µV) to SI (V/cm or V).
+      2) On the Step-4 reference trace ``(x_arr, y_arr)``, find the first
+         current where ``y_arr >= Ec1`` -> Low(X), and first where
+         ``y_arr >= Ec2`` -> High(X).
+      3) If one threshold is not reached, clamp to the trace max current.
+      4) Enforce ``High(X) > Low(X)`` with a tiny guard band.
+    """
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=auto_run_fit)
     if not ok:
         return False
     ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+    # ``ref`` is the corrected+smoothed Step-4 reference from
+    # ``_ensure_step4_reference_curve``.
     x_arr = np.asarray(ref.get("x", []), dtype=float)
     y_arr = np.asarray(ref.get("y", []), dtype=float)
     n = int(min(x_arr.size, y_arr.size))
@@ -2889,11 +2867,24 @@ def _update_loglog_power_x_from_ec(app) -> bool:
         return False
     x_arr = x_arr[:n]
     y_arr = y_arr[:n]
+    # Align UI threshold picking with service.fit_n_value_log_log:
+    # use positive-current points and sort by current before searching Ec hits.
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr) & (x_arr > 0)
+    if not np.any(valid):
+        return False
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
+    order = np.argsort(x_arr)
+    x_arr = x_arr[order]
+    y_arr = y_arr[order]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
-    idx_lo_all = np.where(y_arr >= ec1)[0]
+    # Ignore the first 10 % of current span for Low(X) crossing pick to avoid
+    # noisy ramp-start artefacts.
+    x_guard_lo = float(np.min(x_arr)) + 0.10 * (float(np.max(x_arr)) - float(np.min(x_arr)))
+    idx_lo_all = np.where((y_arr >= ec1) & (x_arr >= x_guard_lo))[0]
     idx_hi_all = np.where(y_arr >= ec2)[0]
     x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
@@ -3600,6 +3591,23 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
+
+    def _apply_step4_window_from_reference(result_obj) -> None:
+        """For log-log fits, recompute Step-4 window from the same
+        corrected+smoothed reference used by the Add/Show helper curve."""
+        if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
+            return
+        controller.last_result = result_obj
+        if not _update_loglog_power_x_from_ec(app, auto_run_fit=False):
+            return
+        try:
+            lo_w = float(app.data_fit_power_low_x.text())
+            hi_w = float(app.data_fit_power_high_x.text())
+        except (TypeError, ValueError):
+            return
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+            result_obj.n_window_I = (float(lo_w), float(hi_w))
+            result_obj.power_fit_window = (float(lo_w), float(hi_w))
     if not controller.channel_names:
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
@@ -3669,6 +3677,7 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
+                _apply_step4_window_from_reference(result)
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
@@ -3680,6 +3689,18 @@ def run_fit(app):
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
         if last_ok is not None:
+            controller.last_result = last_ok
+            if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
+                n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
+                try:
+                    lo_w = float(n_window[0])
+                    hi_w = float(n_window[1])
+                except (TypeError, ValueError, IndexError):
+                    lo_w = hi_w = 0.0
+                if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                    _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+                    _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+                    app.data_fit_power_window_manual = False
             _show_fit_overlays(
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
@@ -3756,7 +3777,20 @@ def run_fit(app):
                     current + f"\nFailed-fit metadata written to: {failed_path}"
                 )
         return
+    controller.last_result = result
+    _apply_step4_window_from_reference(result)
     app.data_fit_result_text.setPlainText(_format_result(result))
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+        n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
+        try:
+            lo_w = float(n_window[0])
+            hi_w = float(n_window[1])
+        except (TypeError, ValueError, IndexError):
+            lo_w = hi_w = 0.0
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+            _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+            _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+            app.data_fit_power_window_manual = False
     if result.fit_x is not None and result.fit_y is not None:
         app.data_fit_model_curve.setData(result.fit_x, result.fit_y)
     _upsert_fit_curve_entry(
