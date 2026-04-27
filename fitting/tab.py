@@ -2838,7 +2838,7 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
     return float(y[idx]) / y_max * 100.0
 
 
-def _update_loglog_power_x_from_ec(app) -> bool:
+def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference.
 
     Mapping used by the UI in log-log mode:
@@ -2854,7 +2854,7 @@ def _update_loglog_power_x_from_ec(app) -> bool:
     """
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=auto_run_fit)
     if not ok:
         return False
     ref = getattr(app, "data_fit_power_ref_curve", None) or {}
@@ -3610,6 +3610,10 @@ def run_fit(app):
     except Exception as exc:
         QMessageBox.critical(app, "Data Fitting", f"Invalid input: {exc}")
         return
+    # Run Fit should always refresh Step-4 Low/High X in log-log mode before
+    # solving. Use existing fit context only (no auto-run recursion here).
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
 
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
@@ -3685,6 +3689,9 @@ def run_fit(app):
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
         if last_ok is not None:
+            controller.last_result = last_ok
+            if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
+                _update_loglog_power_x_from_ec(app, auto_run_fit=False)
             if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
                 n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
                 try:
@@ -3772,6 +3779,9 @@ def run_fit(app):
                     current + f"\nFailed-fit metadata written to: {failed_path}"
                 )
         return
+    controller.last_result = result
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         picked_window = _window_from_step4_inputs()
         if picked_window is not None:
