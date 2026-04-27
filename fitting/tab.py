@@ -2553,6 +2553,42 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
     return float(y[idx]) / y_max * 100.0
 
 
+def _update_loglog_power_x_from_ec(app) -> bool:
+    """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference."""
+    if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
+        return False
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    if not ok:
+        return False
+    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+    x_arr = np.asarray(ref.get("x", []), dtype=float)
+    y_arr = np.asarray(ref.get("y", []), dtype=float)
+    n = int(min(x_arr.size, y_arr.size))
+    if n == 0:
+        return False
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
+    ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
+    idx_lo_all = np.where(y_arr >= ec1)[0]
+    idx_hi_all = np.where(y_arr >= ec2)[0]
+    x_min = float(np.min(x_arr))
+    x_max = float(np.max(x_arr))
+    x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
+    x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
+    if not np.isfinite(x_lo):
+        x_lo = x_min
+    if not np.isfinite(x_hi):
+        x_hi = x_max
+    if x_hi <= x_lo:
+        x_hi = x_lo + max(1e-12, 0.01 * (x_max - x_min if x_max > x_min else 1.0))
+    _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
+    _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
+    return True
+
+
 def _refresh_x_from_pct(app, window: str, which: str) -> None:
     # In log-log mode the Step 4 editors hold Ec1/Ec2 (µV/cm), not a
     # percentage of Imax — no meaningful X mapping until a fit has run.
@@ -2595,6 +2631,18 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
     if not widget.isModified():
         return
     widget.setModified(False)
+    if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        if source == "pct":
+            _update_loglog_power_x_from_ec(app)
+        else:
+            _refresh_pct_from_x(app, window, which)
+        ctx = _data_ctx(app)
+        if ctx is not None:
+            _, _, x_arr, y_arr, _ = ctx
+            _update_fit_bands(app, x_arr, y_arr)
+        _update_band_states(app)
+        _save_active_curve_profile(app)
+        return
     if source == "pct":
         _refresh_x_from_pct(app, window, which)
     else:
