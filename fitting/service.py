@@ -376,20 +376,15 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    # Report decade-window currents from the fitted line itself:
-    # log10(E) = intercept + n*log10(I)  -> I(Ec) = 10^((log10(Ec)-intercept)/n)
-    # This is far less sensitive to pointwise noise than direct threshold hits.
-    log_I_lo = (float(np.log10(Ec1)) - intercept) / n_val
-    log_I_hi = (float(np.log10(Ec2)) - intercept) / n_val
-    I_lo = float(10.0 ** log_I_lo)
-    I_hi = float(10.0 ** log_I_hi)
-    x_lo_data = float(np.min(xs))
-    x_hi_data = float(np.max(xs))
-    I_lo = float(np.clip(I_lo, x_lo_data, x_hi_data))
-    I_hi = float(np.clip(I_hi, x_lo_data, x_hi_data))
+    # Report the actual current window used by the fit-mask (points where
+    # Ec1 <= E_sc <= Ec2), so UI "Low (X) / High (X)" matches the true data
+    # region consumed by the power-law regression.
+    I_lo = float(np.min(x_seg[mask]))
+    I_hi = float(np.max(x_seg[mask]))
+    if not (np.isfinite(I_lo) and np.isfinite(I_hi)):
+        raise ValueError("Computed n-window bounds are not finite.")
     if I_hi <= I_lo:
-        I_lo = float(np.min(x_seg[mask]))
-        I_hi = float(np.max(x_seg[mask]))
+        raise ValueError("Computed n-window bounds are degenerate.")
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
