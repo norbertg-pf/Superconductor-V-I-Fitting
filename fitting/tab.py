@@ -188,9 +188,14 @@ def _xvalue_edit() -> QLineEdit:
 
 
 def _fill_window_grid(layout, show_cb, *, low_label, low_pct, low_x,
-                      high_label, high_pct, high_x, base_row: int = 0):
+                      high_label, high_pct, high_x, base_row: int = 0,
+                      extra_widget=None):
     """Show checkbox on base_row, percents on base_row+1, X values on base_row+2."""
-    layout.addWidget(show_cb, base_row, 0, 1, 4)
+    if extra_widget is None:
+        layout.addWidget(show_cb, base_row, 0, 1, 4)
+    else:
+        layout.addWidget(show_cb, base_row, 0, 1, 2)
+        layout.addWidget(extra_widget, base_row, 2, 1, 2)
     layout.addWidget(QLabel(low_label), base_row + 1, 0)
     layout.addWidget(low_pct, base_row + 1, 1)
     layout.addWidget(QLabel(high_label), base_row + 1, 2)
@@ -266,6 +271,28 @@ def _float_from(widget: QLineEdit, fallback: float, as_fraction: bool = False) -
     if as_fraction:
         return v / 100.0
     return v
+
+
+def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray:
+    """Noise-adaptive 1D smoothing for visual Ec1/Ec2 guidance."""
+    arr = np.asarray(y, dtype=float)
+    if arr.size < 7:
+        return arr
+    span = max(float(ec2 - ec1), abs(float(ec1)), 1e-30)
+    diffs = np.diff(arr)
+    if diffs.size < 5:
+        return arr
+    mad = float(np.median(np.abs(diffs - np.median(diffs))))
+    sigma_hf = 1.4826 * mad / np.sqrt(2.0)
+    noise_ratio = float(np.clip(sigma_hf / span, 0.0, 10.0))
+    win = 1 + int(round(80.0 * noise_ratio))
+    win = max(1, min(win, 101))
+    if win % 2 == 0:
+        win += 1
+    if win <= 1:
+        return arr
+    kernel = np.ones(win, dtype=float) / float(win)
+    return np.convolve(arr, kernel, mode="same")
 
 
 def _read_time_channel(tdms_file):
@@ -471,6 +498,8 @@ def _connect_data_fitting_actions(app):
     app.data_fit_show_didt.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_linear.toggled.connect(lambda _: _update_band_states(app))
     app.data_fit_show_power.toggled.connect(lambda _: (_update_band_states(app), refresh_preview(app)))
+    if hasattr(app, "data_fit_show_ec_smooth"):
+        app.data_fit_show_ec_smooth.toggled.connect(lambda _: refresh_preview(app))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
     app.data_fit_save_metadata_btn.clicked.connect(lambda: _save_metadata_clicked(app))
@@ -939,6 +968,12 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_show_power = QCheckBox("Show / edit")
     app.data_fit_show_power.setChecked(False)
     app.data_fit_show_power.setToolTip("Show/hide the orange band for this window on the plot.")
+    app.data_fit_show_ec_smooth = QCheckBox("Show smoothed Ec curve")
+    app.data_fit_show_ec_smooth.setChecked(False)
+    app.data_fit_show_ec_smooth.setToolTip(
+        "Show/hide the orange dashed smoothed curve used as a visual guide\n"
+        "for Ec1/Ec2 window editing in log-log mode."
+    )
     # Pre-fill the low/high editors with the IEC Ec1/Ec2 defaults so they
     # are correct the first time the user sees them with the log-log
     # method (the default). The labels switch via _update_method_mode_ui.
@@ -950,6 +985,7 @@ def setup_data_fitting_tab_layout(app):
         low_label="Ec1 (µV/cm)", low_pct=app.data_fit_power_low, low_x=app.data_fit_power_low_x,
         high_label="Ec2 (µV/cm)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
         base_row=2,
+        extra_widget=app.data_fit_show_ec_smooth,
     )
     # Keep references to the text labels so the method-mode handler can
     # swap them when the user switches between IEC and non-linear modes.
@@ -1084,6 +1120,11 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot.getPlotItem().getViewBox().setMouseMode(pg.ViewBox.PanMode)
     app.data_fit_raw_curve = app.data_fit_plot.plot(pen=pg.mkPen("b", width=1.5), name="Raw")
     app.data_fit_model_curve = app.data_fit_plot.plot(pen=pg.mkPen("r", width=2), name="Fit")
+    app.data_fit_ec_smooth_curve = app.data_fit_plot.plot(
+        pen=pg.mkPen(230, 120, 0, 210, width=1.3, style=Qt.DashLine),
+        name="Ec smooth",
+    )
+    app.data_fit_ec_smooth_curve.setVisible(False)
 
     # One band per step. It is BOTH the colored tint and the draggable editor
     # for that step (when "Edit visually" is selected). No separate gray region.
@@ -2210,27 +2251,40 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         return None
 
     ec1 = ec2 = None
+    ec_smooth_curve = getattr(app, "data_fit_ec_smooth_curve", None)
+    show_smooth = bool(getattr(app, "data_fit_show_ec_smooth", None) and app.data_fit_show_ec_smooth.isChecked())
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        has_length = app.data_fit_use_length_cb.isChecked()
+        to_si = 1.0e-6 if has_length else 1.0e-3
+        ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+        ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+        y_smooth = _adaptive_smooth_visual(y, ec1, ec2) if (y is not None and y.size) else y
+        if ec_smooth_curve is not None:
+            if show_smooth and y_smooth is not None and y_smooth.size:
+                ec_smooth_curve.setData(x, y_smooth)
+                ec_smooth_curve.setVisible(True)
+            else:
+                ec_smooth_curve.setData([], [])
+                ec_smooth_curve.setVisible(False)
         exact_window = _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
-            # Pre-fit fallback: show a coarse estimate from raw Y crossings.
-            has_length = app.data_fit_use_length_cb.isChecked()
-            to_si = 1.0e-6 if has_length else 1.0e-3
-            ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
-            ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-            if y is not None and y.size:
-                above_1 = np.where(y >= ec1)[0]
-                above_2 = np.where(y >= ec2)[0]
+            # Pre-fit fallback: estimate from smoothed Y crossings.
+            if y_smooth is not None and y_smooth.size:
+                above_1 = np.where(y_smooth >= ec1)[0]
+                above_2 = np.where(y_smooth >= ec2)[0]
                 pow_lo = float(x[above_1[0]]) if above_1.size else x_max
                 pow_hi = float(x[above_2[0]]) if above_2.size else x_max
                 if pow_hi <= pow_lo:
                     pow_hi = pow_lo + max(1e-12, 0.01 * span)
                 band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
     else:
+        if ec_smooth_curve is not None:
+            ec_smooth_curve.setData([], [])
+            ec_smooth_curve.setVisible(False)
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
             app.data_fit_power_vfrac, DEFAULT_POWER_V_FRAC * 100, as_fraction=True
@@ -2395,11 +2449,16 @@ def _on_band_dragged(app, window: str) -> None:
             return
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
+        has_length = app.data_fit_use_length_cb.isChecked()
+        to_si = 1.0e-6 if has_length else 1.0e-3
+        ec1_guess = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+        ec2_guess = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+        y_ref = _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
         idx_lo = int(np.argmin(np.abs(x_arr - lo)))
         idx_hi = int(np.argmin(np.abs(x_arr - hi)))
-        ec1 = max(float(y_arr[idx_lo]), 1.0e-30)
-        ec2 = max(float(y_arr[idx_hi]), ec1 * 1.000001)
-        from_si = 1.0e6 if app.data_fit_use_length_cb.isChecked() else 1.0e3
+        ec1 = max(float(y_ref[idx_lo]), 1.0e-30)
+        ec2 = max(float(y_ref[idx_hi]), ec1 * 1.000001)
+        from_si = 1.0e6 if has_length else 1.0e3
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
         _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
         app.data_fit_xrange_label.setText(f"power (Ec): [{ec1 * from_si:.6g}, {ec2 * from_si:.6g}]")
