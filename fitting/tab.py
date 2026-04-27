@@ -598,6 +598,7 @@ def _reset_data_fitting_defaults(app) -> None:
             app.data_fit_plot.removeItem(fit_item)
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
+    app.data_fit_power_window_manual = False
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
     app.data_fit_preview_color = "#1f77b4"
@@ -1437,6 +1438,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
                 pass
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
+    app.data_fit_power_window_manual = False
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2283,7 +2285,7 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        exact_window = _window_from_saved_fit()
+        exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
             _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
@@ -2491,6 +2493,9 @@ def _on_band_dragged(app, window: str) -> None:
         from_si = 1.0e6 if has_length else 1.0e3
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
         _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
+        _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
+        _set_silently(app.data_fit_power_high_x, f"{hi:.6g}")
+        app.data_fit_power_window_manual = True
         app.data_fit_xrange_label.setText(f"power (Ec): [{ec1 * from_si:.6g}, {ec2 * from_si:.6g}]")
         _save_active_curve_profile(app)
         return
@@ -2586,6 +2591,7 @@ def _update_loglog_power_x_from_ec(app) -> bool:
         x_hi = x_lo + max(1e-12, 0.01 * (x_max - x_min if x_max > x_min else 1.0))
     _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
     _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
+    app.data_fit_power_window_manual = True
     return True
 
 
@@ -3277,6 +3283,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 
 def run_fit(app):
     controller = app.data_fit_controller
+    app.data_fit_power_window_manual = False
     if not controller.channel_names:
         QMessageBox.warning(app, "Data Fitting", "Load a recording first.")
         return
