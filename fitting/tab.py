@@ -2157,25 +2157,79 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
     ]
 
     is_loglog = _plot_is_loglog(app)
+
+    def _window_from_saved_fit() -> Optional[tuple[float, float]]:
+        """Best-effort current window [I(Ec1), I(Ec2)] for the active Y channel.
+
+        Priority:
+        1) Saved metadata for the active Y channel (loaded/replayed files).
+        2) Fresh run-fit cache keyed by curve label.
+        3) Last single-result fallback (only when clearly valid).
+        """
+        if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
+            return None
+        y_name = app.data_fit_y_cb.currentText().strip() if hasattr(app, "data_fit_y_cb") else ""
+        if y_name.endswith(_FITTED_CHANNEL_SUFFIX):
+            y_name = y_name[: -len(_FITTED_CHANNEL_SUFFIX)]
+        controller = getattr(app, "data_fit_controller", None)
+        if controller is None:
+            return None
+
+        def _coerce_window(raw) -> Optional[tuple[float, float]]:
+            if not raw or len(raw) != 2:
+                return None
+            try:
+                lo = float(raw[0])
+                hi = float(raw[1])
+            except (TypeError, ValueError):
+                return None
+            if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+                return None
+            return lo, hi
+
+        if y_name:
+            props = (getattr(controller, "saved_fit_results", {}) or {}).get(y_name)
+            if props:
+                parsed = _fit_result_from_props(props)
+                if getattr(parsed, "fit_method", "") == FIT_METHOD_LOG_LOG:
+                    got = _coerce_window(getattr(parsed, "n_window_I", None))
+                    if got is not None:
+                        return got
+            for label, result in reversed(list(getattr(controller, "last_fit_results", []) or [])):
+                if str(label).strip() != y_name:
+                    continue
+                if getattr(result, "fit_method", "") != FIT_METHOD_LOG_LOG:
+                    continue
+                got = _coerce_window(getattr(result, "n_window_I", None))
+                if got is not None:
+                    return got
+
+        last_result = getattr(controller, "last_result", None)
+        if getattr(last_result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+            return _coerce_window(getattr(last_result, "n_window_I", None))
+        return None
+
     ec1 = ec2 = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        # The Step 4 editors hold Ec1/Ec2 (µV/cm or µV). A full band would
-        # require baseline-subtracted E_sc = y − V0 − R·I which the user
-        # does not have until Step 3 has run. As a visual hint, shade the
-        # current range where y alone exceeds Ec1·L_v / Ec1 and Ec2·L_v /
-        # Ec2 — fine for coarse feedback, exact band is shown post-fit.
-        has_length = app.data_fit_use_length_cb.isChecked()
-        to_si = 1.0e-6 if has_length else 1.0e-3
-        ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
-        ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        if y is not None and y.size:
-            above_1 = np.where(y >= ec1)[0]
-            above_2 = np.where(y >= ec2)[0]
-            pow_lo = float(x[above_1[0]]) if above_1.size else x_max
-            pow_hi = float(x[above_2[0]]) if above_2.size else x_max
-            if pow_hi <= pow_lo:
-                pow_hi = pow_lo + max(1e-12, 0.01 * span)
-            band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+        exact_window = _window_from_saved_fit()
+        if exact_window is not None:
+            band_pairs.append((app.data_fit_band_power, exact_window))
+            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
+            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
+        else:
+            # Pre-fit fallback: show a coarse estimate from raw Y crossings.
+            has_length = app.data_fit_use_length_cb.isChecked()
+            to_si = 1.0e-6 if has_length else 1.0e-3
+            ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+            ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+            if y is not None and y.size:
+                above_1 = np.where(y >= ec1)[0]
+                above_2 = np.where(y >= ec2)[0]
+                pow_lo = float(x[above_1[0]]) if above_1.size else x_max
+                pow_hi = float(x[above_2[0]]) if above_2.size else x_max
+                if pow_hi <= pow_lo:
+                    pow_hi = pow_lo + max(1e-12, 0.01 * span)
+                band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
     else:
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
