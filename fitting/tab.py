@@ -220,6 +220,7 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
 
 def _capture_fit_window_profile(app) -> dict:
     return {
+        "fit_method": _active_fit_method(app),
         "didt_low": app.data_fit_didt_low.text(),
         "didt_high": app.data_fit_didt_high.text(),
         "linear_low": app.data_fit_linear_low.text(),
@@ -246,6 +247,15 @@ def _capture_fit_window_profile(app) -> dict:
 def _apply_fit_window_profile(app, profile: dict) -> None:
     if not profile:
         return
+    target_method = str(profile.get("fit_method", "") or "")
+    if target_method in (FIT_METHOD_LOG_LOG, FIT_METHOD_NONLINEAR):
+        app.data_fit_method_loglog_rb.blockSignals(True)
+        app.data_fit_method_nonlinear_rb.blockSignals(True)
+        app.data_fit_method_loglog_rb.setChecked(target_method == FIT_METHOD_LOG_LOG)
+        app.data_fit_method_nonlinear_rb.setChecked(target_method == FIT_METHOD_NONLINEAR)
+        app.data_fit_method_loglog_rb.blockSignals(False)
+        app.data_fit_method_nonlinear_rb.blockSignals(False)
+    _update_method_mode_ui(app)
     for widget, key in (
         (app.data_fit_didt_low, "didt_low"),
         (app.data_fit_didt_high, "didt_high"),
@@ -265,6 +275,8 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         app.data_fit_subtract_vofs_cb.setChecked(bool(profile["subtract_vofs"]))
     sync_region_to_inputs(app)
+    _update_band_states(app)
+    _update_equation_label(app)
 
 
 def _float_from(widget: QLineEdit, fallback: float, as_fraction: bool = False) -> float:
