@@ -214,6 +214,20 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
         widget.blockSignals(False)
 
 
+def _set_loglog_power_x_window(app, lo: float, hi: float, *, touched: bool) -> None:
+    """Set the Step-4 Low/High (X) boxes for log-log mode in one place."""
+    _set_silently(app.data_fit_power_low_x, f"{float(lo):.6g}")
+    _set_silently(app.data_fit_power_high_x, f"{float(hi):.6g}")
+    app.data_fit_power_x_touched = bool(touched)
+
+
+def _clear_loglog_power_x_window(app) -> None:
+    """Leave Step-4 Low/High (X) empty until user action or a new fit."""
+    _set_silently(app.data_fit_power_low_x, "")
+    _set_silently(app.data_fit_power_high_x, "")
+    app.data_fit_power_x_touched = False
+
+
 def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
     """Snapshot the Active-fitting widgets into a per-curve profile dict.
 
@@ -718,12 +732,14 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_window(app)
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
     app.data_fit_preview_color = "#1f77b4"
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
+    _clear_loglog_power_x_window(app)
     app.data_fit_plot_dirty = True
     app.data_fit_raw_curve.setData([], [])
     app.data_fit_model_curve.setData([], [])
@@ -1409,6 +1425,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_preview_alpha_pct = 100
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
+    _clear_loglog_power_x_window(app)
     _on_use_length_changed(app)
     _update_method_mode_ui(app)
     _update_plot_scale_button_text(app)
@@ -1731,6 +1748,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
     app.data_fit_curves = []
     app.data_fit_power_ref_curve = None
     app.data_fit_power_window_manual = False
+    _clear_loglog_power_x_window(app)
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -1766,6 +1784,7 @@ def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
     app.data_fit_plot_dirty = True
+    _clear_loglog_power_x_window(app)
     _populate_channel_combos(app)
     load_metadata_from_tdms(app)
     _refresh_curve_profile_selector(app)
@@ -2292,6 +2311,7 @@ def _on_fit_method_changed(app) -> None:
         new_low = profile.get("loglog_low") or f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
         new_high = profile.get("loglog_high") or f"{DEFAULT_EC2_V_PER_CM * 1.0e6:g}"
         app.data_fit_power_window_manual = False
+        _clear_loglog_power_x_window(app)
     else:
         new_low = profile.get("nonlinear_low") or f"{DEFAULT_POWER_LOW_FRAC * 100:.2f}"
         new_high = profile.get("nonlinear_high") or f"{DEFAULT_POWER_V_FRAC * 100:.2f}"
@@ -2538,9 +2558,8 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         """Best-effort current window [I(Ec1), I(Ec2)] for the active Y channel.
 
         Priority:
-        1) Saved metadata for the active Y channel (loaded/replayed files).
-        2) Fresh run-fit cache keyed by curve label.
-        3) Last single-result fallback (only when clearly valid).
+        1) Fresh run-fit cache keyed by curve label.
+        2) Last single-result fallback (only when clearly valid).
         """
         if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
             return None
@@ -2564,13 +2583,6 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             return lo, hi
 
         if y_name:
-            props = (getattr(controller, "saved_fit_results", {}) or {}).get(y_name)
-            if props:
-                parsed = _fit_result_from_props(props)
-                if getattr(parsed, "fit_method", "") == FIT_METHOD_LOG_LOG:
-                    got = _coerce_window(getattr(parsed, "n_window_I", None))
-                    if got is not None:
-                        return got
             for label, result in reversed(list(getattr(controller, "last_fit_results", []) or [])):
                 if str(label).strip() != y_name:
                     continue
@@ -2604,8 +2616,8 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
             band_pairs.append((app.data_fit_band_power, exact_window))
-            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
+            if bool(getattr(app, "data_fit_power_x_touched", False)):
+                _set_loglog_power_x_window(app, exact_window[0], exact_window[1], touched=True)
         else:
             # Pre-fit fallback: cheap raw crossing estimate.
             if y_for_power is not None and y_for_power.size:
@@ -2809,8 +2821,7 @@ def _on_band_dragged(app, window: str) -> None:
         from_si = 1.0e6 if has_length else 1.0e3
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
         _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
-        _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
-        _set_silently(app.data_fit_power_high_x, f"{hi:.6g}")
+        _set_loglog_power_x_window(app, lo, hi, touched=True)
         app.data_fit_power_window_manual = True
         app.data_fit_xrange_label.setText(f"power (Ec): [{ec1 * from_si:.6g}, {ec2 * from_si:.6g}]")
         _save_active_curve_profile(app)
@@ -2905,8 +2916,7 @@ def _update_loglog_power_x_from_ec(app) -> bool:
         x_hi = x_max
     if x_hi <= x_lo:
         x_hi = x_lo + max(1e-12, 0.01 * (x_max - x_min if x_max > x_min else 1.0))
-    _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
-    _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
+    _set_loglog_power_x_window(app, x_lo, x_hi, touched=True)
     app.data_fit_power_window_manual = True
     return True
 
@@ -3680,6 +3690,10 @@ def run_fit(app):
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
         app.data_fit_result_text.setPlainText("\n".join(lines) or "No curves included in fit.")
         if last_ok is not None:
+            if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
+                n_lo, n_hi = getattr(last_ok, "n_window_I", (np.nan, np.nan))
+                if np.isfinite(n_lo) and np.isfinite(n_hi) and n_hi > n_lo:
+                    _set_loglog_power_x_window(app, n_lo, n_hi, touched=True)
             _show_fit_overlays(
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
@@ -3757,6 +3771,10 @@ def run_fit(app):
                 )
         return
     app.data_fit_result_text.setPlainText(_format_result(result))
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+        n_lo, n_hi = getattr(result, "n_window_I", (np.nan, np.nan))
+        if np.isfinite(n_lo) and np.isfinite(n_hi) and n_hi > n_lo:
+            _set_loglog_power_x_window(app, n_lo, n_hi, touched=True)
     if result.fit_x is not None and result.fit_y is not None:
         app.data_fit_model_curve.setData(result.fit_x, result.fit_y)
     _upsert_fit_curve_entry(
