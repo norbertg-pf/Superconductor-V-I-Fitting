@@ -118,10 +118,14 @@ class _FitParamTable(pg.TextItem):
                     "V0": _format_engineering(result.V0, v_unit, 2),
                 }
                 value = value_map[p]
+                if p == "R":
+                    value = f"{r_name}: {value}"
+                elif p == "Criterion":
+                    value = f"{v_name}: {value}"
                 row_cells.append(
                     f"<td style='padding:1px 8px; text-align:right; font-family:monospace;'>{value}</td>"
                 )
-            row_name = "R/Rho" if p == "R" else ("Vc/Ec" if p == "Criterion" else p)
+            row_name = "R/Rho" if p == "R" else ("Criterion" if p == "Criterion" else p)
             body_rows.append(
                 f"<tr><td style='padding-right:10px;'><b>{row_name}</b></td>{''.join(row_cells)}</tr>"
             )
