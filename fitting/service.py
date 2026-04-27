@@ -298,7 +298,10 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             "ramp further or lower Ec2."
         )
     idx_Ec2 = int(above_Ec2[0])
-    below_Ec1_before = np.where(e_sc_mono[:idx_Ec2] < Ec1)[0]
+    # For the lower edge keep the original "last raw sub-Ec1 point" rule.
+    # Using the monotonic envelope here can lock idx_lo to 0 after a single
+    # early spike, which may include an unrealistically large part of the ramp.
+    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
     idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
     seg = slice(idx_lo, idx_Ec2 + 1)
     e_sc_seg = e_sc[seg]
