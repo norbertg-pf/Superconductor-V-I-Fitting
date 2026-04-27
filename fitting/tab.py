@@ -597,6 +597,7 @@ def _reset_data_fitting_defaults(app) -> None:
         if fit_item is not None:
             app.data_fit_plot.removeItem(fit_item)
     app.data_fit_curves = []
+    app.data_fit_power_ref_curve = None
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
     app.data_fit_preview_color = "#1f77b4"
@@ -977,10 +978,12 @@ def setup_data_fitting_tab_layout(app):
         "Add the baseline-corrected curve from the last successful fit:\n"
         "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 4 window."
     )
-    app.data_fit_add_smoothed_btn = QPushButton("Add smoothed curve")
+    app.data_fit_add_smoothed_btn = QPushButton("Add smoothed and corrected curve")
     app.data_fit_add_smoothed_btn.setToolTip(
-        "Add a static noise-smoothed copy of the current curve using the\n"
-        "Ec-aware moving-average filter used for Step 4 guidance."
+        "Build a Step-4 guide curve from the last successful fit:\n"
+        "first baseline-corrected (Y - (V0 + R·I)), then Ec-aware smoothed.\n"
+        "The Show/edit Step-4 window uses this corrected+smoothed curve,\n"
+        "even if it is hidden from the graph."
     )
     power_layout.addWidget(app.data_fit_add_smoothed_btn, 5, 2)
     power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 3)
@@ -1433,6 +1436,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
             except Exception:
                 pass
     app.data_fit_curves = []
+    app.data_fit_power_ref_curve = None
     # Reset preview state and clear the static raw/model curve items.
     app.data_fit_preview_visible = True
     app.data_fit_preview_include_in_fit = True
@@ -2265,6 +2269,16 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
 
     ec1 = ec2 = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+        ref_x = np.asarray(ref.get("x", []), dtype=float)
+        ref_y = np.asarray(ref.get("y", []), dtype=float)
+        if ref_x.size and ref_y.size:
+            n_ref = int(min(ref_x.size, ref_y.size))
+            x_for_power = ref_x[:n_ref]
+            y_for_power = ref_y[:n_ref]
+        else:
+            x_for_power = x
+            y_for_power = y
         has_length = app.data_fit_use_length_cb.isChecked()
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
@@ -2276,11 +2290,11 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
         else:
             # Pre-fit fallback: cheap raw crossing estimate.
-            if y is not None and y.size:
-                above_1 = np.where(y >= ec1)[0]
-                above_2 = np.where(y >= ec2)[0]
-                pow_lo = float(x[above_1[0]]) if above_1.size else x_max
-                pow_hi = float(x[above_2[0]]) if above_2.size else x_max
+            if y_for_power is not None and y_for_power.size:
+                above_1 = np.where(y_for_power >= ec1)[0]
+                above_2 = np.where(y_for_power >= ec2)[0]
+                pow_lo = float(x_for_power[above_1[0]]) if above_1.size else x_max
+                pow_hi = float(x_for_power[above_2[0]]) if above_2.size else x_max
                 if pow_hi <= pow_lo:
                     pow_hi = pow_lo + max(1e-12, 0.01 * span)
                 band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
@@ -2445,15 +2459,23 @@ def _on_band_dragged(app, window: str) -> None:
     x_min, x_max, x, y, y_max = ctx
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         lo, hi = sorted((lo, hi))
-        if y is None or y.size == 0:
+        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+        ref_x = np.asarray(ref.get("x", []), dtype=float)
+        ref_y = np.asarray(ref.get("y", []), dtype=float)
+        if ref_x.size and ref_y.size:
+            n_ref = int(min(ref_x.size, ref_y.size))
+            x_arr = ref_x[:n_ref]
+            y_arr = ref_y[:n_ref]
+        else:
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y, dtype=float)
+        if y_arr.size == 0:
             return
-        x_arr = np.asarray(x, dtype=float)
-        y_arr = np.asarray(y, dtype=float)
         has_length = app.data_fit_use_length_cb.isChecked()
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1_guess = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2_guess = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        y_ref = _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
+        y_ref = y_arr if (ref_x.size and ref_y.size) else _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
         idx_lo = int(np.argmin(np.abs(x_arr - lo)))
         idx_hi = int(np.argmin(np.abs(x_arr - hi)))
         ec1 = max(float(y_ref[idx_lo]), 1.0e-30)
@@ -2481,6 +2503,14 @@ def _data_ctx(app):
     transformed = _apply_transforms(app)
     x = transformed["x"]
     y = transformed["y"]
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+        ref_x = np.asarray(ref.get("x", []), dtype=float)
+        ref_y = np.asarray(ref.get("y", []), dtype=float)
+        if ref_x.size and ref_y.size:
+            n_ref = int(min(ref_x.size, ref_y.size))
+            x = ref_x[:n_ref]
+            y = ref_y[:n_ref]
     if x is None or x.size == 0:
         return None
     x_min = float(np.min(x))
@@ -3794,28 +3824,81 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     _refresh_curve_profile_selector(app)
 
 
-def _add_smoothed_curve_from_current(app) -> None:
-    """Snapshot current curve and add a smoothed variant as a separate plot."""
-    transformed = _apply_transforms(app)
-    x = np.asarray(transformed.get("x", []), dtype=float)
-    y = np.asarray(transformed.get("y", []), dtype=float)
-    t = np.asarray(transformed.get("time", []), dtype=float)
+def _resolve_fit_parent_and_result(app):
+    """Return (result, parent_entry, base_sig, base_label, x, y, t) or None."""
+    result = None
+    parent_entry = None
+    active_key = _curve_profile_key_from_ui(app)
+    for entry in getattr(app, "data_fit_curves", []):
+        if str(entry.get("signature")) != str(active_key):
+            continue
+        fit_result = entry.get("fit_result")
+        if fit_result is not None and getattr(fit_result, "ok", False):
+            result = fit_result
+            parent_entry = entry
+            break
+
+    if result is None:
+        for entry in getattr(app, "data_fit_curves", []):
+            if bool(entry.get("is_fit_result", False)):
+                continue
+            fit_result = entry.get("fit_result")
+            if fit_result is not None and getattr(fit_result, "ok", False):
+                result = fit_result
+                parent_entry = entry
+                break
+
+    if result is None:
+        fit_result = getattr(getattr(app, "data_fit_controller", None), "last_result", None)
+        if fit_result is not None and getattr(fit_result, "ok", False):
+            result = fit_result
+
+    if result is None:
+        return None
+
+    if parent_entry is not None:
+        x = np.asarray(parent_entry.get("x", []), dtype=float)
+        y = np.asarray(parent_entry.get("y", []), dtype=float)
+        t = np.asarray(parent_entry.get("t", []), dtype=float)
+        base_sig = parent_entry.get("signature", parent_entry.get("label", "curve"))
+        base_label = parent_entry.get("label", "Curve")
+    else:
+        transformed = _apply_transforms(app)
+        x = np.asarray(transformed.get("x", []), dtype=float)
+        y = np.asarray(transformed.get("y", []), dtype=float)
+        t = np.asarray(transformed.get("time", []), dtype=float)
+        base_sig = ("__preview__", app.data_fit_y_cb.currentText())
+        base_label = app.data_fit_y_cb.currentText() or "Preview"
+
     n = int(min(x.size, y.size))
     if n == 0:
-        QMessageBox.warning(app, "Data Fitting", "No points available to build smoothed curve.")
+        return None
+    return result, parent_entry, base_sig, base_label, x[:n], y[:n], (t[:n] if t.size else np.asarray([]))
+
+
+def _add_smoothed_curve_from_current(app) -> None:
+    """Create corrected+smoothed Step-4 reference curve and plot a copy."""
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(
+            app,
+            "Data Fitting",
+            "Run a successful fit first, then click 'Add smoothed and corrected curve'.",
+        )
         return
-    x = x[:n]
-    y = y[:n]
-    t = t[:n] if t.size else np.asarray([])
+    result, _parent_entry, base_sig, base_label, x, y, t = resolved
+    y_corr = y - (float(result.V0) + float(result.R) * x)
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-    y_sm = _adaptive_smooth_visual(y, ec1, ec2)
+    y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
+
+    app.data_fit_power_ref_curve = {"x": np.asarray(x), "y": np.asarray(y_sm)}
 
     sig = (
-        "__smoothed__",
-        _curve_signature(app),
+        "__smoothed_corrected__",
+        str(base_sig),
         round(float(ec1), 18),
         round(float(ec2), 18),
     )
@@ -3829,7 +3912,7 @@ def _add_smoothed_curve_from_current(app) -> None:
         item = app.data_fit_plot.plot([], [], pen=pg.mkPen(color, width=1.6, style=Qt.DashLine), symbol=None)
         existing = {
             "signature": sig,
-            "label": f"{app.data_fit_y_cb.currentText() or 'Curve'} smoothed",
+            "label": f"{base_label} smoothed+corrected",
             "color": color,
             "alpha_pct": 100,
             "skip_points": 1,
@@ -3845,12 +3928,14 @@ def _add_smoothed_curve_from_current(app) -> None:
             "show_ic": False,
             "source": {},
             "is_smoothed_curve": True,
+            "is_step4_reference_curve": True,
         }
         app.data_fit_curves.append(existing)
     existing["x"] = x
     existing["y"] = y_sm
     existing["t"] = t
-    existing["label"] = f"{app.data_fit_y_cb.currentText() or 'Curve'} smoothed"
+    existing["label"] = f"{base_label} smoothed+corrected"
+    existing["fit_result"] = result
     _refresh_curve_item(existing)
     _refresh_curve_profile_selector(app)
 
