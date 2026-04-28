@@ -239,9 +239,13 @@ def pick_loglog_i_window_from_thresholds(
     idx_hi_all = np.where((ys >= ec2) & in_guard)[0]
     idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
 
-    # Low(X): walk backwards from High(X) while current decreases until Ec1.
-    idx_lo_back = np.where(ys[: idx_hi + 1] >= ec1)[0]
-    idx_lo = int(idx_lo_back[-1]) if idx_lo_back.size else idx_hi
+    # Low(X): walk backwards from High(X) while current decreases and stop at
+    # the first point that reaches Ec1 (or below).
+    idx_lo = idx_hi
+    for j in range(idx_hi, -1, -1):
+        if ys[j] <= ec1:
+            idx_lo = j
+            break
 
     i_lo = float(xs[idx_lo])
     i_hi = float(xs[idx_hi])
