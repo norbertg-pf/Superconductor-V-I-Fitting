@@ -4358,10 +4358,8 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using the most relevant successful fit."""
+    _ensure_fit_for_reference(app, force_recompute=True)
     resolved = _resolve_fit_parent_and_result(app)
-    if resolved is None:
-        _ensure_fit_for_reference(app)
-        resolved = _resolve_fit_parent_and_result(app)
     if resolved is None:
         QMessageBox.warning(
             app,
@@ -4465,9 +4463,13 @@ def _resolve_fit_parent_and_result(app):
     return result, parent_entry, base_sig, base_label, x[:n], y[:n], (t[:n] if t.size else np.asarray([]))
 
 
-def _ensure_fit_for_reference(app) -> bool:
-    """Ensure Step-3/Step-4 fit values exist; auto-runs fit once if needed."""
-    if _resolve_fit_parent_and_result(app) is not None:
+def _ensure_fit_for_reference(app, *, force_recompute: bool = False) -> bool:
+    """Ensure Step-3/Step-4 fit values exist.
+
+    When ``force_recompute`` is True, always re-run the fit so Step-1/2/3 are
+    refreshed from the current data/settings before building helper curves.
+    """
+    if not force_recompute and _resolve_fit_parent_and_result(app) is not None:
         return True
     run_fit(app)
     return _resolve_fit_parent_and_result(app) is not None
@@ -4541,7 +4543,8 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 def _add_smoothed_curve_from_current(app) -> None:
     """Create corrected+smoothed Step-4 reference curve and plot a copy."""
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=True, auto_run_fit=True)
+    _ensure_fit_for_reference(app, force_recompute=True)
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=True, auto_run_fit=False)
     if not ok:
         QMessageBox.warning(
             app,
