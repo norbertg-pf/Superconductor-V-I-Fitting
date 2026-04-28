@@ -10,6 +10,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.signal import savgol_filter
 
 
 DEFAULT_DIDT_LOW_FRAC = 0.40
@@ -157,29 +158,50 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
 
     ec1_abs = max(abs(float(ec1)), 1e-30)
     # Keep this target aligned with the Step-4 UI guidance curve behavior.
-    target_sigma = 0.005 * ec1_abs
+    #
+    # In IEC log-log mode, Ec1 can be very small (for example when using
+    # µV/cm units). If we only scale by Ec1, target_sigma becomes so tiny that
+    # the computed window can become unrealistically large and the helper curve
+    # looks distorted. Anchor the target to a tiny fraction of the measured
+    # signal span as well, so smoothing remains physically meaningful.
+    finite = arr[np.isfinite(arr)]
+    if finite.size:
+        lo = float(np.percentile(finite, 5.0))
+        hi = float(np.percentile(finite, 95.0))
+        span = max(0.0, hi - lo)
+    else:
+        span = 0.0
+    target_sigma = max(0.005 * ec1_abs, 1e-4 * span)
     if sigma_hf <= target_sigma:
         return arr
 
-    # Moving-average approximation: sigma_out ≈ sigma_in / sqrt(N).
+    # Savitzky-Golay preserves local curve shape (knee position/slope) much
+    # better than a plain moving average, which is important for IEC windows.
+    # We still size the window from the measured noise ratio.
     win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
-    win = max(3, min(win, 2001))
+    # Keep helper curves stable on any dataset and avoid flattening transitions.
+    n = int(arr.size)
+    max_win_by_len = max(7, n // 20)
+    if max_win_by_len % 2 == 0:
+        max_win_by_len -= 1
+    max_win = min(201, max_win_by_len if max_win_by_len >= 3 else 3)
+    win = max(3, min(win, max_win))
     if win % 2 == 0:
         win += 1
-    kernel = np.ones(win, dtype=float) / float(win)
-    sm = np.convolve(arr, kernel, mode="same")
+    poly = 2 if win >= 5 else 1
+    sm = savgol_filter(arr, window_length=win, polyorder=poly, mode="interp")
 
     # Optional second pass if still above target noise.
     diffs_sm = np.diff(sm)
     if diffs_sm.size >= 5:
         mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
         sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
-        if sigma_sm > target_sigma and win < 2001:
-            win2 = min(2001, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
+        if sigma_sm > target_sigma and win < max_win:
+            win2 = min(max_win, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
             if win2 % 2 == 0:
                 win2 += 1
-            kernel2 = np.ones(win2, dtype=float) / float(win2)
-            sm = np.convolve(arr, kernel2, mode="same")
+            sm = savgol_filter(arr, window_length=win2, polyorder=poly, mode="interp")
+
     return sm
 
 
