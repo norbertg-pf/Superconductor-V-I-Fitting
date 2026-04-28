@@ -10,6 +10,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.signal import savgol_filter
 
 
 DEFAULT_DIDT_LOW_FRAC = 0.40
@@ -174,29 +175,21 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     if sigma_hf <= target_sigma:
         return arr
 
-    def _moving_average_reflect(src: np.ndarray, window: int) -> np.ndarray:
-        """Moving average with reflect padding to avoid edge distortion."""
-        if window <= 1:
-            return src
-        half = window // 2
-        padded = np.pad(src, (half, half), mode="reflect")
-        kernel = np.ones(window, dtype=float) / float(window)
-        return np.convolve(padded, kernel, mode="valid")
-
-    # Moving-average approximation: sigma_out ≈ sigma_in / sqrt(N).
+    # Savitzky-Golay preserves local curve shape (knee position/slope) much
+    # better than a plain moving average, which is important for IEC windows.
+    # We still size the window from the measured noise ratio.
     win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
-    # Keep helper curves stable/physical on any dataset:
-    # - never let the smoother consume too much of the trace length
-    # - avoid very large windows that can flatten genuine transitions
+    # Keep helper curves stable on any dataset and avoid flattening transitions.
     n = int(arr.size)
-    max_win_by_len = max(7, n // 8)
+    max_win_by_len = max(7, n // 20)
     if max_win_by_len % 2 == 0:
         max_win_by_len -= 1
-    max_win = min(401, max_win_by_len if max_win_by_len >= 3 else 3)
+    max_win = min(201, max_win_by_len if max_win_by_len >= 3 else 3)
     win = max(3, min(win, max_win))
     if win % 2 == 0:
         win += 1
-    sm = _moving_average_reflect(arr, win)
+    poly = 2 if win >= 5 else 1
+    sm = savgol_filter(arr, window_length=win, polyorder=poly, mode="interp")
 
     # Optional second pass if still above target noise.
     diffs_sm = np.diff(sm)
@@ -207,46 +200,7 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
             win2 = min(max_win, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
             if win2 % 2 == 0:
                 win2 += 1
-            sm = _moving_average_reflect(arr, win2)
-
-    def _isotonic_regression_non_decreasing(vals: np.ndarray) -> np.ndarray:
-        """PAVA isotonic regression (L2), no external dependencies."""
-        v = np.asarray(vals, dtype=float).copy()
-        n = int(v.size)
-        if n <= 1:
-            return v
-        # Block start/end indices and block means.
-        starts = np.arange(n, dtype=int)
-        ends = np.arange(n, dtype=int)
-        means = v.copy()
-        weights = np.ones(n, dtype=float)
-        m = 0  # number of active blocks - 1
-        for i in range(1, n):
-            m += 1
-            starts[m] = i
-            ends[m] = i
-            means[m] = v[i]
-            weights[m] = 1.0
-            while m > 0 and means[m - 1] > means[m]:
-                w = weights[m - 1] + weights[m]
-                means[m - 1] = (weights[m - 1] * means[m - 1] + weights[m] * means[m]) / w
-                weights[m - 1] = w
-                ends[m - 1] = ends[m]
-                m -= 1
-        out = np.empty(n, dtype=float)
-        for j in range(m + 1):
-            out[starts[j]: ends[j] + 1] = means[j]
-        return out
-
-    # Physics-informed cleanup: the corrected V-I trace should be monotonic in
-    # ramp direction around the transition. Isotonic regression removes
-    # residual non-monotonic artifacts without "time-shift" workarounds.
-    head_n = max(1, sm.size // 10)
-    rising = float(np.median(sm[-head_n:])) >= float(np.median(sm[:head_n]))
-    if rising:
-        sm = _isotonic_regression_non_decreasing(sm)
-    else:
-        sm = -_isotonic_regression_non_decreasing(-sm)
+            sm = savgol_filter(arr, window_length=win2, polyorder=poly, mode="interp")
 
     return sm
 
