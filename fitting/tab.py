@@ -601,11 +601,8 @@ def _connect_data_fitting_actions(app):
     ):
         if hasattr(widget, "editingFinished"):
             widget.editingFinished.connect(lambda: _on_transform_inputs_changed(app))
-    for axis in ("time", "x", "y"):
-        combo = getattr(app, f"data_fit_{axis}_cb")
-        combo.currentIndexChanged.connect(
-            lambda _, a=axis: _on_channel_selection_changed(app, a)
-        )
+        else:
+            widget.currentIndexChanged.connect(lambda _: _on_transform_inputs_changed(app))
     for w in (app.data_fit_max_iter, app.data_fit_ic_tol, app.data_fit_chi_tol, app.data_fit_vc_input):
         w.editingFinished.connect(lambda: _save_active_curve_profile(app))
     if getattr(app, "data_fit_weight_mode_cb", None) is not None:
@@ -3130,34 +3127,16 @@ def _load_axis_metadata_from_tdms(app, axis: str) -> None:
 def _on_channel_selection_changed(app, axis: str) -> None:
     """Whenever a channel dropdown changes, refresh that axis transform."""
     _load_axis_metadata_from_tdms(app, axis)
+    if axis == "y":
+        _apply_voltage_tap_from_metadata(app)
     _on_transform_inputs_changed(app)
 
 
-def _vtap_from_recording(controller) -> Optional[float]:
-    """Find a positive voltage-tap distance anywhere in the loaded recording.
-
-    Prefers the Y channel's metadata (the most likely owner of the property),
-    then falls back to any other channel that carries a positive VTap value.
-    Returns ``None`` when nothing usable is present.
-    """
-    if controller is None:
-        return None
-    for name, meta in (controller.channel_metadata or {}).items():
-        v_tap = meta.get("voltage_tap_cm")
-        if v_tap and v_tap > 0:
-            return float(v_tap)
-    return None
-
-
 def _apply_voltage_tap_from_metadata(app) -> None:
-    """Pick up the voltage-tap distance from the loaded recording.
+    """Pick up the voltage-tap distance from the selected Y channel only.
 
-    Looks at the Y channel first, then falls back to any other channel in the
-    file that exposes a positive VTap distance (set by DAQUniversal's QD or
-    Tape/Cable preset). When found: check the voltage-tap-separation box,
-    populate the distance, and keep Ec at the IEC default (1 µV/cm). When
-    absent: uncheck the box so the tool does not fit in E-field mode with a
-    stale sample length.
+    This keeps tap distance channel-specific: every Y-channel selection can
+    carry its own Voltage_Tab_Distance from TDMS metadata.
     """
     controller = getattr(app, "data_fit_controller", None)
     if controller is None:
@@ -3166,8 +3145,6 @@ def _apply_voltage_tap_from_metadata(app) -> None:
     v_tap: Optional[float] = None
     if y_name:
         v_tap = controller.get_metadata(y_name).get("voltage_tap_cm")
-    if not (v_tap and v_tap > 0):
-        v_tap = _vtap_from_recording(controller)
     cb = app.data_fit_use_length_cb
     cb.blockSignals(True)
     try:
