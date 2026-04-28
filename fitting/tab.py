@@ -51,6 +51,7 @@ from .service import (
     DEFAULT_EC_V_PER_CM,
     DEFAULT_EC1_V_PER_CM,
     DEFAULT_EC2_V_PER_CM,
+    DEFAULT_EC_WINDOW_GUARD_FRAC,
     DEFAULT_FIT_METHOD,
     DEFAULT_IC_TOLERANCE,
     DEFAULT_LINEAR_HIGH_FRAC,
@@ -73,6 +74,7 @@ from .service import (
     RAMP_INDUCTIVE_WARN_RATIO,
     robust_view_range,
     run_full_fit,
+    pick_loglog_i_window_from_thresholds,
 )
 from .extras import (
     ExportPlotDialog,
@@ -2844,6 +2846,7 @@ def _on_show_power_toggled(app, checked: bool) -> None:
     """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+        _update_loglog_power_x_from_ec(app, auto_run_fit=True)
     _update_band_states(app)
     refresh_preview(app)
 
@@ -2965,11 +2968,12 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
          baseline correction ``y - (V0 + R·I)`` and adaptive smoothing, then
          stores the result in ``app.data_fit_power_ref_curve``.
       1) Convert Ec1/Ec2 from displayed units (µV/cm or µV) to SI (V/cm or V).
-      2) On the Step-4 reference trace ``(x_arr, y_arr)``, find the first
-         current where ``y_arr >= Ec1`` -> Low(X), and first where
-         ``y_arr >= Ec2`` -> High(X).
-      3) If one threshold is not reached, clamp to the trace max current.
-      4) Enforce ``High(X) > Low(X)`` with a tiny guard band.
+      2) On the Step-4 reference trace ``(x_arr, y_arr)``, find High(X)
+         at the first ``y_arr >= Ec2`` after the guard region.
+      3) Starting from High(X), walk backwards toward lower current until
+         ``y_arr >= Ec1`` -> Low(X).
+      4) If a threshold is not reached, clamp to the trace max current.
+      5) Enforce ``High(X) > Low(X)`` with a tiny guard band.
     """
     if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
         return False
@@ -3000,22 +3004,15 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
-    # Ignore the first 20 % of current span in the corrected+smoothed curve
-    # when picking both Low(X) and High(X) crossings.
-    x_guard_lo = float(np.min(x_arr)) + 0.20 * (float(np.max(x_arr)) - float(np.min(x_arr)))
-    in_guard = x_arr >= x_guard_lo
-    idx_lo_all = np.where((y_arr >= ec1) & in_guard)[0]
-    idx_hi_all = np.where((y_arr >= ec2) & in_guard)[0]
     x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
-    x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
-    x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
+    x_lo, x_hi = pick_loglog_i_window_from_thresholds(
+        x_arr, y_arr, ec1=ec1, ec2=ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
+    )
     if not np.isfinite(x_lo):
         x_lo = x_min
     if not np.isfinite(x_hi):
         x_hi = x_max
-    if x_hi <= x_lo:
-        x_hi = x_lo + max(1e-12, 0.01 * (x_max - x_min if x_max > x_min else 1.0))
     _set_silently(app.data_fit_power_low_x, f"{x_lo:.6g}")
     _set_silently(app.data_fit_power_high_x, f"{x_hi:.6g}")
     app.data_fit_power_window_manual = True
@@ -3728,6 +3725,18 @@ def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
 
+    def _loglog_window_fields_present() -> bool:
+        try:
+            lo_txt = (app.data_fit_power_low_x.text() or "").strip()
+            hi_txt = (app.data_fit_power_high_x.text() or "").strip()
+            if not lo_txt or not hi_txt:
+                return False
+            lo_v = float(lo_txt)
+            hi_v = float(hi_txt)
+        except (TypeError, ValueError):
+            return False
+        return np.isfinite(lo_v) and np.isfinite(hi_v) and hi_v > lo_v
+
     def _recompute_loglog_i_window_for_entry(result_obj, entry_obj, entry_settings_obj) -> None:
         """Recompute IEC I-window for one fitted curve and persist to its profile."""
         if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
@@ -3750,17 +3759,14 @@ def run_fit(app):
         order = np.argsort(x_arr)
         x_arr = x_arr[order]
         y_sm = y_sm[order]
+        ec1 = max(float(entry_settings_obj.ec1), 1.0e-30)
+        ec2 = max(float(entry_settings_obj.ec2), ec1 * 1.000001)
         x_min = float(np.min(x_arr))
         x_max = float(np.max(x_arr))
         span = max(0.0, x_max - x_min)
-        x_guard_lo = x_min + 0.20 * span
-        in_guard = x_arr >= x_guard_lo
-        ec1 = max(float(entry_settings_obj.ec1), 1.0e-30)
-        ec2 = max(float(entry_settings_obj.ec2), ec1 * 1.000001)
-        idx_lo_all = np.where((y_sm >= ec1) & in_guard)[0]
-        idx_hi_all = np.where((y_sm >= ec2) & in_guard)[0]
-        x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
-        x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
+        x_lo, x_hi = pick_loglog_i_window_from_thresholds(
+            x_arr, y_sm, ec1=ec1, ec2=ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
+        )
         if not np.isfinite(x_lo):
             x_lo = x_min
         if not np.isfinite(x_hi):
@@ -3884,7 +3890,7 @@ def run_fit(app):
                     hi_w = float(n_window[1])
                 except (TypeError, ValueError, IndexError):
                     lo_w = hi_w = 0.0
-                if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
                     _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
                     _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
                     app.data_fit_power_window_manual = False
@@ -3965,7 +3971,8 @@ def run_fit(app):
                 )
         return
     controller.last_result = result
-    _apply_step4_window_from_reference(result)
+    if not _loglog_window_fields_present():
+        _apply_step4_window_from_reference(result)
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
@@ -3974,7 +3981,7 @@ def run_fit(app):
             hi_w = float(n_window[1])
         except (TypeError, ValueError, IndexError):
             lo_w = hi_w = 0.0
-        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+        if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
             _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
             app.data_fit_power_window_manual = False
