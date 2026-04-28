@@ -1622,7 +1622,7 @@ def _auto_adjust_windows(app) -> None:
         if not bounds or len(bounds) != 2:
             continue
         _apply_frac_window(key, bounds[0], bounds[1])
-    _update_fit_bands(app)
+    _update_fit_bands(app, x, y)
     _save_active_curve_profile(app)
     _show_warning(app, "Applied auto-adjusted windows. Re-run fit and check confidence score.", severity="warning")
 

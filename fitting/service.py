@@ -571,7 +571,21 @@ def propose_window_adjustments(x: np.ndarray, y: np.ndarray, settings: FitSettin
         return {}
     order = np.argsort(x)
     xs = x[order]
-    ys = adaptive_smooth_for_ec_window(y[order], max(settings.ec1, 1e-30), max(settings.ec2, settings.ec1 * 1.000001))
+    ys = y[order]
+    # np.gradient needs strictly increasing x spacing; collapse duplicate-x
+    # samples to a median y so auto-adjust stays stable on plateaued ramps.
+    unique_x, inv = np.unique(xs, return_inverse=True)
+    if unique_x.size < 8:
+        return {}
+    y_accum = np.zeros(unique_x.size, dtype=float)
+    for i in range(unique_x.size):
+        y_accum[i] = float(np.median(ys[inv == i]))
+    xs = unique_x
+    ys = adaptive_smooth_for_ec_window(
+        y_accum,
+        max(settings.ec1, 1e-30),
+        max(settings.ec2, settings.ec1 * 1.000001),
+    )
     x_min = float(xs[0])
     x_max = float(xs[-1])
     span = max(1e-12, x_max - x_min)
