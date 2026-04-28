@@ -44,6 +44,11 @@ WEIGHT_MODE_WEIGHTED = "weighted"
 WEIGHT_MODE_ROBUST = "robust"
 DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
 
+# Pre-fit spike cleaning (impulsive noise)
+DEFAULT_SPIKE_CLEANING_ENABLED = True
+DEFAULT_SPIKE_DERIVATIVE_MAD_K = 8.0
+DEFAULT_SPIKE_INTERPOLATE_FOR_FIT = True
+
 
 @dataclass
 class FitSettings:
@@ -68,6 +73,9 @@ class FitSettings:
     subtract_thermal_offset: bool = True
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
     weight_mode: str = DEFAULT_WEIGHT_MODE
+    spike_cleaning_enabled: bool = DEFAULT_SPIKE_CLEANING_ENABLED
+    spike_derivative_mad_k: float = DEFAULT_SPIKE_DERIVATIVE_MAD_K
+    spike_interpolate_for_fit: bool = DEFAULT_SPIKE_INTERPOLATE_FOR_FIT
 
 
 @dataclass
@@ -109,6 +117,10 @@ class FitResult:
     insufficient_n_points: bool = False
     thermal_offset_applied: bool = False
     weighting_mode: str = DEFAULT_WEIGHT_MODE
+    spike_reject_count: int = 0
+    spike_reject_indices: list[int] = field(default_factory=list)
+    spike_reject_ranges: list[tuple[int, int]] = field(default_factory=list)
+    spike_interpolated_for_fit: bool = False
 
 
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
@@ -185,6 +197,77 @@ def _clean_arrays(*arrs):
     return [a[mask] for a in trimmed]
 
 
+
+
+def _mask_to_ranges(mask: np.ndarray) -> list[tuple[int, int]]:
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return []
+    ranges: list[tuple[int, int]] = []
+    start = int(idx[0])
+    prev = int(idx[0])
+    for raw in idx[1:]:
+        cur = int(raw)
+        if cur == prev + 1:
+            prev = cur
+            continue
+        ranges.append((start, prev))
+        start = prev = cur
+    ranges.append((start, prev))
+    return ranges
+
+
+def detect_impulsive_spikes(t: np.ndarray, y: np.ndarray,
+                            derivative_mad_k: float = DEFAULT_SPIKE_DERIVATIVE_MAD_K,
+                            ) -> np.ndarray:
+    """Flag likely impulsive spikes using MAD-thresholded dy/dt outliers.
+
+    Returns a boolean mask the same length as ``y`` where True means the point
+    is suspect and should be excluded from fitting (or interpolated for fitting).
+    """
+    t, y = _clean_arrays(t, y)
+    n = y.size
+    if n < 5:
+        return np.zeros(n, dtype=bool)
+    dt = np.diff(t)
+    dy = np.diff(y)
+    good = np.abs(dt) > 1e-30
+    if np.count_nonzero(good) < 3:
+        return np.zeros(n, dtype=bool)
+    deriv = dy[good] / dt[good]
+    d_med = float(np.median(deriv))
+    mad = float(np.median(np.abs(deriv - d_med)))
+    sigma = max(1e-30, 1.4826 * mad)
+    threshold = max(3.0, float(derivative_mad_k)) * sigma
+
+    seg_outlier = np.zeros(n - 1, dtype=bool)
+    seg_idx = np.where(good)[0]
+    seg_outlier[seg_idx] = np.abs(deriv - d_med) > threshold
+
+    point_mask = np.zeros(n, dtype=bool)
+    bad_seg = np.where(seg_outlier)[0]
+    for i in bad_seg:
+        point_mask[i] = True
+        point_mask[i + 1] = True
+    return point_mask
+
+
+def interpolate_flagged_points(values: np.ndarray, flagged: np.ndarray) -> np.ndarray:
+    """Replace flagged points by local linear interpolation (fit-only use)."""
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return arr.copy()
+    flagged = np.asarray(flagged, dtype=bool)
+    if flagged.size != arr.size or not np.any(flagged):
+        return arr.copy()
+    keep = ~flagged
+    if np.count_nonzero(keep) < 2:
+        return arr.copy()
+    out = arr.copy()
+    idx = np.arange(arr.size, dtype=float)
+    out[flagged] = np.interp(idx[flagged], idx[keep], arr[keep])
+    return out
+
 def estimate_thermal_offset(x: np.ndarray, y: np.ndarray,
                             zero_i_frac: float = DEFAULT_ZERO_I_FRAC) -> tuple[float, int]:
     """Estimate V_ofs (thermal offset) from the quiescent I = 0 segment.
@@ -241,7 +324,9 @@ def fit_linear_baseline(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float) 
 
 def _power_law_model(x, Ic, n, V0, R, Vc):
     """Model with V0, R, Vc fixed — only Ic and n are free."""
-    return V0 + R * x + Vc * np.power(np.clip(x / Ic, 1e-30, None), n)
+    ratio = np.clip(np.asarray(x, dtype=float) / max(float(Ic), 1e-30), 1e-30, None)
+    expo = np.clip(float(n) * np.log(ratio), -700.0, 700.0)
+    return V0 + R * x + Vc * np.exp(expo)
 
 
 def _rolling_median(values: np.ndarray, win: int) -> np.ndarray:
@@ -576,6 +661,15 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     if x.size < 8:
         return FitResult(ok=False, message="Not enough valid samples to fit.")
 
+    spike_mask = np.zeros(x.size, dtype=bool)
+    if getattr(settings, "spike_cleaning_enabled", True):
+        spike_mask = detect_impulsive_spikes(t, y, getattr(settings, "spike_derivative_mad_k", DEFAULT_SPIKE_DERIVATIVE_MAD_K))
+    spike_indices = np.where(spike_mask)[0].astype(int).tolist()
+    spike_ranges = _mask_to_ranges(spike_mask)
+    y_fit = y
+    if np.any(spike_mask) and getattr(settings, "spike_interpolate_for_fit", True):
+        y_fit = interpolate_flagged_points(y, spike_mask)
+
     x_min = float(np.min(x))
     x_max = float(np.max(x))
     if x_max <= x_min:
@@ -590,9 +684,9 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     V_ofs = 0.0
     thermal_applied = False
     if getattr(settings, "subtract_thermal_offset", True):
-        V_ofs, n_zero = estimate_thermal_offset(x, y, settings.zero_i_frac)
+        V_ofs, n_zero = estimate_thermal_offset(x, y_fit, settings.zero_i_frac)
         if n_zero > 0:
-            y = y - V_ofs
+            y_fit = y_fit - V_ofs
             thermal_applied = True
         else:
             V_ofs = 0.0
@@ -604,7 +698,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
     lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
     try:
-        V0, R = fit_linear_baseline(x, y, lin_lo, lin_hi)
+        V0, R = fit_linear_baseline(x, y_fit, lin_lo, lin_hi)
     except ValueError as exc:
         return FitResult(ok=False, message=f"Linear baseline fit failed: {exc}")
 
@@ -617,7 +711,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     weight_mode = getattr(settings, "weight_mode", DEFAULT_WEIGHT_MODE)
     point_sigma = None
     if weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
-        point_sigma = estimate_point_noise(x, y - V0 - R * x, settings.zero_i_frac)
+        point_sigma = estimate_point_noise(x, y_fit - V0 - R * x, settings.zero_i_frac)
 
     if method == FIT_METHOD_LOG_LOG:
         # Use the user-entered Ec/Vc as the criterion for Ic if provided;
@@ -627,7 +721,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         try:
             (Ic, n_value, chi_sqr, n_pts, n_window,
              sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
-                x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
+                x, y_fit, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
                 criterion_E=crit_for_ic,
                 point_sigma=point_sigma,
                 weight_mode=weight_mode,
@@ -636,9 +730,9 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
         # Rebuild a smooth model curve for plotting using the user's criterion.
         fit_x = np.linspace(max(x_min, 1e-12), x_max, 400)
-        fit_y = V0 + R * fit_x + crit_for_ic * np.power(
-            np.clip(fit_x / Ic, 1e-30, None), n_value
-        )
+        ratio = np.clip(fit_x / max(float(Ic), 1e-30), 1e-30, None)
+        expo = np.clip(float(n_value) * np.log(ratio), -700.0, 700.0)
+        fit_y = V0 + R * fit_x + crit_for_ic * np.exp(expo)
         # Add the thermal offset back so the model curve aligns with the
         # raw (unshifted) data the user still sees on screen.
         if thermal_applied:
@@ -676,11 +770,15 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             insufficient_n_points=n_pts < MIN_N_WINDOW_POINTS,
             thermal_offset_applied=thermal_applied,
             weighting_mode=weight_mode,
+            spike_reject_count=len(spike_indices),
+            spike_reject_indices=spike_indices,
+            spike_reject_ranges=spike_ranges,
+            spike_interpolated_for_fit=bool(np.any(spike_mask) and getattr(settings, "spike_interpolate_for_fit", True)),
         )
 
-    y_max = float(np.max(y))
+    y_max = float(np.max(y_fit))
     y_threshold = settings.power_v_frac * y_max
-    above = np.where(y >= y_threshold)[0]
+    above = np.where(y_fit >= y_threshold)[0]
     power_hi = float(x[above[0]]) if above.size else x_max
     power_lo = x_min + settings.power_low_frac * (x_max - x_min)
 
@@ -697,7 +795,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         iterations_used = iteration
         try:
             Ic, n_value, chi_sqr, sigma_Ic, sigma_n, r_squared = fit_power_law(
-                x, y, power_lo, power_hi,
+                x, y_fit, power_lo, power_hi,
                 V0=V0, R=R, Vc=Vc,
                 initial_Ic=last_Ic,
                 chi_sqr_tol=settings.chi_sqr_tolerance,
@@ -757,4 +855,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         insufficient_n_points=False,
         thermal_offset_applied=thermal_applied,
         weighting_mode=weight_mode,
+        spike_reject_count=len(spike_indices),
+        spike_reject_indices=spike_indices,
+        spike_reject_ranges=spike_ranges,
+        spike_interpolated_for_fit=bool(np.any(spike_mask) and getattr(settings, "spike_interpolate_for_fit", True)),
     )
