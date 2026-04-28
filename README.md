@@ -144,6 +144,7 @@ parameters are honoured:
 | `E_c1`, `E_c2` (decade window) | ✓ | — |
 | `V_c` / `E_c` (criterion) | ✓ | ✓ |
 | `Linear low / high` (baseline) | ✓ | ✓ |
+| `Baseline mode` (OLS / Huber / Theil-Sen) | ✓ | ✓ |
 | `Power low` / `Power V frac` | sanity bound | ✓ (full window) |
 | `Max iterations`, `I_c stop tol`, `Chi-sqr tol` | — | ✓ |
 | `dI/dt low / high`, `Zero-I fraction` | diagnostics | diagnostics |
@@ -198,6 +199,7 @@ round-trips through LabVIEW, OriginLab and Python.
 | `insufficient_n_points` | True/False | Set if the power-law window has too few samples. |
 | `thermal_offset_applied` | True/False | Set if a non-zero `V_ofs` was subtracted. |
 | `uses_sample_length` | True/False | True for E-field fits (with `L_s`), False otherwise. |
+| `baseline_mode` | string | Step-3 baseline estimator used (`ols`, `huber`, `theil_sen`). |
 
 > Booleans are stored as the strings `"True"` / `"False"` for round-trip
 > safety with LabVIEW and Origin readers.

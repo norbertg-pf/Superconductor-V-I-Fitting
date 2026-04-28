@@ -44,6 +44,12 @@ WEIGHT_MODE_WEIGHTED = "weighted"
 WEIGHT_MODE_ROBUST = "robust"
 DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
 
+# Step-3 baseline fitting mode identifiers.
+BASELINE_MODE_OLS = "ols"
+BASELINE_MODE_HUBER = "huber"
+BASELINE_MODE_THEIL_SEN = "theil_sen"
+DEFAULT_BASELINE_MODE = BASELINE_MODE_OLS
+
 
 @dataclass
 class FitSettings:
@@ -68,6 +74,7 @@ class FitSettings:
     subtract_thermal_offset: bool = True
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
     weight_mode: str = DEFAULT_WEIGHT_MODE
+    baseline_mode: str = DEFAULT_BASELINE_MODE
 
 
 @dataclass
@@ -109,6 +116,7 @@ class FitResult:
     insufficient_n_points: bool = False
     thermal_offset_applied: bool = False
     weighting_mode: str = DEFAULT_WEIGHT_MODE
+    baseline_mode: str = DEFAULT_BASELINE_MODE
 
 
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
@@ -229,14 +237,62 @@ def estimate_di_dt(t: np.ndarray, x: np.ndarray, low_frac: float = DEFAULT_DIDT_
     return float(slope)
 
 
-def fit_linear_baseline(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float) -> tuple[float, float]:
+def _theil_sen_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Robust line fit by median pairwise slope (Theil-Sen)."""
+    n = int(x.size)
+    if n < 2:
+        raise ValueError("Not enough points for Theil-Sen baseline fit.")
+    # Keep runtime bounded on very dense traces.
+    if n > 200:
+        idx = np.linspace(0, n - 1, 200, dtype=int)
+        x = x[idx]
+        y = y[idx]
+        n = int(x.size)
+    slopes = []
+    for i in range(n - 1):
+        dx = x[i + 1:] - x[i]
+        valid = np.abs(dx) > 1e-12
+        if np.any(valid):
+            slopes.extend(((y[i + 1:][valid] - y[i]) / dx[valid]).tolist())
+    if not slopes:
+        raise ValueError("Degenerate current values in baseline window.")
+    slope = float(np.median(np.asarray(slopes, dtype=float)))
+    intercept = float(np.median(y - slope * x))
+    return intercept, slope
+
+
+def _huber_line(x: np.ndarray, y: np.ndarray, iterations: int = 12) -> tuple[float, float]:
+    """Robust line fit by Huber IRLS."""
+    slope, intercept = np.polyfit(x, y, 1)
+    for _ in range(max(1, iterations)):
+        residual = y - (intercept + slope * x)
+        mad = float(np.median(np.abs(residual - np.median(residual))))
+        scale = max(1e-12, 1.4826 * mad)
+        z = residual / scale
+        w = _huber_weights(z)
+        # np.polyfit weights apply to unsquared residuals; sqrt(w) gives WLS.
+        slope, intercept = np.polyfit(x, y, 1, w=np.sqrt(np.clip(w, 1e-12, None)))
+    return float(intercept), float(slope)
+
+
+def fit_linear_baseline(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float,
+                        mode: str = DEFAULT_BASELINE_MODE) -> tuple[float, float]:
     """Fit y = V0 + R*x on [x_lo, x_hi]. Returns (V0, R)."""
     x, y = _clean_arrays(x, y)
     mask = (x >= x_lo) & (x <= x_hi)
     if np.count_nonzero(mask) < 2:
         raise ValueError("Not enough points in linear baseline window.")
-    slope, intercept = np.polyfit(x[mask], y[mask], 1)
-    return float(intercept), float(slope)
+    xm = x[mask]
+    ym = y[mask]
+    fit_mode = str(mode or DEFAULT_BASELINE_MODE).strip().lower()
+    if fit_mode == BASELINE_MODE_OLS:
+        slope, intercept = np.polyfit(xm, ym, 1)
+        return float(intercept), float(slope)
+    if fit_mode == BASELINE_MODE_HUBER:
+        return _huber_line(xm, ym)
+    if fit_mode == BASELINE_MODE_THEIL_SEN:
+        return _theil_sen_line(xm, ym)
+    raise ValueError(f"Unknown baseline mode: {mode}")
 
 
 def _power_law_model(x, Ic, n, V0, R, Vc):
@@ -603,8 +659,9 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     # Step 3: linear baseline → V0 (= L·dI/dt in Y-units after Step 1) and R.
     lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
     lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
+    baseline_mode = str(getattr(settings, "baseline_mode", DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE)
     try:
-        V0, R = fit_linear_baseline(x, y, lin_lo, lin_hi)
+        V0, R = fit_linear_baseline(x, y, lin_lo, lin_hi, mode=baseline_mode)
     except ValueError as exc:
         return FitResult(ok=False, message=f"Linear baseline fit failed: {exc}")
 
@@ -676,6 +733,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             insufficient_n_points=n_pts < MIN_N_WINDOW_POINTS,
             thermal_offset_applied=thermal_applied,
             weighting_mode=weight_mode,
+            baseline_mode=baseline_mode,
         )
 
     y_max = float(np.max(y))
@@ -757,4 +815,5 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         insufficient_n_points=False,
         thermal_offset_applied=thermal_applied,
         weighting_mode=weight_mode,
+        baseline_mode=baseline_mode,
     )

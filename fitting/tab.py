@@ -40,7 +40,11 @@ from PyQt5.QtWidgets import (
 
 from .service import (
     adaptive_smooth_for_ec_window,
+    BASELINE_MODE_HUBER,
+    BASELINE_MODE_OLS,
+    BASELINE_MODE_THEIL_SEN,
     DEFAULT_CHI_SQR_TOL,
+    DEFAULT_BASELINE_MODE,
     DEFAULT_DIDT_HIGH_FRAC,
     DEFAULT_DIDT_LOW_FRAC,
     DEFAULT_EC_V_PER_CM,
@@ -247,6 +251,11 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_weight_mode_cb", None) is not None
             else WEIGHT_MODE_EQUAL
         ),
+        "baseline_mode": (
+            app.data_fit_baseline_mode_cb.currentData()
+            if getattr(app, "data_fit_baseline_mode_cb", None) is not None
+            else DEFAULT_BASELINE_MODE
+        ),
         "subtract_vofs": (
             app.data_fit_subtract_vofs_cb.isChecked()
             if getattr(app, "data_fit_subtract_vofs_cb", None) is not None
@@ -336,6 +345,15 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
             app.data_fit_weight_mode_cb.setCurrentIndex(idx)
         finally:
             app.data_fit_weight_mode_cb.blockSignals(False)
+    if "baseline_mode" in profile and getattr(app, "data_fit_baseline_mode_cb", None) is not None:
+        idx = app.data_fit_baseline_mode_cb.findData(profile["baseline_mode"])
+        if idx < 0:
+            idx = 0
+        app.data_fit_baseline_mode_cb.blockSignals(True)
+        try:
+            app.data_fit_baseline_mode_cb.setCurrentIndex(idx)
+        finally:
+            app.data_fit_baseline_mode_cb.blockSignals(False)
     if method == FIT_METHOD_LOG_LOG:
         low_key, high_key = "loglog_low", "loglog_high"
     else:
@@ -592,6 +610,8 @@ def _connect_data_fitting_actions(app):
         w.editingFinished.connect(lambda: _save_active_curve_profile(app))
     if getattr(app, "data_fit_weight_mode_cb", None) is not None:
         app.data_fit_weight_mode_cb.currentIndexChanged.connect(lambda _: _save_active_curve_profile(app))
+    if getattr(app, "data_fit_baseline_mode_cb", None) is not None:
+        app.data_fit_baseline_mode_cb.currentIndexChanged.connect(lambda _: _save_active_curve_profile(app))
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
@@ -674,6 +694,8 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
     if getattr(app, "data_fit_weight_mode_cb", None) is not None:
         app.data_fit_weight_mode_cb.setCurrentIndex(0)
+    if getattr(app, "data_fit_baseline_mode_cb", None) is not None:
+        app.data_fit_baseline_mode_cb.setCurrentIndex(0)
     if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
@@ -1097,6 +1119,19 @@ def setup_data_fitting_tab_layout(app):
         low_label="Low (%)", low_pct=app.data_fit_linear_low, low_x=app.data_fit_linear_low_x,
         high_label="High (%)", high_pct=app.data_fit_linear_high, high_x=app.data_fit_linear_high_x,
     )
+    app.data_fit_baseline_mode_cb = QComboBox()
+    app.data_fit_baseline_mode_cb.addItem("OLS (legacy)", BASELINE_MODE_OLS)
+    app.data_fit_baseline_mode_cb.addItem("Huber robust", BASELINE_MODE_HUBER)
+    app.data_fit_baseline_mode_cb.addItem("Theil-Sen robust", BASELINE_MODE_THEIL_SEN)
+    app.data_fit_baseline_mode_cb.setCurrentIndex(0)
+    app.data_fit_baseline_mode_cb.setToolTip(
+        "Step-3 baseline estimator.\n"
+        "OLS: standard least-squares (legacy behavior).\n"
+        "Huber robust: reduces outlier influence.\n"
+        "Theil-Sen robust: median-slope fit, very stable on noisy ramps."
+    )
+    linear_layout.addWidget(QLabel("Baseline mode:"), 2, 0, 1, 1)
+    linear_layout.addWidget(app.data_fit_baseline_mode_cb, 2, 1, 1, 2)
     left.addWidget(linear_group)
 
     power_group = QGroupBox("Step 4: Ic and n-value")
@@ -1553,6 +1588,11 @@ def _settings_from_inputs(app) -> FitSettings:
             if getattr(app, "data_fit_weight_mode_cb", None) is not None
             else WEIGHT_MODE_EQUAL
         ),
+        baseline_mode=(
+            app.data_fit_baseline_mode_cb.currentData()
+            if getattr(app, "data_fit_baseline_mode_cb", None) is not None
+            else DEFAULT_BASELINE_MODE
+        ),
     )
     return settings
 
@@ -1607,6 +1647,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
     sample_length = float(length_cm) if use_length and length_cm and length_cm > 0 else None
     method = profile.get("fit_method", DEFAULT_FIT_METHOD)
     weight_mode = profile.get("weight_mode", WEIGHT_MODE_EQUAL)
+    baseline_mode = profile.get("baseline_mode", DEFAULT_BASELINE_MODE)
 
     if sample_length is not None:
         # vc input is Ec in µV/cm → convert to V/cm.
@@ -1665,6 +1706,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         subtract_thermal_offset=bool(profile.get("subtract_vofs", True)),
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
         weight_mode=weight_mode,
+        baseline_mode=baseline_mode,
     )
 
 
@@ -3224,8 +3266,15 @@ def _format_result(result) -> str:
         WEIGHT_MODE_WEIGHTED: "Weighted",
         WEIGHT_MODE_ROBUST: "Robust",
     }.get(weight_mode, weight_mode)
+    baseline_mode = str(getattr(result, "baseline_mode", DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE)
+    baseline_label = {
+        BASELINE_MODE_OLS: "OLS (legacy)",
+        BASELINE_MODE_HUBER: "Huber robust",
+        BASELINE_MODE_THEIL_SEN: "Theil-Sen robust",
+    }.get(baseline_mode, baseline_mode)
     lines.append(f"method        = {method_label}")
     lines.append(f"weighting     = {weight_label}")
+    lines.append(f"baseline mode = {baseline_label}")
     lines.append(f"di/dt         = {_format_engineering(result.di_dt, 'A/s', 2)}")
     # Split the constant baseline into its three physical contributions:
     # V_ofs (thermal) + L·dI/dt (inductive) + R·I (resistive).
@@ -3289,6 +3338,7 @@ _FIT_PROPERTY_KEYS = (
     "thermal_offset_applied", "uses_sample_length",
     "fit_method",
     "weighting_mode",
+    "baseline_mode",
 )
 
 
@@ -3344,6 +3394,7 @@ def _fit_result_properties(result) -> dict:
         "thermal_offset_applied": bool(getattr(result, "thermal_offset_applied", False)),
         "uses_sample_length": bool(getattr(result, "uses_sample_length", False)),
         "weighting_mode": str(getattr(result, "weighting_mode", WEIGHT_MODE_EQUAL)),
+        "baseline_mode": str(getattr(result, "baseline_mode", DEFAULT_BASELINE_MODE)),
     }
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
@@ -3453,6 +3504,7 @@ def _fit_result_from_props(props: dict):
         insufficient_n_points=_coerce_bool(_prop_lookup(props, "insufficient_n_points")),
         thermal_offset_applied=_coerce_bool(_prop_lookup(props, "thermal_offset_applied")),
         weighting_mode=str(_prop_lookup(props, "weighting_mode", default=WEIGHT_MODE_EQUAL) or WEIGHT_MODE_EQUAL),
+        baseline_mode=str(_prop_lookup(props, "baseline_mode", default=DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE),
     )
 
 
