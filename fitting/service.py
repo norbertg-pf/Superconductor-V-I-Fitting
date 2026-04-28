@@ -209,35 +209,45 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
                 win2 += 1
             sm = _moving_average_reflect(arr, win2)
 
-    def _first_crossing_idx(trace: np.ndarray, threshold: float) -> Optional[float]:
-        """First threshold crossing on monotonic envelope (index domain)."""
-        if trace.size < 2 or not np.isfinite(threshold):
-            return None
-        env = np.maximum.accumulate(np.asarray(trace, dtype=float))
-        hit = np.flatnonzero(env >= float(threshold))
-        if hit.size == 0:
-            return None
-        i = int(hit[0])
-        if i <= 0:
-            return float(i)
-        y0 = float(env[i - 1])
-        y1 = float(env[i])
-        if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
-            return float(i)
-        frac = (float(threshold) - y0) / (y1 - y0)
-        frac = float(np.clip(frac, 0.0, 1.0))
-        return float(i - 1) + frac
+    def _isotonic_regression_non_decreasing(vals: np.ndarray) -> np.ndarray:
+        """PAVA isotonic regression (L2), no external dependencies."""
+        v = np.asarray(vals, dtype=float).copy()
+        n = int(v.size)
+        if n <= 1:
+            return v
+        # Block start/end indices and block means.
+        starts = np.arange(n, dtype=int)
+        ends = np.arange(n, dtype=int)
+        means = v.copy()
+        weights = np.ones(n, dtype=float)
+        m = 0  # number of active blocks - 1
+        for i in range(1, n):
+            m += 1
+            starts[m] = i
+            ends[m] = i
+            means[m] = v[i]
+            weights[m] = 1.0
+            while m > 0 and means[m - 1] > means[m]:
+                w = weights[m - 1] + weights[m]
+                means[m - 1] = (weights[m - 1] * means[m - 1] + weights[m] * means[m]) / w
+                weights[m - 1] = w
+                ends[m - 1] = ends[m]
+                m -= 1
+        out = np.empty(n, dtype=float)
+        for j in range(m + 1):
+            out[starts[j]: ends[j] + 1] = means[j]
+        return out
 
-    # Guard against "early knee" artifacts: smoothing must not make the Ec1
-    # transition appear earlier than in the corrected raw trace.
-    ec1_thr = float(abs(ec1))
-    if ec1_thr > 0.0:
-        i_raw = _first_crossing_idx(arr, ec1_thr)
-        i_sm = _first_crossing_idx(sm, ec1_thr)
-        if i_raw is not None and i_sm is not None and i_sm < i_raw:
-            delta = float(i_raw - i_sm)
-            idx = np.arange(sm.size, dtype=float)
-            sm = np.interp(idx - delta, idx, sm, left=sm[0], right=sm[-1])
+    # Physics-informed cleanup: the corrected V-I trace should be monotonic in
+    # ramp direction around the transition. Isotonic regression removes
+    # residual non-monotonic artifacts without "time-shift" workarounds.
+    head_n = max(1, sm.size // 10)
+    rising = float(np.median(sm[-head_n:])) >= float(np.median(sm[:head_n]))
+    if rising:
+        sm = _isotonic_regression_non_decreasing(sm)
+    else:
+        sm = -_isotonic_regression_non_decreasing(-sm)
+
     return sm
 
 
