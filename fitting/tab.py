@@ -1114,24 +1114,32 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_show_linear = QCheckBox("Show / edit")
     app.data_fit_show_linear.setChecked(False)
     app.data_fit_show_linear.setToolTip("Show/hide the green band for this window on the plot.")
-    _fill_window_grid(
-        linear_layout, app.data_fit_show_linear,
-        low_label="Low (%)", low_pct=app.data_fit_linear_low, low_x=app.data_fit_linear_low_x,
-        high_label="High (%)", high_pct=app.data_fit_linear_high, high_x=app.data_fit_linear_high_x,
-    )
     app.data_fit_baseline_mode_cb = QComboBox()
     app.data_fit_baseline_mode_cb.addItem("OLS (legacy)", BASELINE_MODE_OLS)
     app.data_fit_baseline_mode_cb.addItem("Huber robust", BASELINE_MODE_HUBER)
     app.data_fit_baseline_mode_cb.addItem("Theil-Sen robust", BASELINE_MODE_THEIL_SEN)
     app.data_fit_baseline_mode_cb.setCurrentIndex(0)
+    # Keep compact so it does not collide with Low(X)/High(X) widgets.
+    app.data_fit_baseline_mode_cb.setMaximumWidth(145)
     app.data_fit_baseline_mode_cb.setToolTip(
         "Step-3 baseline estimator.\n"
         "OLS: standard least-squares (legacy behavior).\n"
         "Huber robust: reduces outlier influence.\n"
         "Theil-Sen robust: median-slope fit, very stable on noisy ramps."
     )
-    linear_layout.addWidget(QLabel("Baseline mode:"), 2, 0, 1, 1)
-    linear_layout.addWidget(app.data_fit_baseline_mode_cb, 2, 1, 1, 2)
+    baseline_mode_wrap = QWidget()
+    baseline_mode_row = QHBoxLayout(baseline_mode_wrap)
+    baseline_mode_row.setContentsMargins(0, 0, 0, 0)
+    baseline_mode_row.setSpacing(6)
+    baseline_mode_row.addWidget(QLabel("Baseline mode:"))
+    baseline_mode_row.addWidget(app.data_fit_baseline_mode_cb)
+    baseline_mode_row.addStretch(1)
+    _fill_window_grid(
+        linear_layout, app.data_fit_show_linear,
+        low_label="Low (%)", low_pct=app.data_fit_linear_low, low_x=app.data_fit_linear_low_x,
+        high_label="High (%)", high_pct=app.data_fit_linear_high, high_x=app.data_fit_linear_high_x,
+        extra_widget=baseline_mode_wrap,
+    )
     left.addWidget(linear_group)
 
     power_group = QGroupBox("Step 4: Ic and n-value")
@@ -1169,6 +1177,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_weight_mode_cb.addItem("Weighted", WEIGHT_MODE_WEIGHTED)
     app.data_fit_weight_mode_cb.addItem("Robust", WEIGHT_MODE_ROBUST)
     app.data_fit_weight_mode_cb.setCurrentIndex(0)
+    app.data_fit_weight_mode_cb.setMaximumWidth(145)
     app.data_fit_weight_mode_cb.setToolTip(
         "Step-4 point weighting mode.\n"
         "Equal: all points same weight (legacy behavior).\n"
