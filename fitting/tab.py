@@ -601,8 +601,11 @@ def _connect_data_fitting_actions(app):
     ):
         if hasattr(widget, "editingFinished"):
             widget.editingFinished.connect(lambda: _on_transform_inputs_changed(app))
-        else:
-            widget.currentIndexChanged.connect(lambda _: _on_transform_inputs_changed(app))
+    for axis in ("time", "x", "y"):
+        combo = getattr(app, f"data_fit_{axis}_cb")
+        combo.currentIndexChanged.connect(
+            lambda _, a=axis: _on_channel_selection_changed(app, a)
+        )
     for w in (app.data_fit_max_iter, app.data_fit_ic_tol, app.data_fit_chi_tol, app.data_fit_vc_input):
         w.editingFinished.connect(lambda: _save_active_curve_profile(app))
     if getattr(app, "data_fit_weight_mode_cb", None) is not None:
@@ -3154,6 +3157,9 @@ def _apply_voltage_tap_from_metadata(app) -> None:
             app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
         else:
             cb.setChecked(False)
+            # Clear stale value from the previously selected channel so the
+            # operator immediately sees this channel has no tap metadata.
+            app.data_fit_length_input.setText("")
     finally:
         cb.blockSignals(False)
     _on_use_length_changed(app)
