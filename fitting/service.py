@@ -10,6 +10,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.signal import medfilt, savgol_filter
 
 
 DEFAULT_DIDT_LOW_FRAC = 0.40
@@ -144,42 +145,58 @@ def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
 def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray:
     """Adaptive smoothing shared by Step-4 UI and IEC log-log fit windowing.
 
-    Goal: suppress high-frequency noise so Ec1/Ec2 crossing detection is stable.
+    Uses a fast, low-distortion pipeline:
+      1) tiny median pass for isolated spikes;
+      2) Savitzky-Golay smoothing with an adaptive odd window.
+
+    This is more reliable than a plain moving average when sample rate is low,
+    because it keeps local curve shape while still reducing high-frequency noise.
     """
     arr = np.asarray(y, dtype=float)
-    if arr.size < 7:
+    n = int(arr.size)
+    if n < 7:
         return arr
+
     diffs = np.diff(arr)
     if diffs.size < 5:
         return arr
     mad = float(np.median(np.abs(diffs - np.median(diffs))))
     sigma_hf = 1.4826 * mad / np.sqrt(2.0)
 
-    ec1_abs = max(abs(float(ec1)), 1e-30)
-    # Keep this target aligned with the Step-4 UI guidance curve behavior.
-    target_sigma = 0.005 * ec1_abs
+    # Noise target relative to Ec window scale.
+    ec_scale = max(abs(float(ec1)), abs(float(ec2)), 1e-30)
+    target_sigma = 0.005 * ec_scale
     if sigma_hf <= target_sigma:
         return arr
 
-    # Moving-average approximation: sigma_out ≈ sigma_in / sqrt(N).
-    win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
-    win = max(3, min(win, 2001))
-    if win % 2 == 0:
-        win += 1
-    kernel = np.ones(win, dtype=float) / float(win)
-    sm = np.convolve(arr, kernel, mode="same")
+    # Predicted odd window from sigma_out ~ sigma_in/sqrt(N).
+    raw_win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
+    win = max(5, raw_win | 1)
+    # Prevent over-smoothing on sparse traces: cap to 15% of samples.
+    max_win = max(5, int(0.15 * n) | 1)
+    win = min(win, max_win, n if n % 2 == 1 else n - 1)
+    if win < 5:
+        win = 5 if n >= 5 else (n if n % 2 == 1 else n - 1)
+    if win < 3:
+        return arr
 
-    # Optional second pass if still above target noise.
+    # Tiny spike suppressor; kernel 3 keeps shape even for low sample counts.
+    work = medfilt(arr, kernel_size=3)
+
+    poly = 2 if win >= 7 else 1
+    sm = savgol_filter(work, window_length=win, polyorder=poly, mode="interp")
+
+    # Optional second pass if still noisy, but keep it conservative.
     diffs_sm = np.diff(sm)
     if diffs_sm.size >= 5:
         mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
         sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
-        if sigma_sm > target_sigma and win < 2001:
-            win2 = min(2001, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
+        if sigma_sm > target_sigma * 1.25 and win + 4 <= max_win:
+            win2 = min(max_win, win + 4)
             if win2 % 2 == 0:
-                win2 += 1
-            kernel2 = np.ones(win2, dtype=float) / float(win2)
-            sm = np.convolve(arr, kernel2, mode="same")
+                win2 -= 1
+            poly2 = 2 if win2 >= 7 else 1
+            sm = savgol_filter(work, window_length=win2, polyorder=poly2, mode="interp")
     return sm
 
 
