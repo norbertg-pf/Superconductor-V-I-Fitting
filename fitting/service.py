@@ -538,15 +538,26 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             "ramp further or lower Ec2."
         )
     idx_Ec2 = int(above_Ec2[0])
-    # Lower edge: use raw E_sc so Ec1 is not shifted upward by smoothing.
-    # This keeps I(Ec1) closer to the physical decade boundary on clean ramps.
-    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
-    idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
+    # Lower edge for the fit segment: first index where the monotonic
+    # envelope reaches Ec1. This is more robust on noisy traces and keeps
+    # the segment aligned with what the Step-4 UI highlights.
+    above_Ec1 = np.where(e_sc_mono >= Ec1)[0]
+    if above_Ec1.size == 0:
+        raise ValueError(
+            f"Data never reaches Ec1 = {Ec1:.3g} after baseline subtraction; "
+            "lower Ec1 or verify channel scaling."
+        )
+    idx_lo = int(above_Ec1[0])
+    if idx_lo > idx_Ec2:
+        idx_lo = idx_Ec2
     seg = slice(idx_lo, idx_Ec2 + 1)
     e_sc_seg = e_sc[seg]
     e_sc_mono_seg = e_sc_mono[seg]
     x_seg = xs[seg]
-    mask = (e_sc_seg >= Ec1) & (e_sc_seg <= Ec2) & np.isfinite(e_sc_seg)
+    # Count/keep points by the monotonic transition envelope instead of raw
+    # instantaneous E_sc. This avoids false "0 points in window" failures
+    # when high-rate noise jitters around Ec1/Ec2.
+    mask = (e_sc_mono_seg >= Ec1) & (e_sc_mono_seg <= Ec2) & np.isfinite(e_sc_seg)
     n_pts = int(np.count_nonzero(mask))
     if n_pts < 4:
         raise ValueError(
