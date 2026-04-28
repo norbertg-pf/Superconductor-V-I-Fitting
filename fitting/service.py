@@ -26,6 +26,7 @@ DEFAULT_VC_VOLTS = 1.0e-3
 DEFAULT_EC_V_PER_CM = 1.0e-6    # 1 uV/cm = 100 uV/m, IEC 61788-3/-21 default for HTS at 77 K
 DEFAULT_EC1_V_PER_CM = 1.0e-7   # 0.1 uV/cm, lower end of IEC decade n-value window
 DEFAULT_EC2_V_PER_CM = 1.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
+DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 
 # Fraction of Imax below which samples are considered part of the quiescent
 # "I = 0" segment used to estimate the thermal offset V_ofs (Step 1).
@@ -203,6 +204,54 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
             sm = savgol_filter(arr, window_length=win2, polyorder=poly, mode="interp")
 
     return sm
+
+
+def pick_loglog_i_window_from_thresholds(
+    x_sorted: np.ndarray,
+    e_sc_smoothed: np.ndarray,
+    *,
+    ec1: float,
+    ec2: float,
+    guard_fraction: float = DEFAULT_EC_WINDOW_GUARD_FRAC,
+) -> tuple[float, float]:
+    """Pick (Low(X), High(X)) from corrected+smoothed IEC thresholds."""
+    xs = np.asarray(x_sorted, dtype=float)
+    ys = np.asarray(e_sc_smoothed, dtype=float)
+    n = int(min(xs.size, ys.size))
+    if n == 0:
+        return 0.0, 0.0
+    xs = xs[:n]
+    ys = ys[:n]
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    if not np.any(finite):
+        return 0.0, 0.0
+    xs = xs[finite]
+    ys = ys[finite]
+    if xs.size == 0:
+        return 0.0, 0.0
+
+    x_min = float(np.min(xs))
+    x_max = float(np.max(xs))
+    span = max(0.0, x_max - x_min)
+    x_guard_lo = x_min + float(np.clip(guard_fraction, 0.0, 0.95)) * span
+    in_guard = xs >= x_guard_lo
+
+    idx_hi_all = np.where((ys >= ec2) & in_guard)[0]
+    idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
+
+    # Low(X): walk backwards from High(X) while current decreases and stop at
+    # the first point that reaches Ec1 (or below).
+    idx_lo = idx_hi
+    for j in range(idx_hi, -1, -1):
+        if ys[j] <= ec1:
+            idx_lo = j
+            break
+
+    i_lo = float(xs[idx_lo])
+    i_hi = float(xs[idx_hi])
+    if i_hi <= i_lo:
+        i_hi = i_lo + max(1e-12, 0.01 * (span if span > 0 else 1.0))
+    return i_lo, i_hi
 
 
 def _clean_arrays(*arrs):
@@ -499,7 +548,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     How the I-window is computed for this log-log power-law fit:
       1) Sort by current and compute E_sc = y - (V0 + R*I).
       2) Build E_sc_smooth with adaptive_smooth_for_ec_window(...).
-      3) Ignore the first 20 % of current span (ramp-start guard).
+      3) Ignore the first 50 % of current span (ramp-start guard).
       4) Keep points where E_sc_smooth is inside [Ec1, Ec2].
       5) Fit log10(E_sc_smooth) vs log10(I).
       6) Report I-window from the same threshold crossings used by Step-4 UI:
@@ -523,7 +572,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     xs = xs[pos]
     e_sc = e_sc[pos]
     e_sc_bounds = adaptive_smooth_for_ec_window(e_sc, Ec1, Ec2)
-    x_guard_lo = float(np.min(xs)) + 0.20 * (float(np.max(xs)) - float(np.min(xs)))
+    x_guard_lo = float(np.min(xs)) + DEFAULT_EC_WINDOW_GUARD_FRAC * (float(np.max(xs)) - float(np.min(xs)))
     in_guard = xs >= x_guard_lo
     above_Ec2 = np.where((e_sc_bounds >= Ec2) & in_guard)[0]
     if above_Ec2.size == 0:
@@ -601,16 +650,9 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    # Report I-window with the same rule used by Step-4 Low(X)/High(X):
-    # first threshold crossings on the corrected+smoothed reference trace.
-    # Ignore first 20 % of current span when picking Ec1/Ec2 crossings for the
-    # reported Low(X)/High(X) window edges (ramp-start region is often noisy).
-    idx_lo_all = np.where((e_sc_bounds >= Ec1) & in_guard)[0]
-    idx_hi_all = np.where((e_sc_bounds >= Ec2) & in_guard)[0]
-    I_lo = float(xs[idx_lo_all[0]]) if idx_lo_all.size else float(xs[-1])
-    I_hi = float(xs[idx_hi_all[0]]) if idx_hi_all.size else float(xs[-1])
-    if I_hi <= I_lo:
-        I_hi = I_lo + max(1e-12, 0.01 * (float(np.max(xs)) - float(np.min(xs))))
+    I_lo, I_hi = pick_loglog_i_window_from_thresholds(
+        xs, e_sc_bounds, ec1=Ec1, ec2=Ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
+    )
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
