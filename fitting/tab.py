@@ -414,6 +414,29 @@ def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray
     return adaptive_smooth_for_ec_window(y, ec1, ec2)
 
 
+def _smooth_corrected_curve_vs_current(
+    x: np.ndarray, y_corr: np.ndarray, ec1: float, ec2: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth corrected curve versus sorted current to avoid ramp-turn artifacts."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y_corr, dtype=float)
+    n = int(min(x_arr.size, y_arr.size))
+    if n <= 0:
+        return np.asarray([]), np.asarray([])
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not np.any(valid):
+        return np.asarray([]), np.asarray([])
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
+    order = np.argsort(x_arr)
+    x_sorted = x_arr[order]
+    y_sorted = y_arr[order]
+    y_smoothed = _adaptive_smooth_visual(y_sorted, ec1, ec2)
+    return x_sorted, y_smoothed
+
+
 def _read_time_channel(tdms_file):
     if "RawData" in tdms_file and "Time" in tdms_file["RawData"]:
         return np.asarray(tdms_file["RawData"]["Time"][:], dtype=float)
@@ -3739,16 +3762,17 @@ def run_fit(app):
         x_arr = x_raw[:n]
         y_arr = y_raw[:n]
         y_corr = y_arr - (float(result_obj.V0) + float(result_obj.R) * x_arr)
-        y_sm = _adaptive_smooth_visual(y_corr, float(entry_settings_obj.ec1), float(entry_settings_obj.ec2))
+        x_sm, y_sm = _smooth_corrected_curve_vs_current(
+            x_arr, y_corr, float(entry_settings_obj.ec1), float(entry_settings_obj.ec2),
+        )
+        if x_sm.size == 0 or y_sm.size == 0:
+            return
 
-        valid = np.isfinite(x_arr) & np.isfinite(y_sm) & (x_arr > 0)
+        valid = np.isfinite(x_sm) & np.isfinite(y_sm) & (x_sm > 0)
         if not np.any(valid):
             return
-        x_arr = x_arr[valid]
+        x_arr = x_sm[valid]
         y_sm = y_sm[valid]
-        order = np.argsort(x_arr)
-        x_arr = x_arr[order]
-        y_sm = y_sm[order]
         x_min = float(np.min(x_arr))
         x_max = float(np.max(x_arr))
         span = max(0.0, x_max - x_min)
@@ -4581,8 +4605,10 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-    y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
-    app.data_fit_power_ref_curve = {"x": np.asarray(x), "y": np.asarray(y_sm)}
+    x_sm, y_sm = _smooth_corrected_curve_vs_current(x, y_corr, ec1, ec2)
+    if x_sm.size == 0 or y_sm.size == 0:
+        return False
+    app.data_fit_power_ref_curve = {"x": np.asarray(x_sm), "y": np.asarray(y_sm)}
 
     if not create_plot_entry:
         return True
@@ -4622,7 +4648,7 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
             "is_step4_reference_curve": True,
         }
         app.data_fit_curves.append(existing)
-    existing["x"] = x
+    existing["x"] = x_sm
     existing["y"] = y_sm
     existing["t"] = t
     existing["label"] = f"{base_label} smoothed+corrected"
@@ -4644,47 +4670,50 @@ def _add_smoothed_curve_from_current(app) -> None:
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
-        y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
-        app.data_fit_power_ref_curve = {"x": np.asarray(x), "y": np.asarray(y_sm)}
+        x_sm, y_sm = _smooth_corrected_curve_vs_current(x, y_corr, ec1, ec2)
+        if x_sm.size == 0 or y_sm.size == 0:
+            ok = False
+        else:
+            app.data_fit_power_ref_curve = {"x": np.asarray(x_sm), "y": np.asarray(y_sm)}
 
-        sig = ("__smoothed_corrected__", str(base_sig), round(float(ec1), 18), round(float(ec2), 18))
-        existing = None
-        for entry in getattr(app, "data_fit_curves", []):
-            if entry.get("signature") == sig:
-                existing = entry
-                break
-        if existing is None:
-            color = "#ff9f1a"
-            item = app.data_fit_plot.plot([], [], pen=pg.mkPen(color, width=1.6, style=Qt.DashLine), symbol=None)
-            existing = {
-                "signature": sig,
-                "label": f"{base_label} smoothed+corrected",
-                "color": color,
-                "alpha_pct": 100,
-                "skip_points": 1,
-                "include_in_fit": False,
-                "x": np.asarray([]),
-                "y": np.asarray([]),
-                "t": np.asarray([]),
-                "plot_item": item,
-                "fit_result": result,
-                "curve_style": {"draw_mode": "Lines only", "line_width": 1.6, "point_size": 3},
-                "avg_window": 1,
-                "show_criterion": False,
-                "show_ic": False,
-                "source": {},
-                "is_smoothed_curve": True,
-                "is_step4_reference_curve": True,
-            }
-            app.data_fit_curves.append(existing)
-        existing["x"] = x
-        existing["y"] = y_sm
-        existing["t"] = t
-        existing["label"] = f"{base_label} smoothed+corrected"
-        existing["fit_result"] = result
-        _refresh_curve_item(existing)
-        _refresh_curve_profile_selector(app)
-        ok = True
+            sig = ("__smoothed_corrected__", str(base_sig), round(float(ec1), 18), round(float(ec2), 18))
+            existing = None
+            for entry in getattr(app, "data_fit_curves", []):
+                if entry.get("signature") == sig:
+                    existing = entry
+                    break
+            if existing is None:
+                color = "#ff9f1a"
+                item = app.data_fit_plot.plot([], [], pen=pg.mkPen(color, width=1.6, style=Qt.DashLine), symbol=None)
+                existing = {
+                    "signature": sig,
+                    "label": f"{base_label} smoothed+corrected",
+                    "color": color,
+                    "alpha_pct": 100,
+                    "skip_points": 1,
+                    "include_in_fit": False,
+                    "x": np.asarray([]),
+                    "y": np.asarray([]),
+                    "t": np.asarray([]),
+                    "plot_item": item,
+                    "fit_result": result,
+                    "curve_style": {"draw_mode": "Lines only", "line_width": 1.6, "point_size": 3},
+                    "avg_window": 1,
+                    "show_criterion": False,
+                    "show_ic": False,
+                    "source": {},
+                    "is_smoothed_curve": True,
+                    "is_step4_reference_curve": True,
+                }
+                app.data_fit_curves.append(existing)
+            existing["x"] = x_sm
+            existing["y"] = y_sm
+            existing["t"] = t
+            existing["label"] = f"{base_label} smoothed+corrected"
+            existing["fit_result"] = result
+            _refresh_curve_item(existing)
+            _refresh_curve_profile_selector(app)
+            ok = True
     if not ok:
         QMessageBox.warning(
             app,
