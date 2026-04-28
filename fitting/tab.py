@@ -2622,10 +2622,13 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
     def _window_from_saved_fit() -> Optional[tuple[float, float]]:
         """Best-effort current window [I(Ec1), I(Ec2)] for the active Y channel.
 
+        Do not restore Low/High (X) from TDMS metadata saved by past runs.
+        This keeps the I-window fields clean on file load and only reuses
+        windows computed in the current app session.
+
         Priority:
-        1) Saved metadata for the active Y channel (loaded/replayed files).
-        2) Fresh run-fit cache keyed by curve label.
-        3) Last single-result fallback (only when clearly valid).
+        1) Fresh run-fit cache keyed by curve label.
+        2) Last single-result fallback (only when clearly valid).
         """
         if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
             return None
@@ -2649,13 +2652,6 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
             return lo, hi
 
         if y_name:
-            props = (getattr(controller, "saved_fit_results", {}) or {}).get(y_name)
-            if props:
-                parsed = _fit_result_from_props(props)
-                if getattr(parsed, "fit_method", "") == FIT_METHOD_LOG_LOG:
-                    got = _coerce_window(getattr(parsed, "n_window_I", None))
-                    if got is not None:
-                        return got
             for label, result in reversed(list(getattr(controller, "last_fit_results", []) or [])):
                 if str(label).strip() != y_name:
                     continue
