@@ -53,6 +53,7 @@ from .service import (
     DEFAULT_MAX_ITERATIONS,
     DEFAULT_POWER_LOW_FRAC,
     DEFAULT_POWER_V_FRAC,
+    DEFAULT_SPIKE_CLEANING_ENABLED,
     DEFAULT_VC_VOLTS,
     DEFAULT_ZERO_I_FRAC,
     FIT_METHOD_LOG_LOG,
@@ -257,6 +258,11 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_zero_i_frac", None) is not None
             else ""
         ),
+        "spike_cleaning_enabled": (
+            bool(app.data_fit_spike_cleaning_mode.currentData())
+            if getattr(app, "data_fit_spike_cleaning_mode", None) is not None
+            else DEFAULT_SPIKE_CLEANING_ENABLED
+        ),
         "show_didt": (
             app.data_fit_show_didt.isChecked()
             if getattr(app, "data_fit_show_didt", None) is not None
@@ -352,6 +358,16 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         _set_silently(app.data_fit_power_high_x, str(profile["power_high_x"]))
     if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
         _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
+    if "spike_cleaning_enabled" in profile and getattr(app, "data_fit_spike_cleaning_mode", None) is not None:
+        mode = _profile_bool(profile, "spike_cleaning_enabled", DEFAULT_SPIKE_CLEANING_ENABLED)
+        idx = app.data_fit_spike_cleaning_mode.findData(mode)
+        if idx < 0:
+            idx = 0 if DEFAULT_SPIKE_CLEANING_ENABLED else 1
+        app.data_fit_spike_cleaning_mode.blockSignals(True)
+        try:
+            app.data_fit_spike_cleaning_mode.setCurrentIndex(idx)
+        finally:
+            app.data_fit_spike_cleaning_mode.blockSignals(False)
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         cb = app.data_fit_subtract_vofs_cb
         cb.blockSignals(True)
@@ -611,6 +627,10 @@ def _connect_data_fitting_actions(app):
         app.data_fit_zero_i_frac.editingFinished.connect(
             lambda: _save_active_curve_profile(app)
         )
+    if getattr(app, "data_fit_spike_cleaning_mode", None) is not None:
+        app.data_fit_spike_cleaning_mode.currentIndexChanged.connect(
+            lambda _: _save_active_curve_profile(app)
+        )
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -676,6 +696,8 @@ def _reset_data_fitting_defaults(app) -> None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
         app.data_fit_zero_i_frac.setText(f"{DEFAULT_ZERO_I_FRAC * 100:.2f}")
+    if getattr(app, "data_fit_spike_cleaning_mode", None) is not None:
+        app.data_fit_spike_cleaning_mode.setCurrentIndex(0 if DEFAULT_SPIKE_CLEANING_ENABLED else 1)
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
@@ -1063,6 +1085,16 @@ def setup_data_fitting_tab_layout(app):
         "I = 0 segment. Typical value: 2% (0.02)."
     )
     offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
+    offset_layout.addWidget(QLabel("Pre-fit spike cleaning:"), 3, 0)
+    app.data_fit_spike_cleaning_mode = QComboBox()
+    app.data_fit_spike_cleaning_mode.addItem("Enabled", True)
+    app.data_fit_spike_cleaning_mode.addItem("Disabled", False)
+    app.data_fit_spike_cleaning_mode.setCurrentIndex(0 if DEFAULT_SPIKE_CLEANING_ENABLED else 1)
+    app.data_fit_spike_cleaning_mode.setToolTip(
+        "Enable/disable impulsive-spike cleaning before fitting.\n"
+        "Raw plotted signal is never changed; this only affects fit internals."
+    )
+    offset_layout.addWidget(app.data_fit_spike_cleaning_mode, 3, 1)
     left.addWidget(offset_group)
 
     didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
@@ -1551,6 +1583,11 @@ def _settings_from_inputs(app) -> FitSettings:
             if getattr(app, "data_fit_weight_mode_cb", None) is not None
             else WEIGHT_MODE_EQUAL
         ),
+        spike_cleaning_enabled=bool(
+            app.data_fit_spike_cleaning_mode.currentData()
+            if getattr(app, "data_fit_spike_cleaning_mode", None) is not None
+            else DEFAULT_SPIKE_CLEANING_ENABLED
+        ),
     )
     return settings
 
@@ -1564,6 +1601,15 @@ def _profile_text_float(profile: dict, key: str, fallback: float, as_fraction: b
     except (TypeError, ValueError):
         return fallback
     return v / 100.0 if as_fraction else v
+
+
+def _profile_bool(profile: dict, key: str, fallback: bool) -> bool:
+    raw = profile.get(key, fallback)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on", "enabled")
+    return bool(raw)
 
 
 def _entry_length_settings(app, entry: dict) -> tuple[bool, float]:
@@ -1663,6 +1709,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         subtract_thermal_offset=bool(profile.get("subtract_vofs", True)),
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
         weight_mode=weight_mode,
+        spike_cleaning_enabled=_profile_bool(profile, "spike_cleaning_enabled", DEFAULT_SPIKE_CLEANING_ENABLED),
     )
 
 
@@ -3539,8 +3586,9 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
     n_val = float(getattr(result, "n_value", 0.0))
     # ``np.maximum`` keeps the ratio non-negative so fractional powers
     # behave for the rare cases where x dips below zero on noisy data.
-    ratio = np.maximum(fit_x / Ic, 0.0)
-    fit_y = V0 + R * fit_x + crit * np.power(ratio, n_val)
+    ratio = np.clip(np.maximum(fit_x / Ic, 0.0), 1e-30, None)
+    expo = np.clip(float(n_val) * np.log(ratio), -700.0, 700.0)
+    fit_y = V0 + R * fit_x + crit * np.exp(expo)
     if getattr(result, "thermal_offset_applied", False):
         fit_y = fit_y + float(getattr(result, "V_ofs", 0.0))
     # If the saved fit was per-unit-length but the user is loading without
@@ -4079,9 +4127,9 @@ def _plot_residuals(app, result) -> None:
     if xm.size == 0:
         app.data_fit_resid_plot.setVisible(False)
         return
-    model = result.V0 + result.R * xm + result.criterion * np.power(
-        np.clip(xm / result.Ic, 1e-30, None), result.n_value,
-    )
+    ratio = np.clip(xm / max(float(result.Ic), 1e-30), 1e-30, None)
+    expo = np.clip(float(result.n_value) * np.log(ratio), -700.0, 700.0)
+    model = result.V0 + result.R * xm + result.criterion * np.exp(expo)
     app.data_fit_resid_curve.setData(xm, ym - model)
     app.data_fit_resid_plot.setVisible(True)
 

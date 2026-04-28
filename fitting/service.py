@@ -324,7 +324,9 @@ def fit_linear_baseline(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float) 
 
 def _power_law_model(x, Ic, n, V0, R, Vc):
     """Model with V0, R, Vc fixed — only Ic and n are free."""
-    return V0 + R * x + Vc * np.power(np.clip(x / Ic, 1e-30, None), n)
+    ratio = np.clip(np.asarray(x, dtype=float) / max(float(Ic), 1e-30), 1e-30, None)
+    expo = np.clip(float(n) * np.log(ratio), -700.0, 700.0)
+    return V0 + R * x + Vc * np.exp(expo)
 
 
 def _rolling_median(values: np.ndarray, win: int) -> np.ndarray:
@@ -728,9 +730,9 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
         # Rebuild a smooth model curve for plotting using the user's criterion.
         fit_x = np.linspace(max(x_min, 1e-12), x_max, 400)
-        fit_y = V0 + R * fit_x + crit_for_ic * np.power(
-            np.clip(fit_x / Ic, 1e-30, None), n_value
-        )
+        ratio = np.clip(fit_x / max(float(Ic), 1e-30), 1e-30, None)
+        expo = np.clip(float(n_value) * np.log(ratio), -700.0, 700.0)
+        fit_y = V0 + R * fit_x + crit_for_ic * np.exp(expo)
         # Add the thermal offset back so the model curve aligns with the
         # raw (unshifted) data the user still sees on screen.
         if thermal_applied:
