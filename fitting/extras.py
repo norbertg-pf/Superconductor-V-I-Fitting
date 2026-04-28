@@ -1094,7 +1094,7 @@ class FitPreset:
     # silently and the user must press the Save metadata button to persist.
     autosave_fit_metadata: bool = True
     # When True, the Settings dialog may generate a raw file name from tape
-    # metadata as SupplierID_TapeID_SampleID and push it to the host app.
+    # metadata as SupplierID_TapeID_SampleID_TestInstance and push it to the host app.
     generate_raw_filename_from_metadata: bool = False
 
 

@@ -925,12 +925,12 @@ def setup_data_fitting_tab_layout(app):
         "Greyed out when 'Save fit results to a separate TDMS file' is checked."
     )
     app.data_fit_generate_raw_name_cb = QCheckBox(
-        "Generate Raw Data File Name from tape metadata (SupplierID_TapeID_SampleID)"
+        "Generate Raw Data File Name from tape metadata (SupplierID_TapeID_SampleID_TestInstance)"
     )
     app.data_fit_generate_raw_name_cb.setChecked(False)
     app.data_fit_generate_raw_name_cb.setToolTip(
         "When checked, clicking OK in Settings builds a raw filename from TDMS\n"
-        "metadata fields SupplierID, TapeID and SampleID, then writes it into\n"
+        "metadata fields SupplierID, TapeID, SampleID and TestInstance, then writes it into\n"
         "the host app's Main Control Raw Data File Name textbox (if present)."
     )
 
@@ -4127,8 +4127,9 @@ def _generated_tape_raw_filename(app) -> str:
         supplier_id = _metadata_value(meta, "SupplierID", "Supplier_ID")
         tape_id = _metadata_value(meta, "TapeID", "Tape_ID")
         sample_id = _metadata_value(meta, "SampleID", "Sample_ID")
-        if supplier_id and tape_id and sample_id:
-            return f"{supplier_id}_{tape_id}_{sample_id}"
+        test_instance = _metadata_value(meta, "TestInstance", "Test_Instance")
+        if supplier_id and tape_id and sample_id and test_instance:
+            return f"{supplier_id}_{tape_id}_{sample_id}_{test_instance}"
     return ""
 
 
@@ -4220,7 +4221,7 @@ def _open_settings_dialog(app) -> None:
             _show_warning(
                 app,
                 "Could not generate raw filename: tape metadata "
-                "(SupplierID, TapeID, SampleID) not found.",
+                "(SupplierID, TapeID, SampleID, TestInstance) not found.",
                 severity="warning",
             )
             return
