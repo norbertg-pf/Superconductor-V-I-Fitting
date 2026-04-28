@@ -35,7 +35,7 @@ from .service import (
     run_full_fit,
 )
 
-BASE_VERSION = "v1.0"
+BASE_VERSION = "v1.0rc1"
 # Keep this fallback in sync with repo commit count when shipping artifacts
 # outside a git checkout (e.g., PyInstaller one-file EXE).
 FALLBACK_BUILD_NUMBER = 29
