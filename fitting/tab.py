@@ -3754,11 +3754,12 @@ def run_fit(app):
         x_min = float(np.min(x_arr))
         x_max = float(np.max(x_arr))
         span = max(0.0, x_max - x_min)
-        x_guard_lo = x_min + 0.10 * span
+        idx_guard_lo = int(np.floor(0.20 * x_arr.size))
+        in_guard = np.arange(x_arr.size) >= idx_guard_lo
         ec1 = max(float(entry_settings_obj.ec1), 1.0e-30)
         ec2 = max(float(entry_settings_obj.ec2), ec1 * 1.000001)
-        idx_lo_all = np.where((y_sm >= ec1) & (x_arr >= x_guard_lo))[0]
-        idx_hi_all = np.where(y_sm >= ec2)[0]
+        idx_lo_all = np.where((y_sm >= ec1) & in_guard)[0]
+        idx_hi_all = np.where((y_sm >= ec2) & in_guard)[0]
         x_lo = float(x_arr[idx_lo_all[0]]) if idx_lo_all.size else x_max
         x_hi = float(x_arr[idx_hi_all[0]]) if idx_hi_all.size else x_max
         if not np.isfinite(x_lo):
