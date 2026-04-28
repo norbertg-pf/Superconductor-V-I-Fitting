@@ -1566,9 +1566,11 @@ def _settings_from_inputs(app) -> FitSettings:
         criterion_value = vc_mv * 1.0e-3
 
     method = _active_fit_method(app)
-    # Ec1/Ec2 share the Step 4 Low/High editors when log-log is active.
-    # Absolute units: V/cm when Y has been divided by L_v, V otherwise.
-    to_si = 1.0e-6 if sample_length is not None else 1.0e-3
+    # Ec1/Ec2 editors are always shown in micro-units:
+    #   - µV/cm when sample length is enabled
+    #   - µV otherwise
+    # so both must be converted with 1e-6 to SI.
+    to_si = 1.0e-6
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
     # In log-log mode the user-entered Ec/Vc is the criterion at which Ic is
@@ -1674,7 +1676,9 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         criterion_value = vc_mv * 1.0e-3
 
     if method == FIT_METHOD_LOG_LOG:
-        to_si = 1.0e-6 if sample_length is not None else 1.0e-3
+        # log-log editors are µV/cm (with length) or µV (without length).
+        # Both convert to SI with 1e-6.
+        to_si = 1.0e-6
         ec1_uv = _profile_text_float(
             profile, "loglog_low",
             _profile_text_float(profile, "power_low", DEFAULT_EC1_V_PER_CM * 1.0e6),
@@ -2680,8 +2684,7 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         else:
             x_for_power = x
             y_for_power = y
-        has_length = app.data_fit_use_length_cb.isChecked()
-        to_si = 1.0e-6 if has_length else 1.0e-3
+        to_si = 1.0e-6
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
@@ -2880,8 +2883,7 @@ def _on_band_dragged(app, window: str) -> None:
             y_arr = np.asarray(y, dtype=float)
         if y_arr.size == 0:
             return
-        has_length = app.data_fit_use_length_cb.isChecked()
-        to_si = 1.0e-6 if has_length else 1.0e-3
+        to_si = 1.0e-6
         ec1_guess = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2_guess = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         y_ref = y_arr if (ref_x.size and ref_y.size) else _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
@@ -2889,7 +2891,7 @@ def _on_band_dragged(app, window: str) -> None:
         idx_hi = int(np.argmin(np.abs(x_arr - hi)))
         ec1 = max(float(y_ref[idx_lo]), 1.0e-30)
         ec2 = max(float(y_ref[idx_hi]), ec1 * 1.000001)
-        from_si = 1.0e6 if has_length else 1.0e3
+        from_si = 1.0e6
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
         _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
         _set_silently(app.data_fit_power_low_x, f"{lo:.6g}")
@@ -2996,8 +2998,7 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     order = np.argsort(x_arr)
     x_arr = x_arr[order]
     y_arr = y_arr[order]
-    has_length = app.data_fit_use_length_cb.isChecked()
-    to_si = 1.0e-6 if has_length else 1.0e-3
+    to_si = 1.0e-6
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
     # Ignore the first 10 % of current span for Low(X) crossing pick to avoid
@@ -4577,8 +4578,7 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
     y_corr = y - (float(result.V0) + float(result.R) * x)
-    has_length = app.data_fit_use_length_cb.isChecked()
-    to_si = 1.0e-6 if has_length else 1.0e-3
+    to_si = 1.0e-6
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
     ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
     y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
@@ -4640,8 +4640,7 @@ def _add_smoothed_curve_from_current(app) -> None:
     else:
         result, _parent_entry, base_sig, base_label, x, y, t = resolved
         y_corr = y - (float(result.V0) + float(result.R) * x)
-        has_length = app.data_fit_use_length_cb.isChecked()
-        to_si = 1.0e-6 if has_length else 1.0e-3
+        to_si = 1.0e-6
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
