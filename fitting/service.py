@@ -488,24 +488,21 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                                    float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
 
-    E_sc = y - V0 - R*x is the baseline-subtracted signal. The fit uses
-    only points from the MONOTONIC transition segment: data is sorted by
-    current, the last point where E_sc < Ec2 is taken as the transition
-    onset, and points earlier than that where E_sc < Ec1 bound the low
-    end. This prevents sub-Ic noise excursions with E_sc randomly in
-    [Ec1, Ec2] from contaminating the fit — a typical failure mode when
-    the baseline (V0, R) absorbs a residual thermal/inductive offset.
+    E_sc = y - V0 - R*x is the baseline-subtracted signal. To keep Step-4
+    Low(X)/High(X), the plotted helper curve, and the actual log-log fit
+    fully aligned, point selection for the fit is based on that same
+    corrected+smoothed curve.
 
     The slope of log10(E_sc) vs log10(I) on this segment is the n-index;
     Ic is reported at E = Ec2 (the IEC criterion for HTS at 77 K).
 
     How the I-window is computed for this log-log power-law fit:
       1) Sort by current and compute E_sc = y - (V0 + R*I).
-      2) Build a monotonic transition envelope and find first point reaching Ec2.
-      3) Find the last point below Ec1 before that Ec2 crossing.
-      4) Keep only points between Ec1 and Ec2 on that transition segment.
-      5) Fit log10(E_sc) vs log10(I), and report the I-window from the same
-         smoothed-threshold crossing rule used by the Step-4 UI:
+      2) Build E_sc_smooth with adaptive_smooth_for_ec_window(...).
+      3) Ignore the first 20 % of current span (ramp-start guard).
+      4) Keep points where E_sc_smooth is inside [Ec1, Ec2].
+      5) Fit log10(E_sc_smooth) vs log10(I).
+      6) Report I-window from the same threshold crossings used by Step-4 UI:
          first I where E_sc_smooth >= Ec1 and first I where E_sc_smooth >= Ec2.
 
     Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi),
@@ -526,43 +523,37 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     xs = xs[pos]
     e_sc = e_sc[pos]
     e_sc_bounds = adaptive_smooth_for_ec_window(e_sc, Ec1, Ec2)
-    # Monotonic envelope of the (optionally smoothed) trace for robust Ec2 pick.
-    e_sc_mono = np.maximum.accumulate(e_sc_bounds)
-    # Transition onset: first index where the monotonic envelope reaches Ec2.
-    # We then require points used in the fit to lie at or after the last
-    # sub-Ec1 point before this onset — i.e. inside the transition rise.
-    above_Ec2 = np.where(e_sc_mono >= Ec2)[0]
+    x_guard_lo = float(np.min(xs)) + 0.20 * (float(np.max(xs)) - float(np.min(xs)))
+    in_guard = xs >= x_guard_lo
+    above_Ec2 = np.where((e_sc_bounds >= Ec2) & in_guard)[0]
     if above_Ec2.size == 0:
         raise ValueError(
-            f"Data never reaches Ec2 = {Ec2:.3g} after baseline subtraction; "
+            f"Data never reaches Ec2 = {Ec2:.3g} on the corrected+smoothed curve; "
             "ramp further or lower Ec2."
         )
-    idx_Ec2 = int(above_Ec2[0])
-    # Lower edge: use raw E_sc so Ec1 is not shifted upward by smoothing.
-    # This keeps I(Ec1) closer to the physical decade boundary on clean ramps.
-    below_Ec1_before = np.where(e_sc[:idx_Ec2] < Ec1)[0]
-    idx_lo = int(below_Ec1_before[-1] + 1) if below_Ec1_before.size else 0
-    seg = slice(idx_lo, idx_Ec2 + 1)
-    e_sc_seg = e_sc[seg]
-    e_sc_mono_seg = e_sc_mono[seg]
-    x_seg = xs[seg]
-    mask = (e_sc_seg >= Ec1) & (e_sc_seg <= Ec2) & np.isfinite(e_sc_seg)
+    mask = (
+        (e_sc_bounds >= Ec1)
+        & (e_sc_bounds <= Ec2)
+        & in_guard
+        & np.isfinite(e_sc_bounds)
+        & np.isfinite(xs)
+    )
     n_pts = int(np.count_nonzero(mask))
     if n_pts < 4:
         raise ValueError(
             f"Only {n_pts} points fall inside the IEC n-value window "
-            f"[{Ec1:.3g}, {Ec2:.3g}] on the monotonic transition. "
+            f"[{Ec1:.3g}, {Ec2:.3g}] on the corrected+smoothed curve. "
             "Slow the ramp, reduce averaging, or widen the decade."
         )
-    log_I = np.log10(x_seg[mask])
-    e_fit = np.clip(e_sc_seg[mask], 1e-30, None)
+    log_I = np.log10(xs[mask])
+    e_fit = np.clip(e_sc_bounds[mask], 1e-30, None)
     log_E = np.log10(e_fit)
     w = np.ones_like(log_E, dtype=float)
     if point_sigma is not None and weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
         sig_all = np.asarray(point_sigma, dtype=float)
         sig_all = sig_all[:x.size]
         sig_sorted = sig_all[order][pos]
-        sig_seg = np.clip(sig_sorted[seg][mask], 1e-12, None)
+        sig_seg = np.clip(sig_sorted[mask], 1e-12, None)
         sigma_log = np.clip(sig_seg / (e_fit * np.log(10.0)), 1e-12, None)
         w = 1.0 / (sigma_log ** 2)
 
@@ -612,11 +603,10 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     sigma_n = float(sigma_slope)
     # Report I-window with the same rule used by Step-4 Low(X)/High(X):
     # first threshold crossings on the corrected+smoothed reference trace.
-    # Ignore first 10 % of current span when picking Ec1 crossing for the
-    # reported Low(X)/I_lo window edge (ramp-start region is often noisy).
-    x_guard_lo = float(np.min(xs)) + 0.10 * (float(np.max(xs)) - float(np.min(xs)))
-    idx_lo_all = np.where((e_sc_bounds >= Ec1) & (xs >= x_guard_lo))[0]
-    idx_hi_all = np.where(e_sc_bounds >= Ec2)[0]
+    # Ignore first 20 % of current span when picking Ec1/Ec2 crossings for the
+    # reported Low(X)/High(X) window edges (ramp-start region is often noisy).
+    idx_lo_all = np.where((e_sc_bounds >= Ec1) & in_guard)[0]
+    idx_hi_all = np.where((e_sc_bounds >= Ec2) & in_guard)[0]
     I_lo = float(xs[idx_lo_all[0]]) if idx_lo_all.size else float(xs[-1])
     I_hi = float(xs[idx_hi_all[0]]) if idx_hi_all.size else float(xs[-1])
     if I_hi <= I_lo:
