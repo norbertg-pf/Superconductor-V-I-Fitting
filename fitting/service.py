@@ -612,11 +612,11 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     sigma_n = float(sigma_slope)
     # Report I-window with the same rule used by Step-4 Low(X)/High(X):
     # first threshold crossings on the corrected+smoothed reference trace.
-    # Ignore first 10 % of current span when picking Ec1 crossing for the
-    # reported Low(X)/I_lo window edge (ramp-start region is often noisy).
-    x_guard_lo = float(np.min(xs)) + 0.10 * (float(np.max(xs)) - float(np.min(xs)))
+    # Ignore first 20 % of current span when picking Ec1/Ec2 crossings for the
+    # reported Low(X)/High(X) window edges (ramp-start region is often noisy).
+    x_guard_lo = float(np.min(xs)) + 0.20 * (float(np.max(xs)) - float(np.min(xs)))
     idx_lo_all = np.where((e_sc_bounds >= Ec1) & (xs >= x_guard_lo))[0]
-    idx_hi_all = np.where(e_sc_bounds >= Ec2)[0]
+    idx_hi_all = np.where((e_sc_bounds >= Ec2) & (xs >= x_guard_lo))[0]
     I_lo = float(xs[idx_lo_all[0]]) if idx_lo_all.size else float(xs[-1])
     I_hi = float(xs[idx_hi_all[0]]) if idx_hi_all.size else float(xs[-1])
     if I_hi <= I_lo:
