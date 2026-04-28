@@ -924,6 +924,15 @@ def setup_data_fitting_tab_layout(app):
         "settings should coexist without overwriting each other.\n"
         "Greyed out when 'Save fit results to a separate TDMS file' is checked."
     )
+    app.data_fit_generate_raw_name_cb = QCheckBox(
+        "Generate Raw Data File Name from tape metadata (SupplierID_TapeID_SampleID_TestInstance)"
+    )
+    app.data_fit_generate_raw_name_cb.setChecked(False)
+    app.data_fit_generate_raw_name_cb.setToolTip(
+        "When checked, clicking OK in Settings builds a raw filename from TDMS\n"
+        "metadata fields SupplierID, TapeID, SampleID and TestInstance, then writes it into\n"
+        "the host app's Main Control Raw Data File Name textbox (if present)."
+    )
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
     ch_grid = QGridLayout(app.data_fit_channels_group)
@@ -4098,6 +4107,52 @@ def _open_export_dialog(app) -> None:
     dialog.exec_()
 
 
+def _metadata_value(meta: dict, *keys: str) -> str:
+    if not meta:
+        return ""
+    lookup = {str(k).strip().lower(): v for k, v in meta.items()}
+    for key in keys:
+        value = lookup.get(key.lower())
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _generated_tape_raw_filename(app) -> str:
+    controller = getattr(app, "data_fit_controller", None)
+    for meta in (getattr(controller, "channel_metadata", {}) or {}).values():
+        supplier_id = _metadata_value(meta, "SupplierID", "Supplier_ID")
+        tape_id = _metadata_value(meta, "TapeID", "Tape_ID")
+        sample_id = _metadata_value(meta, "SampleID", "Sample_ID")
+        test_instance = _metadata_value(meta, "TestInstance", "Test_Instance")
+        if supplier_id and tape_id and sample_id and test_instance:
+            return f"{supplier_id}_{tape_id}_{sample_id}_{test_instance}"
+    return ""
+
+
+def _push_raw_filename_to_host(app, raw_name: str) -> bool:
+    if not raw_name:
+        return False
+    target_widgets = (
+        "raw_data_file_name_tb",
+        "raw_data_file_name_textbox",
+        "raw_data_file_name_input",
+        "main_raw_data_file_name_tb",
+        "main_raw_data_file_name_input",
+    )
+    for attr in target_widgets:
+        widget = getattr(app, attr, None)
+        if widget is None:
+            continue
+        if hasattr(widget, "setText"):
+            widget.setText(raw_name)
+            return True
+    return False
+
+
 def _refresh_save_settings_enabled(app) -> None:
     """Apply the dependency rules between the four metadata-saving checkboxes.
 
@@ -4146,6 +4201,7 @@ def _open_settings_dialog(app) -> None:
     save_layout.addWidget(app.data_fit_autosave_cb)
     save_layout.addWidget(app.data_fit_save_separate_cb)
     save_layout.addWidget(app.data_fit_same_group_cb)
+    save_layout.addWidget(app.data_fit_generate_raw_name_cb)
     root.addWidget(save_group)
 
     # Re-evaluate dependency rules every time the dialog opens, in case the
@@ -4154,12 +4210,28 @@ def _open_settings_dialog(app) -> None:
 
     button_row = QHBoxLayout()
     button_row.addStretch(1)
-    close_btn = QPushButton("Close")
-    close_btn.clicked.connect(dialog.accept)
-    button_row.addWidget(close_btn)
+    ok_btn = QPushButton("OK")
+    ok_btn.clicked.connect(dialog.accept)
+    button_row.addWidget(ok_btn)
     root.addLayout(button_row)
 
-    dialog.exec_()
+    if dialog.exec_() == dialog.Accepted and app.data_fit_generate_raw_name_cb.isChecked():
+        generated = _generated_tape_raw_filename(app)
+        if not generated:
+            _show_warning(
+                app,
+                "Could not generate raw filename: tape metadata "
+                "(SupplierID, TapeID, SampleID, TestInstance) not found.",
+                severity="warning",
+            )
+            return
+        if not _push_raw_filename_to_host(app, generated):
+            _show_warning(
+                app,
+                f"Generated raw filename '{generated}', but no Main Control Raw Data "
+                "File Name textbox was found on the host app.",
+                severity="warning",
+            )
 
 
 def _save_metadata_clicked(app) -> None:
@@ -5072,6 +5144,9 @@ def _settings_to_preset(app) -> FitPreset:
     autosave = bool(
         _safe_checkbox_checked(app, "data_fit_autosave_cb", default=True)
     )
+    generate_raw_name = bool(
+        _safe_checkbox_checked(app, "data_fit_generate_raw_name_cb", default=False)
+    )
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
         didt_high=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100),
@@ -5094,6 +5169,7 @@ def _settings_to_preset(app) -> FitPreset:
         save_fit_in_same_group=same_group,
         auto_load_after_acquisition=auto_load,
         autosave_fit_metadata=autosave,
+        generate_raw_filename_from_metadata=generate_raw_name,
     )
 
 
@@ -5137,6 +5213,10 @@ def _apply_preset(app, preset: FitPreset) -> None:
     if hasattr(app, "data_fit_autosave_cb"):
         app.data_fit_autosave_cb.setChecked(
             bool(getattr(preset, "autosave_fit_metadata", True))
+        )
+    if hasattr(app, "data_fit_generate_raw_name_cb"):
+        app.data_fit_generate_raw_name_cb.setChecked(
+            bool(getattr(preset, "generate_raw_filename_from_metadata", False))
         )
     # The four save-settings checkboxes drive each other's enabled state;
     # re-evaluate after every preset apply so the UI reflects the new values.
