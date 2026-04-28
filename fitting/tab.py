@@ -3235,6 +3235,13 @@ def _format_result(result) -> str:
     if r_squared != 0.0:
         lines.append(f"R²            = {r_squared:.6f}")
     lines.append(f"chi-squared   = {result.chi_sqr:.3g}")
+    spike_count = int(getattr(result, "spike_reject_count", 0))
+    spike_ranges = getattr(result, "spike_reject_ranges", []) or []
+    spike_mode = "interpolated for fit" if getattr(result, "spike_interpolated_for_fit", False) else "flagged only"
+    lines.append(f"spike points  = {spike_count} ({spike_mode})")
+    if spike_ranges:
+        ranges_txt = ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in spike_ranges)
+        lines.append(f"spike ranges  = [{ranges_txt}]")
     ratio = getattr(result, "ramp_inductive_ratio", 0.0)
     lines.append(
         f"|L·dI/dt| / (Ec·L_v) = {ratio:.4f}"
@@ -3273,6 +3280,8 @@ _FIT_PROPERTY_KEYS = (
     "thermal_offset_applied", "uses_sample_length",
     "fit_method",
     "weighting_mode",
+    "spike_reject_count", "spike_reject_indices", "spike_reject_ranges",
+    "spike_interpolated_for_fit",
 )
 
 
@@ -3328,11 +3337,17 @@ def _fit_result_properties(result) -> dict:
         "thermal_offset_applied": bool(getattr(result, "thermal_offset_applied", False)),
         "uses_sample_length": bool(getattr(result, "uses_sample_length", False)),
         "weighting_mode": str(getattr(result, "weighting_mode", WEIGHT_MODE_EQUAL)),
+        "spike_reject_count": int(getattr(result, "spike_reject_count", 0)),
+        "spike_reject_indices": ",".join(str(int(i)) for i in (getattr(result, "spike_reject_indices", []) or [])),
+        "spike_reject_ranges": ",".join(
+            f"{int(a)}-{int(b)}" for a, b in (getattr(result, "spike_reject_ranges", []) or [])
+        ),
+        "spike_interpolated_for_fit": bool(getattr(result, "spike_interpolated_for_fit", False)),
     }
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
     for k in ("ramp_too_fast", "insufficient_n_points",
-              "thermal_offset_applied", "uses_sample_length"):
+              "thermal_offset_applied", "uses_sample_length", "spike_interpolated_for_fit"):
         props[k] = "True" if props[k] else "False"
     return props
 
@@ -3387,6 +3402,56 @@ def _prop_lookup(props: dict, *names, default=None):
     return default
 
 
+
+
+def _parse_int_list(text) -> list[int]:
+    if text is None:
+        return []
+    s = str(text).strip()
+    if not s:
+        return []
+    out: list[int] = []
+    for part in s.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(float(part)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _parse_ranges(text) -> list[tuple[int, int]]:
+    if text is None:
+        return []
+    s = str(text).strip()
+    if not s:
+        return []
+    out: list[tuple[int, int]] = []
+    for part in s.split(','):
+        token = part.strip()
+        if not token:
+            continue
+        if '-' in token:
+            a, b = token.split('-', 1)
+            try:
+                lo = int(float(a.strip()))
+                hi = int(float(b.strip()))
+            except (TypeError, ValueError):
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            out.append((lo, hi))
+        else:
+            try:
+                v = int(float(token))
+            except (TypeError, ValueError):
+                continue
+            out.append((v, v))
+    return out
+
+
 def _fit_result_from_props(props: dict):
     """Best-effort reconstruction of a FitResult from saved TDMS metadata.
 
@@ -3437,6 +3502,10 @@ def _fit_result_from_props(props: dict):
         insufficient_n_points=_coerce_bool(_prop_lookup(props, "insufficient_n_points")),
         thermal_offset_applied=_coerce_bool(_prop_lookup(props, "thermal_offset_applied")),
         weighting_mode=str(_prop_lookup(props, "weighting_mode", default=WEIGHT_MODE_EQUAL) or WEIGHT_MODE_EQUAL),
+        spike_reject_count=int(_coerce_float(_prop_lookup(props, "spike_reject_count"), 0.0)),
+        spike_reject_indices=_parse_int_list(_prop_lookup(props, "spike_reject_indices")),
+        spike_reject_ranges=_parse_ranges(_prop_lookup(props, "spike_reject_ranges")),
+        spike_interpolated_for_fit=_coerce_bool(_prop_lookup(props, "spike_interpolated_for_fit")),
     )
 
 
