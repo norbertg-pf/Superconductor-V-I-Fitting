@@ -32,6 +32,8 @@ DEFAULT_ZERO_I_FRAC = 0.02      # 2 %
 # Post-fit warning thresholds.
 RAMP_INDUCTIVE_WARN_RATIO = 0.10   # |L·dI/dt| / (Ec·L_v) above this → quasi-static assumption violated
 MIN_N_WINDOW_POINTS = 50           # IEC decade fit becomes noisy with too few samples
+MIN_N_WINDOW_SPAN_FRAC_WARN = 0.05
+MIN_N_WINDOW_SPAN_FRAC_REJECT = 0.015
 
 # Fit method identifiers.
 FIT_METHOD_LOG_LOG = "log_log"          # linear fit of log10(E_sc) vs log10(I), IEC 61788
@@ -107,6 +109,11 @@ class FitResult:
     ramp_inductive_ratio: float = 0.0
     ramp_too_fast: bool = False
     insufficient_n_points: bool = False
+    narrow_n_window: bool = False
+    baseline_has_transition: bool = False
+    confidence_score: float = 0.0
+    confidence_notes: list[str] = field(default_factory=list)
+    suggested_windows: dict[str, tuple[float, float]] = field(default_factory=dict)
     thermal_offset_applied: bool = False
     weighting_mode: str = DEFAULT_WEIGHT_MODE
 
@@ -557,6 +564,146 @@ def _ramp_ratio(V0: float, criterion: float) -> float:
     return float(abs(V0) / abs(criterion))
 
 
+def propose_window_adjustments(x: np.ndarray, y: np.ndarray, settings: FitSettings) -> dict[str, tuple[float, float]]:
+    """Propose safer window ranges (fractions of current span) for UI auto-adjust."""
+    x, y = _clean_arrays(x, y)
+    if x.size < 8:
+        return {}
+    order = np.argsort(x)
+    xs = x[order]
+    ys = y[order]
+    # np.gradient needs strictly increasing x spacing; collapse duplicate-x
+    # samples to a median y so auto-adjust stays stable on plateaued ramps.
+    unique_x, inv = np.unique(xs, return_inverse=True)
+    if unique_x.size < 8:
+        return {}
+    y_accum = np.zeros(unique_x.size, dtype=float)
+    for i in range(unique_x.size):
+        y_accum[i] = float(np.median(ys[inv == i]))
+    xs = unique_x
+    ys = adaptive_smooth_for_ec_window(
+        y_accum,
+        max(settings.ec1, 1e-30),
+        max(settings.ec2, settings.ec1 * 1.000001),
+    )
+    x_min = float(xs[0])
+    x_max = float(xs[-1])
+    span = max(1e-12, x_max - x_min)
+    dy = np.gradient(ys, xs, edge_order=1) if xs.size >= 3 else np.asarray([], dtype=float)
+    if dy.size:
+        low_band = dy[:max(5, int(0.20 * dy.size))]
+        base_slope = float(np.median(low_band))
+        onset_idx = np.where(dy > max(base_slope * 2.5, base_slope + np.std(low_band) * 4.0))[0]
+        x_onset = float(xs[int(onset_idx[0])]) if onset_idx.size else x_min + 0.35 * span
+    else:
+        x_onset = x_min + 0.35 * span
+    lin_lo = x_min + 0.03 * span
+    lin_hi = min(x_min + 0.30 * span, x_onset - 0.03 * span)
+    if lin_hi <= lin_lo:
+        lin_hi = lin_lo + 0.12 * span
+
+    out = {
+        "linear": (float((lin_lo - x_min) / span), float((lin_hi - x_min) / span)),
+    }
+    if getattr(settings, "fit_method", DEFAULT_FIT_METHOD) == FIT_METHOD_LOG_LOG:
+        e_sc = ys - float(np.median(ys[:max(3, int(0.03 * ys.size))]))
+        e_sc = np.maximum(e_sc, 1e-30)
+        idx1 = np.where(e_sc >= max(settings.ec1, 1e-30))[0]
+        idx2 = np.where(e_sc >= max(settings.ec2, settings.ec1 * 1.000001))[0]
+        if idx1.size and idx2.size:
+            p_lo = float((xs[int(idx1[0])] - x_min) / span)
+            p_hi = float((xs[int(idx2[0])] - x_min) / span)
+        else:
+            p_lo, p_hi = 0.45, 0.75
+        if (p_hi - p_lo) < 0.08:
+            c = 0.5 * (p_lo + p_hi)
+            p_lo = max(0.05, c - 0.05)
+            p_hi = min(0.98, c + 0.05)
+        out["power"] = (p_lo, p_hi)
+    else:
+        out["power"] = (0.35, 0.88)
+    out["didt"] = (0.35, 0.65)
+    return out
+
+
+def rate_selected_windows(
+    x: np.ndarray,
+    y: np.ndarray,
+    settings: FitSettings,
+    *,
+    V0: float,
+    R: float,
+    n_window: tuple[float, float],
+    n_points_used: int,
+    r_squared: float,
+) -> tuple[float, list[str], bool, bool, dict[str, tuple[float, float]]]:
+    """Score selected windows (0..100) and detect risky conditions."""
+    x, y = _clean_arrays(x, y)
+    if x.size < 8:
+        return 0.0, ["Too few samples for confidence scoring."], False, False, {}
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    span = max(1e-12, x_max - x_min)
+    lin_lo = x_min + settings.linear_low_frac * span
+    lin_hi = x_min + settings.linear_high_frac * span
+    lin_mask = (x >= lin_lo) & (x <= lin_hi)
+    baseline_transition = False
+    notes: list[str] = []
+    score = 100.0
+
+    if np.count_nonzero(lin_mask) >= 8:
+        xl = x[lin_mask]
+        yl = y[lin_mask]
+        ord_l = np.argsort(xl)
+        xl = xl[ord_l]
+        yl = yl[ord_l]
+        lin_fit = np.poly1d(np.polyfit(xl, yl, 1))
+        quad_fit = np.poly1d(np.polyfit(xl, yl, 2))
+        ss_lin = float(np.sum((yl - lin_fit(xl)) ** 2))
+        ss_quad = float(np.sum((yl - quad_fit(xl)) ** 2))
+        improve = (ss_lin - ss_quad) / max(ss_lin, 1e-30)
+        dy = np.diff(adaptive_smooth_for_ec_window(yl, max(settings.ec1, 1e-30), max(settings.ec2, settings.ec1 * 1.000001)))
+        mono = float(np.mean(dy >= -np.std(dy) * 0.5)) if dy.size else 1.0
+        if improve > 0.35 and mono > 0.85:
+            baseline_transition = True
+            score -= 40.0
+            notes.append("Baseline window looks curved/transition-like; move it lower in current.")
+        elif improve > 0.20:
+            score -= 18.0
+            notes.append("Baseline window may already include transition onset.")
+        score -= max(0.0, (0.90 - mono) * 30.0)
+        snr = abs(float(np.polyfit(xl, yl, 1)[0]) * (lin_hi - lin_lo)) / max(np.std(yl - lin_fit(xl)), 1e-12)
+        if snr < 3.0:
+            score -= 15.0
+            notes.append("Baseline SNR is low; confidence reduced.")
+    else:
+        score -= 25.0
+        notes.append("Baseline window has too few points.")
+
+    n_lo, n_hi = float(n_window[0]), float(n_window[1])
+    n_span_frac = max(0.0, n_hi - n_lo) / span if np.isfinite(n_lo) and np.isfinite(n_hi) else 0.0
+    narrow_n_window = n_span_frac < MIN_N_WINDOW_SPAN_FRAC_WARN
+    if n_span_frac < MIN_N_WINDOW_SPAN_FRAC_REJECT:
+        score -= 35.0
+        notes.append("n-window is extremely narrow in current span.")
+    elif narrow_n_window:
+        score -= 20.0
+        notes.append("n-window is narrow in current span; slope may be unstable.")
+    if n_points_used < MIN_N_WINDOW_POINTS:
+        score -= 15.0
+        notes.append("Too few points inside n-window.")
+    elif n_points_used > 5 * MIN_N_WINDOW_POINTS and narrow_n_window:
+        score -= 10.0
+        notes.append("Many points but compressed in a narrow current interval.")
+    if np.isfinite(r_squared) and r_squared < 0.995:
+        score -= min(25.0, (0.995 - r_squared) * 4000.0)
+        notes.append("Residual behavior indicates non-ideal fit in selected window.")
+
+    suggestions = propose_window_adjustments(x, y, settings) if score < 70.0 else {}
+    score = float(np.clip(score, 0.0, 100.0))
+    return score, notes, baseline_transition, narrow_n_window, suggestions
+
+
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                  settings: Optional[FitSettings] = None) -> FitResult:
     """Step 1 V_ofs, Step 2 di/dt, Step 3 baseline → V0, R, L, Step 4 Ic/n.
@@ -607,6 +754,25 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         V0, R = fit_linear_baseline(x, y, lin_lo, lin_hi)
     except ValueError as exc:
         return FitResult(ok=False, message=f"Linear baseline fit failed: {exc}")
+    # Reject obviously bad baseline windows that already include transition.
+    lin_mask = (x >= lin_lo) & (x <= lin_hi)
+    if np.count_nonzero(lin_mask) >= 8:
+        xl = np.sort(x[lin_mask])
+        yl = y[lin_mask][np.argsort(x[lin_mask])]
+        lin_fit = np.poly1d(np.polyfit(xl, yl, 1))
+        quad_fit = np.poly1d(np.polyfit(xl, yl, 2))
+        ss_lin = float(np.sum((yl - lin_fit(xl)) ** 2))
+        ss_quad = float(np.sum((yl - quad_fit(xl)) ** 2))
+        curvature_improvement = (ss_lin - ss_quad) / max(ss_lin, 1e-30)
+        if curvature_improvement > 0.45:
+            return FitResult(
+                ok=False,
+                message=(
+                    "Baseline window likely includes transition behavior; "
+                    "move Step-3 window to lower current or use Auto-adjust windows."
+                ),
+                baseline_has_transition=True,
+            )
 
     # V0 is in Y-units. With sample-length normalisation, Y is in V/cm, so
     # the full inductive voltage is V0 * L_v and L = (V0 * L_v) / di_dt.
@@ -644,6 +810,10 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         if thermal_applied:
             fit_y = fit_y + V_ofs
         ratio = _ramp_ratio(V0, crit_for_ic)
+        (confidence, notes, baseline_flag, narrow_flag, suggestions) = rate_selected_windows(
+            x, y, settings, V0=V0, R=R, n_window=n_window,
+            n_points_used=n_pts, r_squared=r_squared,
+        )
         return FitResult(
             ok=True,
             message="IEC 61788 log-log n-value fit succeeded.",
@@ -674,6 +844,11 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             ramp_inductive_ratio=ratio,
             ramp_too_fast=ratio > RAMP_INDUCTIVE_WARN_RATIO,
             insufficient_n_points=n_pts < MIN_N_WINDOW_POINTS,
+            narrow_n_window=narrow_flag,
+            baseline_has_transition=baseline_flag,
+            confidence_score=confidence,
+            confidence_notes=notes,
+            suggested_windows=suggestions,
             thermal_offset_applied=thermal_applied,
             weighting_mode=weight_mode,
         )
@@ -724,6 +899,11 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         fit_y = fit_y + V_ofs
 
     ratio = _ramp_ratio(V0, Vc)
+    n_count = int(np.count_nonzero((x >= power_lo) & (x <= power_hi)))
+    (confidence, notes, baseline_flag, narrow_flag, suggestions) = rate_selected_windows(
+        x, y, settings, V0=V0, R=R, n_window=(power_lo, power_hi),
+        n_points_used=n_count, r_squared=r_squared,
+    )
 
     return FitResult(
         ok=True,
@@ -755,6 +935,11 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         ramp_inductive_ratio=ratio,
         ramp_too_fast=ratio > RAMP_INDUCTIVE_WARN_RATIO,
         insufficient_n_points=False,
+        narrow_n_window=narrow_flag,
+        baseline_has_transition=baseline_flag,
+        confidence_score=confidence,
+        confidence_notes=notes,
+        suggested_windows=suggestions,
         thermal_offset_applied=thermal_applied,
         weighting_mode=weight_mode,
     )
