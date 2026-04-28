@@ -174,25 +174,40 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     if sigma_hf <= target_sigma:
         return arr
 
+    def _moving_average_reflect(src: np.ndarray, window: int) -> np.ndarray:
+        """Moving average with reflect padding to avoid edge distortion."""
+        if window <= 1:
+            return src
+        half = window // 2
+        padded = np.pad(src, (half, half), mode="reflect")
+        kernel = np.ones(window, dtype=float) / float(window)
+        return np.convolve(padded, kernel, mode="valid")
+
     # Moving-average approximation: sigma_out ≈ sigma_in / sqrt(N).
     win = int(np.ceil((sigma_hf / max(target_sigma, 1e-30)) ** 2))
-    win = max(3, min(win, 2001))
+    # Keep helper curves stable/physical on any dataset:
+    # - never let the smoother consume too much of the trace length
+    # - avoid very large windows that can flatten genuine transitions
+    n = int(arr.size)
+    max_win_by_len = max(7, n // 8)
+    if max_win_by_len % 2 == 0:
+        max_win_by_len -= 1
+    max_win = min(401, max_win_by_len if max_win_by_len >= 3 else 3)
+    win = max(3, min(win, max_win))
     if win % 2 == 0:
         win += 1
-    kernel = np.ones(win, dtype=float) / float(win)
-    sm = np.convolve(arr, kernel, mode="same")
+    sm = _moving_average_reflect(arr, win)
 
     # Optional second pass if still above target noise.
     diffs_sm = np.diff(sm)
     if diffs_sm.size >= 5:
         mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
         sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
-        if sigma_sm > target_sigma and win < 2001:
-            win2 = min(2001, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
+        if sigma_sm > target_sigma and win < max_win:
+            win2 = min(max_win, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
             if win2 % 2 == 0:
                 win2 += 1
-            kernel2 = np.ones(win2, dtype=float) / float(win2)
-            sm = np.convolve(arr, kernel2, mode="same")
+            sm = _moving_average_reflect(arr, win2)
     return sm
 
 
