@@ -2563,9 +2563,9 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
                 if got is not None:
                     return got
 
-        last_result = getattr(controller, "last_result", None)
-        if getattr(last_result, "fit_method", "") == FIT_METHOD_LOG_LOG:
-            return _coerce_window(getattr(last_result, "n_window_I", None))
+        # Do not fall back to controller.last_result here. It may belong to a
+        # different curve and can pre-fill Step-4 X values with stale data right
+        # after loading a new channel/curve.
         return None
 
     ec1 = ec2 = None
@@ -2586,19 +2586,21 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
         ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         exact_window = None if bool(getattr(app, "data_fit_power_window_manual", False)) else _window_from_saved_fit()
         if exact_window is not None:
-            band_pairs.append((app.data_fit_band_power, exact_window))
-            _set_silently(app.data_fit_power_low_x, f"{exact_window[0]:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{exact_window[1]:.6g}")
+            pow_lo, pow_hi = exact_window
         else:
-            # Pre-fit fallback: cheap raw crossing estimate.
-            if y_for_power is not None and y_for_power.size:
+            # Pre-fit fallback: raw crossing estimate from the active/reference curve.
+            if y_for_power is None or not y_for_power.size:
+                pow_lo, pow_hi = x_min, x_max
+            else:
                 above_1 = np.where(y_for_power >= ec1)[0]
                 above_2 = np.where(y_for_power >= ec2)[0]
                 pow_lo = float(x_for_power[above_1[0]]) if above_1.size else x_max
                 pow_hi = float(x_for_power[above_2[0]]) if above_2.size else x_max
                 if pow_hi <= pow_lo:
                     pow_hi = pow_lo + max(1e-12, 0.01 * span)
-                band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+        band_pairs.append((app.data_fit_band_power, (pow_lo, pow_hi)))
+        _set_silently(app.data_fit_power_low_x, f"{pow_lo:.6g}")
+        _set_silently(app.data_fit_power_high_x, f"{pow_hi:.6g}")
     else:
         pow_lo = from_pct(app.data_fit_power_low, DEFAULT_POWER_LOW_FRAC)
         v_f = _float_from(
