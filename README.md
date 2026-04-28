@@ -154,6 +154,9 @@ the chosen fit method as JSON. **Per-curve profiles** remember each
 curve's individual windows. **Export…** writes a publication-quality
 PNG/PDF and the `*_fit_report.tdms` side-car.
 
+Default baseline mode is **Huber robust** (good outlier rejection with
+stable behavior on noisy ramps).
+
 ---
 
 ## Metadata fields stored in `*_fit_report.tdms`

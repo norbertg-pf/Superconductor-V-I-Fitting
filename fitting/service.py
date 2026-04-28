@@ -48,7 +48,9 @@ DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
 BASELINE_MODE_OLS = "ols"
 BASELINE_MODE_HUBER = "huber"
 BASELINE_MODE_THEIL_SEN = "theil_sen"
-DEFAULT_BASELINE_MODE = BASELINE_MODE_OLS
+# Default to Huber: robust against outliers while remaining smooth/stable
+# for high-rate DAQ traces.
+DEFAULT_BASELINE_MODE = BASELINE_MODE_HUBER
 
 
 @dataclass

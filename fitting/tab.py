@@ -695,7 +695,8 @@ def _reset_data_fitting_defaults(app) -> None:
     if getattr(app, "data_fit_weight_mode_cb", None) is not None:
         app.data_fit_weight_mode_cb.setCurrentIndex(0)
     if getattr(app, "data_fit_baseline_mode_cb", None) is not None:
-        app.data_fit_baseline_mode_cb.setCurrentIndex(0)
+        idx_default_baseline = app.data_fit_baseline_mode_cb.findData(DEFAULT_BASELINE_MODE)
+        app.data_fit_baseline_mode_cb.setCurrentIndex(max(0, idx_default_baseline))
     if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
@@ -1118,7 +1119,8 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_baseline_mode_cb.addItem("OLS (legacy)", BASELINE_MODE_OLS)
     app.data_fit_baseline_mode_cb.addItem("Huber robust", BASELINE_MODE_HUBER)
     app.data_fit_baseline_mode_cb.addItem("Theil-Sen robust", BASELINE_MODE_THEIL_SEN)
-    app.data_fit_baseline_mode_cb.setCurrentIndex(0)
+    idx_default_baseline = app.data_fit_baseline_mode_cb.findData(DEFAULT_BASELINE_MODE)
+    app.data_fit_baseline_mode_cb.setCurrentIndex(max(0, idx_default_baseline))
     # Keep compact so it does not collide with Low(X)/High(X) widgets.
     app.data_fit_baseline_mode_cb.setMaximumWidth(145)
     app.data_fit_baseline_mode_cb.setToolTip(
