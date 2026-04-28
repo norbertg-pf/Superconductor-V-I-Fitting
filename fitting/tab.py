@@ -57,6 +57,9 @@ from .service import (
     DEFAULT_ZERO_I_FRAC,
     FIT_METHOD_LOG_LOG,
     FIT_METHOD_NONLINEAR,
+    WEIGHT_MODE_EQUAL,
+    WEIGHT_MODE_ROBUST,
+    WEIGHT_MODE_WEIGHTED,
     FitSettings,
     MIN_N_WINDOW_POINTS,
     RAMP_INDUCTIVE_WARN_RATIO,
@@ -239,6 +242,11 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
         "ic_tol": app.data_fit_ic_tol.text(),
         "chi_tol": app.data_fit_chi_tol.text(),
         "vc": app.data_fit_vc_input.text(),
+        "weight_mode": (
+            app.data_fit_weight_mode_cb.currentData()
+            if getattr(app, "data_fit_weight_mode_cb", None) is not None
+            else WEIGHT_MODE_EQUAL
+        ),
         "subtract_vofs": (
             app.data_fit_subtract_vofs_cb.isChecked()
             if getattr(app, "data_fit_subtract_vofs_cb", None) is not None
@@ -319,6 +327,15 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
     ):
         if key in profile:
             _set_silently(widget, str(profile[key]))
+    if "weight_mode" in profile and getattr(app, "data_fit_weight_mode_cb", None) is not None:
+        idx = app.data_fit_weight_mode_cb.findData(profile["weight_mode"])
+        if idx < 0:
+            idx = 0
+        app.data_fit_weight_mode_cb.blockSignals(True)
+        try:
+            app.data_fit_weight_mode_cb.setCurrentIndex(idx)
+        finally:
+            app.data_fit_weight_mode_cb.blockSignals(False)
     if method == FIT_METHOD_LOG_LOG:
         low_key, high_key = "loglog_low", "loglog_high"
     else:
@@ -571,6 +588,8 @@ def _connect_data_fitting_actions(app):
             widget.currentIndexChanged.connect(lambda _: _on_transform_inputs_changed(app))
     for w in (app.data_fit_max_iter, app.data_fit_ic_tol, app.data_fit_chi_tol, app.data_fit_vc_input):
         w.editingFinished.connect(lambda: _save_active_curve_profile(app))
+    if getattr(app, "data_fit_weight_mode_cb", None) is not None:
+        app.data_fit_weight_mode_cb.currentIndexChanged.connect(lambda _: _save_active_curve_profile(app))
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
@@ -651,6 +670,8 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_use_length_cb.setChecked(True)
     app.data_fit_length_input.setText("1.0")
     app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
+    if getattr(app, "data_fit_weight_mode_cb", None) is not None:
+        app.data_fit_weight_mode_cb.setCurrentIndex(0)
     if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
@@ -1106,6 +1127,19 @@ def setup_data_fitting_tab_layout(app):
         app.data_fit_method_nonlinear_rb.setChecked(True)
     power_layout.addWidget(app.data_fit_method_loglog_rb, 0, 0, 1, 3)
     power_layout.addWidget(app.data_fit_method_nonlinear_rb, 1, 0, 1, 3)
+    app.data_fit_weight_mode_cb = QComboBox()
+    app.data_fit_weight_mode_cb.addItem("Equal", WEIGHT_MODE_EQUAL)
+    app.data_fit_weight_mode_cb.addItem("Weighted", WEIGHT_MODE_WEIGHTED)
+    app.data_fit_weight_mode_cb.addItem("Robust", WEIGHT_MODE_ROBUST)
+    app.data_fit_weight_mode_cb.setCurrentIndex(0)
+    app.data_fit_weight_mode_cb.setToolTip(
+        "Step-4 point weighting mode.\n"
+        "Equal: all points same weight (legacy behavior).\n"
+        "Weighted: auto-estimate per-point noise and weight by 1/sigma².\n"
+        "Robust: weighted + Huber reweighting to suppress outliers."
+    )
+    power_layout.addWidget(QLabel("Point weighting:"), 2, 0, 1, 1)
+    power_layout.addWidget(app.data_fit_weight_mode_cb, 2, 1, 1, 2)
 
     # Toggle between linear/linear and log/log axes. Text tracks current mode.
     app.data_fit_plot_scale_btn = QPushButton("Switch to log-log plot")
@@ -1127,8 +1161,8 @@ def setup_data_fitting_tab_layout(app):
         "The Show/edit Step-4 window uses this corrected+smoothed curve,\n"
         "even if it is hidden from the graph."
     )
-    power_layout.addWidget(app.data_fit_add_smoothed_btn, 5, 0, 1, 2)
-    power_layout.addWidget(app.data_fit_add_corrected_btn, 5, 2, 1, 2)
+    power_layout.addWidget(app.data_fit_add_smoothed_btn, 6, 0, 1, 2)
+    power_layout.addWidget(app.data_fit_add_corrected_btn, 6, 2, 1, 2)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
@@ -1148,15 +1182,15 @@ def setup_data_fitting_tab_layout(app):
         power_layout, app.data_fit_show_power,
         low_label="Ec1 (µV/cm)", low_pct=app.data_fit_power_low, low_x=app.data_fit_power_low_x,
         high_label="Ec2 (µV/cm)", high_pct=app.data_fit_power_vfrac, high_x=app.data_fit_power_high_x,
-        base_row=2,
+        base_row=3,
     )
     # Keep references to the text labels so the method-mode handler can
     # swap them when the user switches between IEC and non-linear modes.
     # (row 3 holds the Low/High value labels; row 4 holds the X-value row.)
-    app.data_fit_power_low_label = power_layout.itemAtPosition(3, 0).widget()
-    app.data_fit_power_high_label = power_layout.itemAtPosition(3, 2).widget()
-    app.data_fit_power_low_x_label = power_layout.itemAtPosition(4, 0).widget()
-    app.data_fit_power_high_x_label = power_layout.itemAtPosition(4, 2).widget()
+    app.data_fit_power_low_label = power_layout.itemAtPosition(4, 0).widget()
+    app.data_fit_power_high_label = power_layout.itemAtPosition(4, 2).widget()
+    app.data_fit_power_low_x_label = power_layout.itemAtPosition(5, 0).widget()
+    app.data_fit_power_high_x_label = power_layout.itemAtPosition(5, 2).widget()
     left.addWidget(power_group)
 
     app.data_fit_window_inputs = {
@@ -1512,6 +1546,11 @@ def _settings_from_inputs(app) -> FitSettings:
             DEFAULT_ZERO_I_FRAC * 100,
             as_fraction=True,
         ),
+        weight_mode=(
+            app.data_fit_weight_mode_cb.currentData()
+            if getattr(app, "data_fit_weight_mode_cb", None) is not None
+            else WEIGHT_MODE_EQUAL
+        ),
     )
     return settings
 
@@ -1565,6 +1604,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
     """
     sample_length = float(length_cm) if use_length and length_cm and length_cm > 0 else None
     method = profile.get("fit_method", DEFAULT_FIT_METHOD)
+    weight_mode = profile.get("weight_mode", WEIGHT_MODE_EQUAL)
 
     if sample_length is not None:
         # vc input is Ec in µV/cm → convert to V/cm.
@@ -1622,6 +1662,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         ec2=ec2,
         subtract_thermal_offset=bool(profile.get("subtract_vofs", True)),
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
+        weight_mode=weight_mode,
     )
 
 
@@ -3161,7 +3202,14 @@ def _format_result(result) -> str:
     v_unit = "V/cm" if result.uses_sample_length else "V"
     is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
     method_label = "Log E vs log I (IEC 61788)" if is_loglog else "Non-linear V-I"
+    weight_mode = str(getattr(result, "weighting_mode", WEIGHT_MODE_EQUAL) or WEIGHT_MODE_EQUAL)
+    weight_label = {
+        WEIGHT_MODE_EQUAL: "Equal",
+        WEIGHT_MODE_WEIGHTED: "Weighted",
+        WEIGHT_MODE_ROBUST: "Robust",
+    }.get(weight_mode, weight_mode)
     lines.append(f"method        = {method_label}")
+    lines.append(f"weighting     = {weight_label}")
     lines.append(f"di/dt         = {_format_engineering(result.di_dt, 'A/s', 2)}")
     # Split the constant baseline into its three physical contributions:
     # V_ofs (thermal) + L·dI/dt (inductive) + R·I (resistive).
@@ -3224,6 +3272,7 @@ _FIT_PROPERTY_KEYS = (
     "ramp_inductive_ratio", "ramp_too_fast", "insufficient_n_points",
     "thermal_offset_applied", "uses_sample_length",
     "fit_method",
+    "weighting_mode",
 )
 
 
@@ -3278,6 +3327,7 @@ def _fit_result_properties(result) -> dict:
         "insufficient_n_points": bool(getattr(result, "insufficient_n_points", False)),
         "thermal_offset_applied": bool(getattr(result, "thermal_offset_applied", False)),
         "uses_sample_length": bool(getattr(result, "uses_sample_length", False)),
+        "weighting_mode": str(getattr(result, "weighting_mode", WEIGHT_MODE_EQUAL)),
     }
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
@@ -3386,6 +3436,7 @@ def _fit_result_from_props(props: dict):
         ramp_too_fast=_coerce_bool(_prop_lookup(props, "ramp_too_fast")),
         insufficient_n_points=_coerce_bool(_prop_lookup(props, "insufficient_n_points")),
         thermal_offset_applied=_coerce_bool(_prop_lookup(props, "thermal_offset_applied")),
+        weighting_mode=str(_prop_lookup(props, "weighting_mode", default=WEIGHT_MODE_EQUAL) or WEIGHT_MODE_EQUAL),
     )
 
 
