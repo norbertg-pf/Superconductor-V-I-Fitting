@@ -38,6 +38,12 @@ FIT_METHOD_LOG_LOG = "log_log"          # linear fit of log10(E_sc) vs log10(I),
 FIT_METHOD_NONLINEAR = "nonlinear"       # coupled non-linear V = V0 + R*I + Vc*(I/Ic)^n
 DEFAULT_FIT_METHOD = FIT_METHOD_LOG_LOG
 
+# Point-weighting modes for Step-4 fitting.
+WEIGHT_MODE_EQUAL = "equal"
+WEIGHT_MODE_WEIGHTED = "weighted"
+WEIGHT_MODE_ROBUST = "robust"
+DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
+
 
 @dataclass
 class FitSettings:
@@ -61,6 +67,7 @@ class FitSettings:
     # Step 1 — thermal offset subtraction.
     subtract_thermal_offset: bool = True
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
+    weight_mode: str = DEFAULT_WEIGHT_MODE
 
 
 @dataclass
@@ -101,6 +108,7 @@ class FitResult:
     ramp_too_fast: bool = False
     insufficient_n_points: bool = False
     thermal_offset_applied: bool = False
+    weighting_mode: str = DEFAULT_WEIGHT_MODE
 
 
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
@@ -236,11 +244,85 @@ def _power_law_model(x, Ic, n, V0, R, Vc):
     return V0 + R * x + Vc * np.power(np.clip(x / Ic, 1e-30, None), n)
 
 
+def _rolling_median(values: np.ndarray, win: int) -> np.ndarray:
+    """Small helper for robust local trend estimation without SciPy filters."""
+    n = int(values.size)
+    if n == 0:
+        return values.copy()
+    if win <= 1:
+        return values.copy()
+    if win % 2 == 0:
+        win += 1
+    half = win // 2
+    out = np.empty_like(values, dtype=float)
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        out[i] = float(np.median(values[lo:hi]))
+    return out
+
+
+def estimate_point_noise(x: np.ndarray, signal: np.ndarray,
+                         zero_i_frac: float = DEFAULT_ZERO_I_FRAC) -> np.ndarray:
+    """Estimate per-point sigma using local residuals + pre-ramp baseline.
+
+    - Local term: rolling-median residual MAD.
+    - Baseline floor: sigma from low-current (pre-ramp) segment.
+    """
+    x, signal = _clean_arrays(x, signal)
+    n = signal.size
+    if n == 0:
+        return np.asarray([], dtype=float)
+    if n < 5:
+        return np.full(n, max(float(np.std(signal)), 1e-12), dtype=float)
+
+    x_span = max(1e-30, float(np.max(x) - np.min(x)))
+    win = max(7, int(np.ceil(0.03 * n)))
+    if win % 2 == 0:
+        win += 1
+    trend = _rolling_median(signal, win)
+    resid = signal - trend
+    local_sigma = np.empty(n, dtype=float)
+    half = win // 2
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        r = resid[lo:hi]
+        mad = float(np.median(np.abs(r - np.median(r))))
+        local_sigma[i] = max(1e-12, 1.4826 * mad)
+
+    # Pre-ramp baseline floor from low-current points.
+    x_abs_max = float(np.max(np.abs(x)))
+    thr = max(0.0, zero_i_frac) * x_abs_max
+    base_mask = np.abs(x) <= thr
+    if np.count_nonzero(base_mask) >= 4:
+        base = signal[base_mask]
+        base_mad = float(np.median(np.abs(base - np.median(base))))
+        baseline_sigma = max(1e-12, 1.4826 * base_mad)
+    else:
+        baseline_sigma = max(1e-12, float(np.percentile(local_sigma, 25)))
+
+    # Relax baseline floor slightly at high current where dynamic noise grows.
+    xr = (x - float(np.min(x))) / x_span
+    floor = baseline_sigma * (1.0 + 0.5 * np.clip(xr, 0.0, 1.0))
+    return np.maximum(local_sigma, floor)
+
+
+def _huber_weights(residuals: np.ndarray, c: float = 1.345) -> np.ndarray:
+    a = np.abs(residuals)
+    w = np.ones_like(a, dtype=float)
+    mask = a > c
+    w[mask] = c / np.maximum(a[mask], 1e-12)
+    return w
+
+
 def fit_power_law(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float,
                   V0: float, R: float, Vc: float,
                   initial_Ic: Optional[float] = None,
                   initial_n: float = 20.0,
-                  chi_sqr_tol: float = DEFAULT_CHI_SQR_TOL
+                  chi_sqr_tol: float = DEFAULT_CHI_SQR_TOL,
+                  point_sigma: Optional[np.ndarray] = None,
+                  weight_mode: str = DEFAULT_WEIGHT_MODE,
                   ) -> tuple[float, float, float, float, float, float]:
     """Fit Ic, n in y = V0 + R*x + Vc*(x/Ic)^n on [x_lo, x_hi] with V0, R, Vc fixed.
 
@@ -264,10 +346,36 @@ def fit_power_law(x: np.ndarray, y: np.ndarray, x_lo: float, x_hi: float,
     def model(x_, Ic_, n_):
         return _power_law_model(x_, Ic_, n_, V0, R, Vc)
 
-    popt, pcov = curve_fit(
-        model, xm, ym, p0=p0, bounds=bounds, maxfev=10000,
-        ftol=chi_sqr_tol, xtol=chi_sqr_tol, gtol=chi_sqr_tol,
-    )
+    sigma_fit = None
+    if point_sigma is not None:
+        sig_all = np.asarray(point_sigma, dtype=float)
+        sig_all = sig_all[:x.size]
+        sig_m = sig_all[mask]
+        if sig_m.size == xm.size:
+            sigma_fit = np.clip(sig_m, 1e-12, None)
+    robust_mode = (weight_mode == WEIGHT_MODE_ROBUST)
+    # In robust mode run an IRLS loop by inflating sigma for outliers.
+    robust_w = np.ones_like(xm, dtype=float)
+    for _ in range(5 if robust_mode else 1):
+        sigma_eff = None
+        if sigma_fit is not None:
+            sigma_eff = sigma_fit / np.sqrt(np.clip(robust_w, 1e-6, None))
+        popt, pcov = curve_fit(
+            model, xm, ym, p0=p0, bounds=bounds, maxfev=10000,
+            sigma=sigma_eff, absolute_sigma=False,
+            ftol=chi_sqr_tol, xtol=chi_sqr_tol, gtol=chi_sqr_tol,
+        )
+        p0 = [float(popt[0]), float(popt[1])]
+        if not robust_mode:
+            break
+        pred = model(xm, p0[0], p0[1])
+        resid = ym - pred
+        if sigma_fit is not None:
+            resid = resid / np.clip(sigma_fit, 1e-12, None)
+        scale = 1.4826 * np.median(np.abs(resid - np.median(resid)))
+        if scale <= 1e-12:
+            break
+        robust_w = _huber_weights(resid / scale)
     Ic = float(popt[0])
     n_val = float(popt[1])
     model_y = model(xm, Ic, n_val)
@@ -294,6 +402,8 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         V0: float, R: float,
                         Ec1: float, Ec2: float,
                         criterion_E: Optional[float] = None,
+                        point_sigma: Optional[np.ndarray] = None,
+                        weight_mode: str = DEFAULT_WEIGHT_MODE,
                         ) -> tuple[float, float, float, int, tuple[float, float],
                                    float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
@@ -365,18 +475,36 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             "Slow the ramp, reduce averaging, or widen the decade."
         )
     log_I = np.log10(x_seg[mask])
-    log_E = np.log10(e_sc_seg[mask])
-    # polyfit with cov=True scales the covariance by the residual variance,
-    # giving the standard 1σ parameter uncertainties reported by most tools.
-    try:
-        coeffs, cov = np.polyfit(log_I, log_E, 1, cov=True)
+    e_fit = np.clip(e_sc_seg[mask], 1e-30, None)
+    log_E = np.log10(e_fit)
+    w = np.ones_like(log_E, dtype=float)
+    if point_sigma is not None and weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
+        sig_all = np.asarray(point_sigma, dtype=float)
+        sig_all = sig_all[:x.size]
+        sig_sorted = sig_all[order][pos]
+        sig_seg = np.clip(sig_sorted[seg][mask], 1e-12, None)
+        sigma_log = np.clip(sig_seg / (e_fit * np.log(10.0)), 1e-12, None)
+        w = 1.0 / (sigma_log ** 2)
+
+    robust_mode = (weight_mode == WEIGHT_MODE_ROBUST)
+    coeffs = np.polyfit(log_I, log_E, 1, w=np.sqrt(w))
+    for _ in range(5 if robust_mode else 1):
         slope, intercept = float(coeffs[0]), float(coeffs[1])
+        if not robust_mode:
+            break
+        res = log_E - (intercept + slope * log_I)
+        scale = 1.4826 * np.median(np.abs(res - np.median(res)))
+        if scale <= 1e-12:
+            break
+        w_rob = _huber_weights(res / scale)
+        coeffs = np.polyfit(log_I, log_E, 1, w=np.sqrt(w * w_rob))
+    slope, intercept = float(coeffs[0]), float(coeffs[1])
+    try:
+        _, cov = np.polyfit(log_I, log_E, 1, w=np.sqrt(w), cov=True)
         sigma_slope = float(np.sqrt(max(0.0, cov[0, 0])))
         sigma_intercept = float(np.sqrt(max(0.0, cov[1, 1])))
         cov_slope_intercept = float(cov[0, 1])
     except (ValueError, np.linalg.LinAlgError):
-        # Too few points for covariance; fall back to a plain fit.
-        slope, intercept = (float(c) for c in np.polyfit(log_I, log_E, 1))
         sigma_slope = sigma_intercept = cov_slope_intercept = 0.0
     n_val = slope
     if abs(n_val) < 1e-12:
@@ -486,6 +614,10 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     inductance_L = v0_voltage / di_dt if abs(di_dt) > 1e-30 else 0.0
 
     method = getattr(settings, "fit_method", DEFAULT_FIT_METHOD)
+    weight_mode = getattr(settings, "weight_mode", DEFAULT_WEIGHT_MODE)
+    point_sigma = None
+    if weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
+        point_sigma = estimate_point_noise(x, y - V0 - R * x, settings.zero_i_frac)
 
     if method == FIT_METHOD_LOG_LOG:
         # Use the user-entered Ec/Vc as the criterion for Ic if provided;
@@ -497,6 +629,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
              sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
                 criterion_E=crit_for_ic,
+                point_sigma=point_sigma,
+                weight_mode=weight_mode,
             )
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
             return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
@@ -541,6 +675,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             ramp_too_fast=ratio > RAMP_INDUCTIVE_WARN_RATIO,
             insufficient_n_points=n_pts < MIN_N_WINDOW_POINTS,
             thermal_offset_applied=thermal_applied,
+            weighting_mode=weight_mode,
         )
 
     y_max = float(np.max(y))
@@ -566,6 +701,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                 V0=V0, R=R, Vc=Vc,
                 initial_Ic=last_Ic,
                 chi_sqr_tol=settings.chi_sqr_tolerance,
+                point_sigma=point_sigma,
+                weight_mode=weight_mode,
             )
         except (ValueError, RuntimeError) as exc:
             return FitResult(ok=False, message=f"Power-law fit failed: {exc}")
@@ -619,4 +756,5 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         ramp_too_fast=ratio > RAMP_INDUCTIVE_WARN_RATIO,
         insufficient_n_points=False,
         thermal_offset_applied=thermal_applied,
+        weighting_mode=weight_mode,
     )
