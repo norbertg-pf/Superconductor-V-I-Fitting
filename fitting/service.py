@@ -157,7 +157,20 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
 
     ec1_abs = max(abs(float(ec1)), 1e-30)
     # Keep this target aligned with the Step-4 UI guidance curve behavior.
-    target_sigma = 0.005 * ec1_abs
+    #
+    # In IEC log-log mode, Ec1 can be very small (for example when using
+    # µV/cm units). If we only scale by Ec1, target_sigma becomes so tiny that
+    # the computed window can become unrealistically large and the helper curve
+    # looks distorted. Anchor the target to a tiny fraction of the measured
+    # signal span as well, so smoothing remains physically meaningful.
+    finite = arr[np.isfinite(arr)]
+    if finite.size:
+        lo = float(np.percentile(finite, 5.0))
+        hi = float(np.percentile(finite, 95.0))
+        span = max(0.0, hi - lo)
+    else:
+        span = 0.0
+    target_sigma = max(0.005 * ec1_abs, 1e-4 * span)
     if sigma_hf <= target_sigma:
         return arr
 
