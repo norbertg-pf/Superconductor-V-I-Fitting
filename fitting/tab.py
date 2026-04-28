@@ -13,6 +13,7 @@ import traceback
 from functools import partial
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
@@ -59,8 +60,11 @@ from .service import (
     DEFAULT_POWER_V_FRAC,
     DEFAULT_VC_VOLTS,
     DEFAULT_ZERO_I_FRAC,
+    estimate_di_dt,
+    estimate_thermal_offset,
     FIT_METHOD_LOG_LOG,
     FIT_METHOD_NONLINEAR,
+    fit_linear_baseline,
     WEIGHT_MODE_EQUAL,
     WEIGHT_MODE_ROBUST,
     WEIGHT_MODE_WEIGHTED,
@@ -4357,14 +4361,13 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 
 def _add_corrected_curve_from_last_fit(app) -> None:
-    """Add Y_corrected = Y - (V0 + R*I) using the most relevant successful fit."""
-    _ensure_fit_for_reference(app, force_recompute=True)
-    resolved = _resolve_fit_parent_and_result(app)
+    """Add Y_corrected = Y - (V0 + R*I) using Step-1/2/3 values."""
+    resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Could not build corrected curve because no successful fit is available.",
+            "Could not build corrected curve from Step-1/2/3 values.",
         )
         return
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
@@ -4475,6 +4478,111 @@ def _ensure_fit_for_reference(app, *, force_recompute: bool = False) -> bool:
     return _resolve_fit_parent_and_result(app) is not None
 
 
+def _resolve_reference_curve_data(app):
+    """Return (entry, base_sig, base_label, x, y, t) for helper-curve building."""
+    active_key = _curve_profile_key_from_ui(app)
+    for entry in getattr(app, "data_fit_curves", []):
+        if bool(entry.get("is_fit_result", False)):
+            continue
+        if str(entry.get("signature")) != str(active_key):
+            continue
+        x = np.asarray(entry.get("x", []), dtype=float)
+        y = np.asarray(entry.get("y", []), dtype=float)
+        t = np.asarray(entry.get("t", []), dtype=float)
+        n = int(min(x.size, y.size))
+        if n <= 0:
+            continue
+        return (
+            entry,
+            entry.get("signature", entry.get("label", "curve")),
+            entry.get("label", "Curve"),
+            x[:n],
+            y[:n],
+            (t[:n] if t.size else np.asarray([])),
+        )
+
+    transformed = _apply_transforms(app)
+    x = np.asarray(transformed.get("x", []), dtype=float)
+    y = np.asarray(transformed.get("y", []), dtype=float)
+    t = np.asarray(transformed.get("time", []), dtype=float)
+    n = int(min(x.size, y.size))
+    if n <= 0:
+        return None
+    return (
+        None,
+        ("__preview__", app.data_fit_y_cb.currentText()),
+        app.data_fit_y_cb.currentText() or "Preview",
+        x[:n],
+        y[:n],
+        (t[:n] if t.size else np.asarray([])),
+    )
+
+
+def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, settings: FitSettings):
+    """Compute Step-1/2/3 only, without running Step-4 fit."""
+    t_arr = np.asarray(t, dtype=float).ravel()
+    x_arr = np.asarray(x, dtype=float).ravel()
+    y_arr = np.asarray(y, dtype=float).ravel()
+    n = int(min(t_arr.size, x_arr.size, y_arr.size))
+    if n < 8:
+        raise ValueError("Not enough valid samples to fit.")
+    t_arr = t_arr[:n]
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    valid = np.isfinite(t_arr) & np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not np.any(valid):
+        raise ValueError("No finite points after cleaning.")
+    t_arr = t_arr[valid]
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
+    if x_arr.size < 8:
+        raise ValueError("Not enough valid samples to fit.")
+    x_min = float(np.min(x_arr))
+    x_max = float(np.max(x_arr))
+    if x_max <= x_min:
+        raise ValueError("Current range is empty or degenerate.")
+
+    V_ofs = 0.0
+    if getattr(settings, "subtract_thermal_offset", True):
+        V_ofs, n_zero = estimate_thermal_offset(x_arr, y_arr, settings.zero_i_frac)
+        if n_zero > 0:
+            y_arr = y_arr - V_ofs
+        else:
+            V_ofs = 0.0
+    di_dt = estimate_di_dt(t_arr, x_arr, settings.didt_low_frac, settings.didt_high_frac)
+    lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
+    lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
+    baseline_mode = str(getattr(settings, "baseline_mode", DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE)
+    V0, R = fit_linear_baseline(x_arr, y_arr, lin_lo, lin_hi, mode=baseline_mode)
+    uses_length = settings.sample_length_cm is not None and settings.sample_length_cm > 0
+    return SimpleNamespace(
+        ok=True,
+        message="Step-1/2/3 succeeded.",
+        V0=float(V0),
+        R=float(R),
+        V_ofs=float(V_ofs),
+        di_dt=float(di_dt),
+        uses_sample_length=bool(uses_length),
+    )
+
+
+def _resolve_or_compute_step123_reference(app):
+    """Resolve helper-curve source and compute Step-1/2/3 if needed."""
+    fit_resolved = _resolve_fit_parent_and_result(app)
+    if fit_resolved is not None:
+        return fit_resolved
+    curve_data = _resolve_reference_curve_data(app)
+    if curve_data is None:
+        return None
+    entry, base_sig, base_label, x, y, t = curve_data
+    try:
+        settings = _settings_for_entry(app, entry) if entry is not None else _settings_from_inputs(app)
+        result = _compute_step123_result(t, x, y, settings)
+    except Exception:
+        return None
+    return result, entry, base_sig, base_label, x, y, t
+
+
 def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit: bool) -> bool:
     """Build corrected+smoothed Step-4 reference from latest successful fit."""
     resolved = _resolve_fit_parent_and_result(app)
@@ -4543,13 +4651,62 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 def _add_smoothed_curve_from_current(app) -> None:
     """Create corrected+smoothed Step-4 reference curve and plot a copy."""
-    _ensure_fit_for_reference(app, force_recompute=True)
-    ok = _ensure_step4_reference_curve(app, create_plot_entry=True, auto_run_fit=False)
+    resolved = _resolve_or_compute_step123_reference(app)
+    if resolved is None:
+        ok = False
+    else:
+        result, _parent_entry, base_sig, base_label, x, y, t = resolved
+        y_corr = y - (float(result.V0) + float(result.R) * x)
+        has_length = app.data_fit_use_length_cb.isChecked()
+        to_si = 1.0e-6 if has_length else 1.0e-3
+        ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+        ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+        y_sm = _adaptive_smooth_visual(y_corr, ec1, ec2)
+        app.data_fit_power_ref_curve = {"x": np.asarray(x), "y": np.asarray(y_sm)}
+
+        sig = ("__smoothed_corrected__", str(base_sig), round(float(ec1), 18), round(float(ec2), 18))
+        existing = None
+        for entry in getattr(app, "data_fit_curves", []):
+            if entry.get("signature") == sig:
+                existing = entry
+                break
+        if existing is None:
+            color = "#ff9f1a"
+            item = app.data_fit_plot.plot([], [], pen=pg.mkPen(color, width=1.6, style=Qt.DashLine), symbol=None)
+            existing = {
+                "signature": sig,
+                "label": f"{base_label} smoothed+corrected",
+                "color": color,
+                "alpha_pct": 100,
+                "skip_points": 1,
+                "include_in_fit": False,
+                "x": np.asarray([]),
+                "y": np.asarray([]),
+                "t": np.asarray([]),
+                "plot_item": item,
+                "fit_result": result,
+                "curve_style": {"draw_mode": "Lines only", "line_width": 1.6, "point_size": 3},
+                "avg_window": 1,
+                "show_criterion": False,
+                "show_ic": False,
+                "source": {},
+                "is_smoothed_curve": True,
+                "is_step4_reference_curve": True,
+            }
+            app.data_fit_curves.append(existing)
+        existing["x"] = x
+        existing["y"] = y_sm
+        existing["t"] = t
+        existing["label"] = f"{base_label} smoothed+corrected"
+        existing["fit_result"] = result
+        _refresh_curve_item(existing)
+        _refresh_curve_profile_selector(app)
+        ok = True
     if not ok:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Could not build smoothed+corrected curve because no successful fit is available.",
+            "Could not build smoothed+corrected curve from Step-1/2/3 values.",
         )
 
 
