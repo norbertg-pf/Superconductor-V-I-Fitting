@@ -499,7 +499,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     How the I-window is computed for this log-log power-law fit:
       1) Sort by current and compute E_sc = y - (V0 + R*I).
       2) Build E_sc_smooth with adaptive_smooth_for_ec_window(...).
-      3) Ignore the first 20 % of points (ramp-start guard).
+      3) Ignore the first 20 % of current span (ramp-start guard).
       4) Keep points where E_sc_smooth is inside [Ec1, Ec2].
       5) Fit log10(E_sc_smooth) vs log10(I).
       6) Report I-window from the same threshold crossings used by Step-4 UI:
@@ -523,8 +523,8 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     xs = xs[pos]
     e_sc = e_sc[pos]
     e_sc_bounds = adaptive_smooth_for_ec_window(e_sc, Ec1, Ec2)
-    idx_guard_lo = int(np.floor(0.20 * xs.size))
-    in_guard = np.arange(xs.size) >= idx_guard_lo
+    x_guard_lo = float(np.min(xs)) + 0.20 * (float(np.max(xs)) - float(np.min(xs)))
+    in_guard = xs >= x_guard_lo
     above_Ec2 = np.where((e_sc_bounds >= Ec2) & in_guard)[0]
     if above_Ec2.size == 0:
         raise ValueError(
@@ -603,7 +603,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     sigma_n = float(sigma_slope)
     # Report I-window with the same rule used by Step-4 Low(X)/High(X):
     # first threshold crossings on the corrected+smoothed reference trace.
-    # Ignore first 20 % of points when picking Ec1/Ec2 crossings for the
+    # Ignore first 20 % of current span when picking Ec1/Ec2 crossings for the
     # reported Low(X)/High(X) window edges (ramp-start region is often noisy).
     idx_lo_all = np.where((e_sc_bounds >= Ec1) & in_guard)[0]
     idx_hi_all = np.where((e_sc_bounds >= Ec2) & in_guard)[0]

@@ -3000,11 +3000,10 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
-    # Ignore the first 20 % of points in the corrected+smoothed curve when
-    # picking both Low(X) and High(X) crossings (index-based guard).
-    # Example: 1000 points -> first 200 are excluded from crossing picks.
-    idx_guard_lo = int(np.floor(0.20 * n))
-    in_guard = np.arange(n) >= idx_guard_lo
+    # Ignore the first 20 % of current span in the corrected+smoothed curve
+    # when picking both Low(X) and High(X) crossings.
+    x_guard_lo = float(np.min(x_arr)) + 0.20 * (float(np.max(x_arr)) - float(np.min(x_arr)))
+    in_guard = x_arr >= x_guard_lo
     idx_lo_all = np.where((y_arr >= ec1) & in_guard)[0]
     idx_hi_all = np.where((y_arr >= ec2) & in_guard)[0]
     x_min = float(np.min(x_arr))
@@ -3754,8 +3753,8 @@ def run_fit(app):
         x_min = float(np.min(x_arr))
         x_max = float(np.max(x_arr))
         span = max(0.0, x_max - x_min)
-        idx_guard_lo = int(np.floor(0.20 * x_arr.size))
-        in_guard = np.arange(x_arr.size) >= idx_guard_lo
+        x_guard_lo = x_min + 0.20 * span
+        in_guard = x_arr >= x_guard_lo
         ec1 = max(float(entry_settings_obj.ec1), 1.0e-30)
         ec2 = max(float(entry_settings_obj.ec2), ec1 * 1.000001)
         idx_lo_all = np.where((y_sm >= ec1) & in_guard)[0]
