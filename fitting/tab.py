@@ -65,6 +65,7 @@ from .service import (
     RAMP_INDUCTIVE_WARN_RATIO,
     robust_view_range,
     run_full_fit,
+    propose_window_adjustments,
 )
 from .extras import (
     ExportPlotDialog,
@@ -568,6 +569,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_load_btn.clicked.connect(app.data_fitting_open_file)
     app.data_fit_refresh_btn.clicked.connect(app.data_fitting_refresh_current)
     app.data_fit_run_btn.clicked.connect(app.data_fitting_run)
+    app.data_fit_auto_adjust_btn.clicked.connect(lambda: _auto_adjust_windows(app))
     app.data_fit_load_metadata_btn.clicked.connect(app.data_fitting_load_metadata)
     app.data_fit_robust_view_btn.clicked.connect(app.data_fitting_robust_view)
     app.data_fit_reset_view_btn.clicked.connect(app.data_fitting_reset_view)
@@ -1232,6 +1234,14 @@ def setup_data_fitting_tab_layout(app):
     run_row = QHBoxLayout()
     app.data_fit_run_btn = QPushButton("Run Fit")
     app.data_fit_run_btn.setStyleSheet("font-weight: bold; background-color: #0078D7; color: white; padding: 8px;")
+    app.data_fit_auto_adjust_btn = QPushButton("Auto-adjust windows")
+    app.data_fit_auto_adjust_btn.setToolTip(
+        "Analyze current data and propose safer dI/dt, baseline, and Step-4 windows.\n"
+        "Useful when confidence score is low."
+    )
+    app.data_fit_auto_adjust_btn.setStyleSheet(
+        "font-weight: bold; background-color: #eef7ff; color: #003a75; padding: 8px;"
+    )
     app.data_fit_save_metadata_btn = QPushButton("Save metadata")
     app.data_fit_save_metadata_btn.setToolTip(
         "Manually save the most recent fit parameters into the loaded TDMS file.\n"
@@ -1244,8 +1254,8 @@ def setup_data_fitting_tab_layout(app):
         "font-weight: bold; background-color: #f1f4f8; color: #003a75; padding: 8px;"
     )
     app.data_fit_save_metadata_btn.setEnabled(False)
-    # Stretch ratios make Run Fit three times as wide as Save metadata.
-    run_row.addWidget(app.data_fit_run_btn, stretch=3)
+    run_row.addWidget(app.data_fit_run_btn, stretch=2)
+    run_row.addWidget(app.data_fit_auto_adjust_btn, stretch=2)
     run_row.addWidget(app.data_fit_save_metadata_btn, stretch=1)
     left.addLayout(run_row)
 
@@ -1564,6 +1574,57 @@ def _profile_text_float(profile: dict, key: str, fallback: float, as_fraction: b
     except (TypeError, ValueError):
         return fallback
     return v / 100.0 if as_fraction else v
+
+
+def _auto_adjust_windows(app) -> None:
+    transformed = _apply_transforms(app)
+    x = transformed.get("x")
+    y = transformed.get("y")
+    if x is None or y is None or x.size < 8:
+        QMessageBox.warning(app, "Data Fitting", "Need a loaded X/Y curve before auto-adjust.")
+        return
+    settings = _settings_from_inputs(app)
+    proposals = propose_window_adjustments(x, y, settings)
+    if not proposals:
+        _show_warning(app, "Auto-adjust could not propose windows for this data.", severity="warning")
+        return
+
+    def _apply_frac_window(name: str, lo_frac: float, hi_frac: float) -> None:
+        lo_frac = float(np.clip(lo_frac, 0.0, 0.999))
+        hi_frac = float(np.clip(hi_frac, lo_frac + 1e-6, 1.0))
+        if name in ("didt", "linear"):
+            lo_w, _xw, _ = app.data_fit_window_inputs[(name, "low")]
+            hi_w, _xw2, _ = app.data_fit_window_inputs[(name, "high")]
+            _set_silently(lo_w, f"{100.0 * lo_frac:.2f}")
+            _set_silently(hi_w, f"{100.0 * hi_frac:.2f}")
+            _refresh_x_from_pct(app, name, "low")
+            _refresh_x_from_pct(app, name, "high")
+        elif name == "power":
+            method = _active_fit_method(app)
+            if method == FIT_METHOD_LOG_LOG:
+                x_min = float(np.nanmin(x))
+                x_max = float(np.nanmax(x))
+                span = max(1e-12, x_max - x_min)
+                lo_x = x_min + lo_frac * span
+                hi_x = x_min + hi_frac * span
+                _set_silently(app.data_fit_power_low_x, f"{lo_x:.6g}")
+                _set_silently(app.data_fit_power_high_x, f"{hi_x:.6g}")
+                app.data_fit_power_window_manual = True
+            else:
+                lo_w, _xw, _ = app.data_fit_window_inputs[("power", "low")]
+                hi_w, _xw2, _ = app.data_fit_window_inputs[("power", "high")]
+                _set_silently(lo_w, f"{100.0 * lo_frac:.2f}")
+                _set_silently(hi_w, f"{100.0 * hi_frac:.2f}")
+                _refresh_x_from_pct(app, "power", "low")
+                _refresh_x_from_pct(app, "power", "high")
+
+    for key, bounds in proposals.items():
+        if not bounds or len(bounds) != 2:
+            continue
+        _apply_frac_window(key, bounds[0], bounds[1])
+    _update_fit_bands(app)
+    _save_active_curve_profile(app)
+    _show_warning(app, "Applied auto-adjusted windows. Re-run fit and check confidence score.", severity="warning")
 
 
 def _entry_length_settings(app, entry: dict) -> tuple[bool, float]:
@@ -3240,6 +3301,10 @@ def _format_result(result) -> str:
         f"|L·dI/dt| / (Ec·L_v) = {ratio:.4f}"
         + ("  (ramp too fast!)" if getattr(result, "ramp_too_fast", False) else "")
     )
+    score = float(getattr(result, "confidence_score", 0.0) or 0.0)
+    lines.append(f"confidence    = {score:.1f} / 100")
+    for note in list(getattr(result, "confidence_notes", []) or []):
+        lines.append(f"  - {note}")
     if is_loglog:
         lines.append(
             f"n window      = [Ec1={_format_engineering(result.ec1, v_unit, 2)}, "
@@ -3270,6 +3335,11 @@ _FIT_PROPERTY_KEYS = (
     "n_window_I_lo_A", "n_window_I_hi_A", "n_points_used",
     "V_ofs", "V0_inductive", "inductance_L_H", "R_or_rho", "R_unit",
     "ramp_inductive_ratio", "ramp_too_fast", "insufficient_n_points",
+    "narrow_n_window", "baseline_has_transition",
+    "confidence_score", "confidence_notes",
+    "suggested_didt_low_frac", "suggested_didt_high_frac",
+    "suggested_linear_low_frac", "suggested_linear_high_frac",
+    "suggested_power_low_frac", "suggested_power_high_frac",
     "thermal_offset_applied", "uses_sample_length",
     "fit_method",
     "weighting_mode",
@@ -3325,13 +3395,28 @@ def _fit_result_properties(result) -> dict:
         "ramp_inductive_ratio": float(getattr(result, "ramp_inductive_ratio", 0.0)),
         "ramp_too_fast": bool(getattr(result, "ramp_too_fast", False)),
         "insufficient_n_points": bool(getattr(result, "insufficient_n_points", False)),
+        "narrow_n_window": bool(getattr(result, "narrow_n_window", False)),
+        "baseline_has_transition": bool(getattr(result, "baseline_has_transition", False)),
+        "confidence_score": float(getattr(result, "confidence_score", 0.0)),
+        "confidence_notes": " | ".join(list(getattr(result, "confidence_notes", []) or [])),
         "thermal_offset_applied": bool(getattr(result, "thermal_offset_applied", False)),
         "uses_sample_length": bool(getattr(result, "uses_sample_length", False)),
         "weighting_mode": str(getattr(result, "weighting_mode", WEIGHT_MODE_EQUAL)),
     }
+    suggested = dict(getattr(result, "suggested_windows", {}) or {})
+    didt = suggested.get("didt", (0.0, 0.0))
+    linear = suggested.get("linear", (0.0, 0.0))
+    power = suggested.get("power", (0.0, 0.0))
+    props["suggested_didt_low_frac"] = float(didt[0]) if len(didt) == 2 else 0.0
+    props["suggested_didt_high_frac"] = float(didt[1]) if len(didt) == 2 else 0.0
+    props["suggested_linear_low_frac"] = float(linear[0]) if len(linear) == 2 else 0.0
+    props["suggested_linear_high_frac"] = float(linear[1]) if len(linear) == 2 else 0.0
+    props["suggested_power_low_frac"] = float(power[0]) if len(power) == 2 else 0.0
+    props["suggested_power_high_frac"] = float(power[1]) if len(power) == 2 else 0.0
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
     for k in ("ramp_too_fast", "insufficient_n_points",
+              "narrow_n_window", "baseline_has_transition",
               "thermal_offset_applied", "uses_sample_length"):
         props[k] = "True" if props[k] else "False"
     return props
@@ -3407,6 +3492,21 @@ def _fit_result_from_props(props: dict):
         _coerce_float(_prop_lookup(props, "n_window_I_lo_A"), 0.0),
         _coerce_float(_prop_lookup(props, "n_window_I_hi_A"), 0.0),
     )
+    confidence_notes = str(_prop_lookup(props, "confidence_notes", default="") or "")
+    suggested_windows = {
+        "didt": (
+            _coerce_float(_prop_lookup(props, "suggested_didt_low_frac"), 0.0),
+            _coerce_float(_prop_lookup(props, "suggested_didt_high_frac"), 0.0),
+        ),
+        "linear": (
+            _coerce_float(_prop_lookup(props, "suggested_linear_low_frac"), 0.0),
+            _coerce_float(_prop_lookup(props, "suggested_linear_high_frac"), 0.0),
+        ),
+        "power": (
+            _coerce_float(_prop_lookup(props, "suggested_power_low_frac"), 0.0),
+            _coerce_float(_prop_lookup(props, "suggested_power_high_frac"), 0.0),
+        ),
+    }
     status = str(_prop_lookup(props, "fit_status", "status", default="ok")).lower()
     ok = status == "ok"
     return FitResult(
@@ -3435,6 +3535,11 @@ def _fit_result_from_props(props: dict):
         ramp_inductive_ratio=_coerce_float(_prop_lookup(props, "ramp_inductive_ratio")),
         ramp_too_fast=_coerce_bool(_prop_lookup(props, "ramp_too_fast")),
         insufficient_n_points=_coerce_bool(_prop_lookup(props, "insufficient_n_points")),
+        narrow_n_window=_coerce_bool(_prop_lookup(props, "narrow_n_window")),
+        baseline_has_transition=_coerce_bool(_prop_lookup(props, "baseline_has_transition")),
+        confidence_score=_coerce_float(_prop_lookup(props, "confidence_score")),
+        confidence_notes=[s.strip() for s in confidence_notes.split("|") if s.strip()],
+        suggested_windows=suggested_windows,
         thermal_offset_applied=_coerce_bool(_prop_lookup(props, "thermal_offset_applied")),
         weighting_mode=str(_prop_lookup(props, "weighting_mode", default=WEIGHT_MODE_EQUAL) or WEIGHT_MODE_EQUAL),
     )
@@ -4052,6 +4157,19 @@ def _post_fit_warnings(app, result, settings) -> None:
             f"window [I(Ec1), I(Ec2)] — below the recommended minimum of "
             f"{MIN_N_WINDOW_POINTS}. Slow the ramp or lower the averaging for a "
             f"less noisy n estimate."
+        )
+    if getattr(result, "baseline_has_transition", False):
+        warnings.append(
+            "Baseline window appears to include transition behavior. Move Step-3 lower or use Auto-adjust windows."
+        )
+    if getattr(result, "narrow_n_window", False):
+        warnings.append(
+            "n-window is too narrow in current span; even many points can still give unstable n-value."
+        )
+    score = float(getattr(result, "confidence_score", 0.0) or 0.0)
+    if score < 70.0:
+        warnings.append(
+            f"Confidence score is low ({score:.1f}/100). Use Auto-adjust windows and re-run fit."
         )
     # Quasi-static ramp check (applies to both fit methods).
     if getattr(result, "ramp_too_fast", False):
