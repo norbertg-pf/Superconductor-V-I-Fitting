@@ -243,8 +243,12 @@ def pick_loglog_i_window_from_thresholds(
     # the first point that reaches Ec1 (or below).
     idx_lo = idx_hi
     for j in range(idx_hi, -1, -1):
-        if ys[j] <= ec1:
+        # Choose the earliest point on the rising branch that is still in
+        # the IEC window (>= Ec1). Using <= Ec1 would latch onto tiny/noisy
+        # dips that are outside the intended fitting band.
+        if ys[j] >= ec1:
             idx_lo = j
+        else:
             break
 
     i_lo = float(xs[idx_lo])
