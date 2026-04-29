@@ -651,6 +651,8 @@ def _connect_data_fitting_actions(app):
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
+    if getattr(app, "data_fit_step4_settings_btn", None) is not None:
+        app.data_fit_step4_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
     app.data_fit_save_metadata_btn.clicked.connect(lambda: _save_metadata_clicked(app))
     # Autosave gates the two layout checkboxes; save-separate gates same-group.
     # Initialise the enabled state once and re-evaluate on every toggle.
@@ -1225,6 +1227,13 @@ def setup_data_fitting_tab_layout(app):
     power_layout.addWidget(QLabel("Point weighting:"), 2, 0, 1, 1)
     power_layout.addWidget(app.data_fit_weight_mode_cb, 2, 1, 1, 2)
 
+    # Step-4 settings shortcut near weighting/method controls.
+    app.data_fit_step4_settings_btn = QPushButton("Settings")
+    app.data_fit_step4_settings_btn.setToolTip(
+        "Open Data Fitting settings (including Ic iteration and criterion controls)."
+    )
+    power_layout.addWidget(app.data_fit_step4_settings_btn, 0, 3, 2, 1)
+
     # Toggle between linear/linear and log/log axes. Text tracks current mode.
     app.data_fit_plot_scale_btn = QPushButton("Switch to log-log plot")
     app.data_fit_plot_scale_btn.setToolTip(
@@ -1232,7 +1241,7 @@ def setup_data_fitting_tab_layout(app):
         "Log-log also updates the graph-settings dialog (Scale → Log10\n"
         "on both axes) so the setting persists when you re-open it."
     )
-    power_layout.addWidget(app.data_fit_plot_scale_btn, 0, 3, 2, 1)
+    power_layout.addWidget(app.data_fit_plot_scale_btn, 2, 3, 1, 1)
     app.data_fit_add_corrected_btn = QPushButton("Add corrected curve")
     app.data_fit_add_corrected_btn.setToolTip(
         "Add the baseline-corrected curve from the last successful fit:\n"
@@ -1286,8 +1295,8 @@ def setup_data_fitting_tab_layout(app):
         ("power", "high"): (app.data_fit_power_vfrac, app.data_fit_power_high_x, "Vmax"),
     }
 
-    iter_group = QGroupBox("Ic iteration && criterion")
-    iter_layout = QGridLayout(iter_group)
+    app.data_fit_iter_group = QGroupBox("Ic iteration && criterion")
+    iter_layout = QGridLayout(app.data_fit_iter_group)
     app.data_fit_max_iter = QLineEdit(str(DEFAULT_MAX_ITERATIONS))
     app.data_fit_max_iter.setMaximumWidth(80)
     app.data_fit_ic_tol = QLineEdit(f"{DEFAULT_IC_TOLERANCE * 100:g}")
@@ -1311,8 +1320,6 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_chi_tol, 0, 3)
     iter_layout.addWidget(app.data_fit_vc_label, 1, 2)
     iter_layout.addWidget(app.data_fit_vc_input, 1, 3)
-    left.addWidget(iter_group)
-
     run_row = QHBoxLayout()
     app.data_fit_run_btn = QPushButton("Run Fit")
     app.data_fit_run_btn.setStyleSheet("font-weight: bold; background-color: #0078D7; color: white; padding: 8px;")
@@ -4324,7 +4331,7 @@ def _open_settings_dialog(app) -> None:
     dialog = QDialog(app)
     dialog.setWindowTitle("Data Fitting — Settings")
     dialog.setModal(True)
-    dialog.resize(520, 280)
+    dialog.resize(560, 380)
 
     root = QVBoxLayout(dialog)
 
@@ -4339,6 +4346,8 @@ def _open_settings_dialog(app) -> None:
     save_layout.addWidget(app.data_fit_save_separate_cb)
     save_layout.addWidget(app.data_fit_same_group_cb)
     root.addWidget(save_group)
+    if getattr(app, "data_fit_iter_group", None) is not None:
+        root.addWidget(app.data_fit_iter_group)
 
     # Re-evaluate dependency rules every time the dialog opens, in case the
     # user has changed checkbox state via a preset since the last open.
