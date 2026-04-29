@@ -416,6 +416,29 @@ def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray
     return adaptive_smooth_for_ec_window(y, ec1, ec2)
 
 
+def _despike_corrected_signal(y: np.ndarray, window: int = 31, nsig: float = 8.0) -> np.ndarray:
+    """Suppress rare impulsive spikes in corrected signal before smoothing."""
+    arr = np.asarray(y, dtype=float)
+    n = arr.size
+    if n < 9:
+        return arr
+    w = int(max(5, window))
+    if w % 2 == 0:
+        w += 1
+    half = w // 2
+    out = arr.copy()
+    for i in range(n):
+        a = max(0, i - half)
+        b = min(n, i + half + 1)
+        seg = arr[a:b]
+        med = float(np.median(seg))
+        mad = float(np.median(np.abs(seg - med)))
+        sigma = 1.4826 * mad
+        if sigma > 0.0 and abs(arr[i] - med) > nsig * sigma:
+            out[i] = med
+    return out
+
+
 def _read_time_channel(tdms_file):
     if "RawData" in tdms_file and "Time" in tdms_file["RawData"]:
         return np.asarray(tdms_file["RawData"]["Time"][:], dtype=float)
@@ -4646,6 +4669,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
         QMessageBox.warning(app, "Data Fitting", "No points available to build corrected curve.")
         return
     y_corr = y - (float(result.V0) + float(result.R) * x)
+    y_corr = _despike_corrected_signal(y_corr)
 
     sig = ("__corrected__", str(base_sig))
     existing = None
@@ -4928,6 +4952,7 @@ def _add_smoothed_curve_from_current(app) -> None:
     else:
         result, _parent_entry, base_sig, base_label, x, y, t = resolved
         y_corr = y - (float(result.V0) + float(result.R) * x)
+        y_corr = _despike_corrected_signal(y_corr)
         has_length = app.data_fit_use_length_cb.isChecked()
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
