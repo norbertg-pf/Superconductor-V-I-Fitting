@@ -1597,6 +1597,27 @@ def _apply_transforms(app, *, apply_trim: bool = False):
     }
 
 
+
+
+def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndarray] = None):
+    """Apply Step 1.5 mask to arrays and return trimmed copies."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    t_arr = np.asarray(t, dtype=float) if t is not None else None
+    n = int(min(x_arr.size, y_arr.size, (t_arr.size if t_arr is not None else x_arr.size)))
+    if n <= 0:
+        return x_arr[:0], y_arr[:0], (t_arr[:0] if t_arr is not None else None)
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    if t_arr is not None:
+        t_arr = t_arr[:n]
+    mask = _build_trim_mask(app, x_arr)
+    if mask is None or not np.any(mask):
+        return x_arr, y_arr, t_arr
+    x_out = x_arr[mask]
+    y_out = y_arr[mask]
+    t_out = t_arr[mask] if t_arr is not None else None
+    return x_out, y_out, t_out
 def _build_trim_mask(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if x is None or x.size == 0:
         return None
@@ -3967,10 +3988,21 @@ def run_fit(app):
         last_show_ic = False
         for entry in included:
             label = entry.get("label", "Curve")
+            ex = np.asarray(entry.get("x", []), dtype=float)
+            ey = np.asarray(entry.get("y", []), dtype=float)
+            et = np.asarray(entry.get("t", []), dtype=float)
+            ex, ey, et = _trim_xyz_with_step15(app, ex, ey, et)
+            if ex.size == 0 or ey.size == 0 or et is None or et.size == 0:
+                lines.append(f"[{label}] FIT FAILED: No samples after Step 1.5 trim.")
+                continue
+            fit_entry = dict(entry)
+            fit_entry["x"] = ex
+            fit_entry["y"] = ey
+            fit_entry["t"] = et
             # Each curve carries its own fit method / windows / criterion via
             # the per-curve profile stored in app.data_fit_curve_profiles.
             try:
-                entry_settings = _settings_for_entry(app, entry)
+                entry_settings = _settings_for_entry(app, fit_entry)
             except Exception as exc:
                 traceback.print_exc()
                 from .service import FitResult
@@ -3980,7 +4012,7 @@ def run_fit(app):
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
                 continue
             try:
-                result = run_full_fit(entry["t"], entry["x"], entry["y"], entry_settings)
+                result = run_full_fit(fit_entry["t"], fit_entry["x"], fit_entry["y"], entry_settings)
             except Exception as exc:
                 traceback.print_exc()
                 # Synthesise a failed FitResult so the channel still appears
@@ -3991,7 +4023,7 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
-                _recompute_loglog_i_window_for_entry(result, entry, entry_settings)
+                _recompute_loglog_i_window_for_entry(result, fit_entry, entry_settings)
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
@@ -4607,13 +4639,16 @@ def _resolve_reference_curve_data(app):
         n = int(min(x.size, y.size))
         if n <= 0:
             continue
+        x_t, y_t, t_t = _trim_xyz_with_step15(app, x[:n], y[:n], (t[:n] if t.size else np.asarray([])))
+        if x_t.size <= 0 or y_t.size <= 0:
+            continue
         return (
             entry,
             entry.get("signature", entry.get("label", "curve")),
             entry.get("label", "Curve"),
-            x[:n],
-            y[:n],
-            (t[:n] if t.size else np.asarray([])),
+            x_t,
+            y_t,
+            (t_t if t_t is not None else np.asarray([])),
         )
 
     transformed = _apply_transforms(app, apply_trim=True)
