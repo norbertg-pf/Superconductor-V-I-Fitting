@@ -4248,23 +4248,41 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     if ec1_max <= ec1_min:
         ec1_max = ec1_min * 1.01
     ec1_grid = np.geomspace(max(ec1_min, 1e-30), max(ec1_max, ec1_min * 1.01), 200)
+    # Keep Ec2 consistent with the current UI (same condition as the fit), so
+    # the scan reflects the real picker behavior.
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec2_ui = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
     rows = []
     for ec1 in ec1_grid:
-        ec2 = max(float(np.max(y)), ec1 * 1.000001)
+        ec2 = max(float(ec2_ui), float(ec1) * 1.000001)
         lo_x, hi_x = pick_loglog_i_window_from_thresholds(x, y, ec1=float(ec1), ec2=float(ec2))
-        rows.append((float(ec1), float(lo_x), float(hi_x)))
-    has_length = app.data_fit_use_length_cb.isChecked()
+        y_lo = float(np.interp(lo_x, x, y))
+        # local neighborhood around Low(X) for root-cause inspection
+        idx = int(np.argmin(np.abs(x - lo_x)))
+        i0 = max(0, idx - 1)
+        i1 = min(x.size - 1, idx + 1)
+        y_prev = float(y[i0])
+        y_next = float(y[i1])
+        rows.append((float(ec1), float(ec2), float(lo_x), float(hi_x), y_lo, y_prev, y_next))
     unit = "uV/cm" if has_length else "uV"
     from_si = 1.0e6 if has_length else 1.0e3
     out = np.asarray(rows, dtype=float)
     out[:, 0] = out[:, 0] * from_si
+    out[:, 1] = out[:, 1] * from_si
+    out[:, 4] = out[:, 4] * from_si
+    out[:, 5] = out[:, 5] * from_si
+    out[:, 6] = out[:, 6] * from_si
     default_dir = _preset_dir(app)
     path, _ = QFileDialog.getSaveFileName(
         app, "Export Ec1→Low(X) CSV", str(Path(default_dir) / "ec1_lowx_scan.csv"), "CSV Files (*.csv);;All Files (*)"
     )
     if not path:
         return
-    header = f"Ec1_{unit},LowX_A,HighX_A"
+    header = (
+        f"Ec1_{unit},Ec2_{unit},LowX_A,HighX_A,"
+        f"E_at_LowX_{unit},E_prev_{unit},E_next_{unit}"
+    )
     np.savetxt(path, out, delimiter=",", header=header, comments="")
     QMessageBox.information(app, "Export Ec1→Low(X)", f"Exported {out.shape[0]} rows to:\n{path}")
 
