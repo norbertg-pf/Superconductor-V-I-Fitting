@@ -3568,7 +3568,8 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
 
 
 def _write_fit_report_same_group(report_path: Path,
-                                 new_entries: dict[str, dict]) -> Optional[str]:
+                                 new_entries: dict[str, dict],
+                                 debug_curve_objects: Optional[list[ChannelObject]] = None) -> Optional[str]:
     """Attach fit properties as channel metadata on the matching source channels.
 
     Reads the source TDMS, merges each curve's fit properties into the
