@@ -699,6 +699,7 @@ def _open_fit_config_dialog(app) -> None:
 
 def _on_transform_inputs_changed(app) -> None:
     app.data_fit_plot_dirty = True
+    app.data_fit_show_trimmed_preview = False
     _update_avg_rate_label(app)
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
@@ -1575,7 +1576,7 @@ def _block_average(arr: np.ndarray, window: int) -> np.ndarray:
     return arr[: n_bins * window].reshape(n_bins, window).mean(axis=1)
 
 
-def _apply_transforms(app):
+def _apply_transforms(app, *, apply_trim: bool = False):
     controller = app.data_fit_controller
     t_scale, t_offset = _scale_offset_from_inputs(app, "time")
     x_scale, x_offset = _scale_offset_from_inputs(app, "x")
@@ -1600,7 +1601,7 @@ def _apply_transforms(app):
     x_original = np.asarray(x, dtype=float) if x is not None else None
     t_original = np.asarray(t, dtype=float) if t is not None else None
     y_original = np.asarray(y, dtype=float) if y is not None else None
-    trim_mask = _build_trim_mask(app, x_original)
+    trim_mask = _build_trim_mask(app, x_original) if apply_trim else None
     if trim_mask is not None and np.any(trim_mask):
         if t is not None:
             t = t[trim_mask]
@@ -1624,6 +1625,49 @@ def _apply_transforms(app):
     }
 
 
+
+
+def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndarray] = None):
+    """Apply Step 1.5 mask to arrays and return trimmed copies."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    t_arr = np.asarray(t, dtype=float) if t is not None else None
+    n = int(min(x_arr.size, y_arr.size, (t_arr.size if t_arr is not None else x_arr.size)))
+    if n <= 0:
+        return x_arr[:0], y_arr[:0], (t_arr[:0] if t_arr is not None else None)
+    x_arr = x_arr[:n]
+    y_arr = y_arr[:n]
+    if t_arr is not None:
+        t_arr = t_arr[:n]
+    mask = _build_trim_mask(app, x_arr)
+    if mask is None or not np.any(mask):
+        return x_arr, y_arr, t_arr
+    x_out = x_arr[mask]
+    y_out = y_arr[mask]
+    t_out = t_arr[mask] if t_arr is not None else None
+    return x_out, y_out, t_out
+
+
+def _trim_active_curve_entry_in_place(app) -> bool:
+    """Trim the active stored curve entry in-place so the user sees removed points."""
+    active_key = _curve_profile_key_from_ui(app)
+    for entry in getattr(app, "data_fit_curves", []):
+        if str(entry.get("signature")) != str(active_key):
+            continue
+        x = np.asarray(entry.get("x", []), dtype=float)
+        y = np.asarray(entry.get("y", []), dtype=float)
+        t = np.asarray(entry.get("t", []), dtype=float)
+        if x.size == 0 or y.size == 0:
+            return False
+        x_t, y_t, t_t = _trim_xyz_with_step15(app, x, y, t if t.size else None)
+        if x_t.size == 0 or y_t.size == 0:
+            return False
+        entry["x"] = x_t
+        entry["y"] = y_t
+        entry["t"] = (t_t if t_t is not None else np.asarray([]))
+        _refresh_curve_item(entry)
+        return True
+    return False
 def _build_trim_mask(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if x is None or x.size == 0:
         return None
@@ -2631,7 +2675,8 @@ def _on_use_length_changed(app):
 def refresh_preview(app):
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
-    transformed = _apply_transforms(app)
+    show_trimmed = bool(getattr(app, "data_fit_show_trimmed_preview", False))
+    transformed = _apply_transforms(app, apply_trim=show_trimmed)
     x = transformed["x"]
     y = transformed["y"]
     app.data_fit_model_curve.setData([], [])
@@ -3869,6 +3914,8 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
+    app.data_fit_show_trimmed_preview = True
+    refresh_preview(app)
 
     def _loglog_window_fields_present() -> bool:
         try:
@@ -3960,7 +4007,7 @@ def run_fit(app):
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
     included = [c for c in curves if c.get("include_in_fit", True)]
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_trim=True)
     has_preview = bool(getattr(app, "data_fit_preview_visible", True))
     preview_included = bool(getattr(app, "data_fit_preview_include_in_fit", True))
     if has_preview and preview_included:
@@ -3991,10 +4038,26 @@ def run_fit(app):
         last_show_ic = False
         for entry in included:
             label = entry.get("label", "Curve")
+            ex = np.asarray(entry.get("x", []), dtype=float)
+            ey = np.asarray(entry.get("y", []), dtype=float)
+            et = np.asarray(entry.get("t", []), dtype=float)
+            ex, ey, et = _trim_xyz_with_step15(app, ex, ey, et)
+            if ex.size == 0 or ey.size == 0 or et is None or et.size == 0:
+                lines.append(f"[{label}] FIT FAILED: No samples after Step 1.5 trim.")
+                continue
+            fit_entry = dict(entry)
+            fit_entry["x"] = ex
+            fit_entry["y"] = ey
+            fit_entry["t"] = et
+            entry["x"] = ex
+            entry["y"] = ey
+            entry["t"] = et
+            if entry.get("plot_item") is not None:
+                _refresh_curve_item(entry)
             # Each curve carries its own fit method / windows / criterion via
             # the per-curve profile stored in app.data_fit_curve_profiles.
             try:
-                entry_settings = _settings_for_entry(app, entry)
+                entry_settings = _settings_for_entry(app, fit_entry)
             except Exception as exc:
                 traceback.print_exc()
                 from .service import FitResult
@@ -4004,7 +4067,7 @@ def run_fit(app):
                 lines.append(f"[{label}] FIT FAILED: {result.message}")
                 continue
             try:
-                result = run_full_fit(entry["t"], entry["x"], entry["y"], entry_settings)
+                result = run_full_fit(fit_entry["t"], fit_entry["x"], fit_entry["y"], entry_settings)
             except Exception as exc:
                 traceback.print_exc()
                 # Synthesise a failed FitResult so the channel still appears
@@ -4015,7 +4078,7 @@ def run_fit(app):
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
-                _recompute_loglog_i_window_for_entry(result, entry, entry_settings)
+                _recompute_loglog_i_window_for_entry(result, fit_entry, entry_settings)
                 last_ok = result
                 last_ok_settings = entry_settings
                 ok_results.append((label, result))
@@ -4499,6 +4562,9 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using Step-1/2/3 values."""
+    app.data_fit_show_trimmed_preview = True
+    refresh_preview(app)
+    _trim_active_curve_entry_in_place(app)
     resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         QMessageBox.warning(
@@ -4590,7 +4656,7 @@ def _resolve_fit_parent_and_result(app):
         base_sig = parent_entry.get("signature", parent_entry.get("label", "curve"))
         base_label = parent_entry.get("label", "Curve")
     else:
-        transformed = _apply_transforms(app)
+        transformed = _apply_transforms(app, apply_trim=True)
         x = np.asarray(transformed.get("x", []), dtype=float)
         y = np.asarray(transformed.get("y", []), dtype=float)
         t = np.asarray(transformed.get("time", []), dtype=float)
@@ -4629,16 +4695,19 @@ def _resolve_reference_curve_data(app):
         n = int(min(x.size, y.size))
         if n <= 0:
             continue
+        x_t, y_t, t_t = _trim_xyz_with_step15(app, x[:n], y[:n], (t[:n] if t.size else np.asarray([])))
+        if x_t.size <= 0 or y_t.size <= 0:
+            continue
         return (
             entry,
             entry.get("signature", entry.get("label", "curve")),
             entry.get("label", "Curve"),
-            x[:n],
-            y[:n],
-            (t[:n] if t.size else np.asarray([])),
+            x_t,
+            y_t,
+            (t_t if t_t is not None else np.asarray([])),
         )
 
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_trim=True)
     x = np.asarray(transformed.get("x", []), dtype=float)
     y = np.asarray(transformed.get("y", []), dtype=float)
     t = np.asarray(transformed.get("time", []), dtype=float)
@@ -4788,6 +4857,9 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 def _add_smoothed_curve_from_current(app) -> None:
     """Create corrected+smoothed Step-4 reference curve and plot a copy."""
+    app.data_fit_show_trimmed_preview = True
+    refresh_preview(app)
+    _trim_active_curve_entry_in_place(app)
     resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         ok = False
