@@ -1547,7 +1547,7 @@ def _block_average(arr: np.ndarray, window: int) -> np.ndarray:
     return arr[: n_bins * window].reshape(n_bins, window).mean(axis=1)
 
 
-def _apply_transforms(app):
+def _apply_transforms(app, *, apply_trim: bool = False):
     controller = app.data_fit_controller
     t_scale, t_offset = _scale_offset_from_inputs(app, "time")
     x_scale, x_offset = _scale_offset_from_inputs(app, "x")
@@ -1572,7 +1572,7 @@ def _apply_transforms(app):
     x_original = np.asarray(x, dtype=float) if x is not None else None
     t_original = np.asarray(t, dtype=float) if t is not None else None
     y_original = np.asarray(y, dtype=float) if y is not None else None
-    trim_mask = _build_trim_mask(app, x_original)
+    trim_mask = _build_trim_mask(app, x_original) if apply_trim else None
     if trim_mask is not None and np.any(trim_mask):
         if t is not None:
             t = t[trim_mask]
@@ -3932,7 +3932,7 @@ def run_fit(app):
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
     included = [c for c in curves if c.get("include_in_fit", True)]
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_trim=True)
     has_preview = bool(getattr(app, "data_fit_preview_visible", True))
     preview_included = bool(getattr(app, "data_fit_preview_include_in_fit", True))
     if has_preview and preview_included:
@@ -4562,7 +4562,7 @@ def _resolve_fit_parent_and_result(app):
         base_sig = parent_entry.get("signature", parent_entry.get("label", "curve"))
         base_label = parent_entry.get("label", "Curve")
     else:
-        transformed = _apply_transforms(app)
+        transformed = _apply_transforms(app, apply_trim=True)
         x = np.asarray(transformed.get("x", []), dtype=float)
         y = np.asarray(transformed.get("y", []), dtype=float)
         t = np.asarray(transformed.get("time", []), dtype=float)
@@ -4610,7 +4610,7 @@ def _resolve_reference_curve_data(app):
             (t[:n] if t.size else np.asarray([])),
         )
 
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_trim=True)
     x = np.asarray(transformed.get("x", []), dtype=float)
     y = np.asarray(transformed.get("y", []), dtype=float)
     t = np.asarray(transformed.get("time", []), dtype=float)
