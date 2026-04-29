@@ -675,6 +675,7 @@ def _connect_data_fitting_actions(app):
 
 def _on_transform_inputs_changed(app) -> None:
     app.data_fit_plot_dirty = True
+    app.data_fit_show_trimmed_preview = False
     _update_avg_rate_label(app)
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
@@ -2603,7 +2604,8 @@ def _on_use_length_changed(app):
 def refresh_preview(app):
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
-    transformed = _apply_transforms(app)
+    show_trimmed = bool(getattr(app, "data_fit_show_trimmed_preview", False))
+    transformed = _apply_transforms(app, apply_trim=show_trimmed)
     x = transformed["x"]
     y = transformed["y"]
     app.data_fit_model_curve.setData([], [])
@@ -3841,6 +3843,8 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
+    app.data_fit_show_trimmed_preview = True
+    refresh_preview(app)
 
     def _loglog_window_fields_present() -> bool:
         try:
@@ -4471,6 +4475,8 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using Step-1/2/3 values."""
+    app.data_fit_show_trimmed_preview = True
+    refresh_preview(app)
     resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         QMessageBox.warning(
@@ -4760,6 +4766,8 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 def _add_smoothed_curve_from_current(app) -> None:
     """Create corrected+smoothed Step-4 reference curve and plot a copy."""
+    app.data_fit_show_trimmed_preview = True
+    refresh_preview(app)
     resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         ok = False
