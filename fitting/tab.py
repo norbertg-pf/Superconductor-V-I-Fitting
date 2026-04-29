@@ -4368,7 +4368,16 @@ def _sanitize_tdms_name(name: str, fallback: str) -> str:
     return "".join(c if (c.isalnum() or c in ("_", "-", ".")) else "_" for c in text)
 
 
-def _write_helper_curve_tdms(app, *, curve_kind: str, base_label: str, x: np.ndarray, y: np.ndarray, t: np.ndarray) -> Optional[str]:
+def _write_helper_curve_tdms(
+    app,
+    *,
+    curve_kind: str,
+    base_label: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    ys: Optional[np.ndarray] = None,
+) -> Optional[str]:
     """Save helper-curve data into a dedicated TDMS next to the source file."""
     controller = getattr(app, "data_fit_controller", None)
     src_path = getattr(controller, "tdms_path", "") if controller is not None else ""
@@ -4387,6 +4396,8 @@ def _write_helper_curve_tdms(app, *, curve_kind: str, base_label: str, x: np.nda
     objects = [GroupObject("HelperCurve", properties=props)]
     objects.append(ChannelObject("HelperCurve", "Current", np.asarray(x, dtype=float)))
     objects.append(ChannelObject("HelperCurve", "Voltage", np.asarray(y, dtype=float)))
+    if ys is not None:
+        objects.append(ChannelObject("HelperCurve", "Ys", np.asarray(ys, dtype=float)))
     if np.asarray(t).size:
         objects.append(ChannelObject("HelperCurve", "Time", np.asarray(t, dtype=float)))
     with TdmsWriter(str(out_path)) as writer:
@@ -4454,6 +4465,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
             x=x,
             y=y_corr,
             t=t,
+            ys=y_corr,
         )
     except Exception:
         traceback.print_exc()
@@ -4754,6 +4766,7 @@ def _add_smoothed_curve_from_current(app) -> None:
                 x=x,
                 y=y_sm,
                 t=t,
+                ys=y_sm,
             )
         except Exception:
             traceback.print_exc()
