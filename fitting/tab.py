@@ -3011,8 +3011,17 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     y_arr = y_arr[order]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
-    ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
-    ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
+    ec1_ui = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6)
+    ec2_ui = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6)
+    # Avoid silently collapsing to an ultra-tiny floor (1e-30 V), which can
+    # show up as 1e-24 in µV units and create confusing Low(X) behavior when
+    # the user field is empty/zero/invalid.
+    if not np.isfinite(ec1_ui) or ec1_ui <= 0.0:
+        ec1_ui = DEFAULT_EC1_V_PER_CM * 1.0e6
+    if not np.isfinite(ec2_ui) or ec2_ui <= ec1_ui:
+        ec2_ui = max(DEFAULT_EC2_V_PER_CM * 1.0e6, ec1_ui * 10.0)
+    ec1 = ec1_ui * to_si
+    ec2 = max(ec2_ui * to_si, ec1 * 1.000001)
     x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
     x_lo, x_hi = pick_loglog_i_window_from_thresholds(
