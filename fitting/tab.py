@@ -9,6 +9,7 @@ Functions/Classes:
 from __future__ import annotations
 
 import os
+import tempfile
 import traceback
 from functools import partial
 from datetime import datetime
@@ -3683,12 +3684,33 @@ def _write_fit_report_same_group(report_path: Path,
             for name, props in unmatched.items():
                 data = np.array([np.nan], dtype=np.float64)
                 out_objects.append(ChannelObject("FitResults", name, data, properties=props))
-        with TdmsWriter(str(report_path)) as writer:
-            writer.write_segment(out_objects)
+        _write_tdms_objects_atomically(report_path, out_objects)
         return str(report_path)
     except Exception as exc:
         traceback.print_exception(type(exc), exc, exc.__traceback__)
         return None
+
+
+def _write_tdms_objects_atomically(path: Path, objects: list) -> None:
+    """Write TDMS content to a temp file and atomically replace destination.
+
+    Prevents partially written/corrupted files if the app is closed during
+    metadata save.
+    """
+    parent = path.parent
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.stem}_", suffix=".tmp", dir=str(parent))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with TdmsWriter(str(tmp_path)) as writer:
+            writer.write_segment(objects)
+        os.replace(str(tmp_path), str(path))
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
 
 
 def _write_fit_report_tdms(app, results: list[tuple[str, object]],
@@ -3764,8 +3786,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
             data = np.array([np.nan], dtype=np.float64)
             objects.append(ChannelObject("FitResults", name, data, properties=props))
         try:
-            with TdmsWriter(str(report_path)) as writer:
-                writer.write_segment(objects)
+            _write_tdms_objects_atomically(report_path, objects)
         except Exception as exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
             return None
@@ -3807,8 +3828,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
             for name, props in merged.items():
                 data = np.array([np.nan], dtype=np.float64)
                 out_objects.append(ChannelObject("FitResults", name, data, properties=props))
-            with TdmsWriter(str(report_path)) as writer:
-                writer.write_segment(out_objects)
+            _write_tdms_objects_atomically(report_path, out_objects)
         except Exception as exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
             return None
