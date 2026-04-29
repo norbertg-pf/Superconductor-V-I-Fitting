@@ -416,6 +416,29 @@ def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray
     return adaptive_smooth_for_ec_window(y, ec1, ec2)
 
 
+def _despike_corrected_signal(y: np.ndarray, window: int = 31, nsig: float = 8.0) -> np.ndarray:
+    """Suppress rare impulsive spikes in corrected signal before smoothing."""
+    arr = np.asarray(y, dtype=float)
+    n = arr.size
+    if n < 9:
+        return arr
+    w = int(max(5, window))
+    if w % 2 == 0:
+        w += 1
+    half = w // 2
+    out = arr.copy()
+    for i in range(n):
+        a = max(0, i - half)
+        b = min(n, i + half + 1)
+        seg = arr[a:b]
+        med = float(np.median(seg))
+        mad = float(np.median(np.abs(seg - med)))
+        sigma = 1.4826 * mad
+        if sigma > 0.0 and abs(arr[i] - med) > nsig * sigma:
+            out[i] = med
+    return out
+
+
 def _read_time_channel(tdms_file):
     if "RawData" in tdms_file and "Time" in tdms_file["RawData"]:
         return np.asarray(tdms_file["RawData"]["Time"][:], dtype=float)
@@ -650,6 +673,10 @@ def _connect_data_fitting_actions(app):
     _refresh_save_settings_enabled(app)
     app.data_fit_add_plot_btn.clicked.connect(lambda: (_add_plot_from_current(app), robust_view(app)))
     app.data_fit_add_corrected_btn.clicked.connect(lambda: (_add_corrected_curve_from_last_fit(app), robust_view(app)))
+    app.data_fit_export_ec_scan_btn.clicked.connect(lambda: _export_ec1_lowx_scan_csv(app))
+    app.data_fit_export_ref_tdms_btn.clicked.connect(lambda: _export_corrected_reference_tdms(app))
+    app.data_fit_trace_dip_btn.clicked.connect(lambda: _export_point_trace_csv(app))
+    app.data_fit_export_3750_3760_btn.clicked.connect(lambda: _export_current_window_tdms(app, 3750.0, 3760.0))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
     # Mutually exclusive radios fire toggled() twice per click (deselect +
@@ -1217,6 +1244,31 @@ def setup_data_fitting_tab_layout(app):
     )
     power_layout.addWidget(app.data_fit_add_smoothed_btn, 6, 0, 1, 2)
     power_layout.addWidget(app.data_fit_add_corrected_btn, 6, 2, 1, 2)
+    app.data_fit_export_ec_scan_btn = QPushButton("Export Ec1→Low(X) CSV")
+    app.data_fit_export_ec_scan_btn.setToolTip(
+        "Diagnostic export for IEC Step-4.\n"
+        "Exports Ec1 versus computed Low(X) using the same\n"
+        "corrected+smoothed reference curve used by window picking."
+    )
+    power_layout.addWidget(app.data_fit_export_ec_scan_btn, 7, 0, 1, 4)
+    app.data_fit_export_ref_tdms_btn = QPushButton("Export corrected TDMS")
+    app.data_fit_export_ref_tdms_btn.setToolTip(
+        "Export Step-4 reference signals to a new TDMS file:\n"
+        "Current, Y_corrected, Y_smoothed_corrected."
+    )
+    power_layout.addWidget(app.data_fit_export_ref_tdms_btn, 8, 0, 1, 4)
+    app.data_fit_trace_dip_btn = QPushButton("Trace point origin CSV")
+    app.data_fit_trace_dip_btn.setToolTip(
+        "Debug tool: export raw and corrected samples around the current\n"
+        "in Low(X) so you can see exactly where a dip originates."
+    )
+    power_layout.addWidget(app.data_fit_trace_dip_btn, 9, 0, 1, 4)
+    app.data_fit_export_3750_3760_btn = QPushButton("Export 3750–3760A TDMS")
+    app.data_fit_export_3750_3760_btn.setToolTip(
+        "Export only samples with current between 3750 A and 3760 A\n"
+        "to a new TDMS file (raw/corrected/smoothed)."
+    )
+    power_layout.addWidget(app.data_fit_export_3750_3760_btn, 10, 0, 1, 4)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
@@ -2897,10 +2949,40 @@ def _on_band_dragged(app, window: str) -> None:
         ec1_guess = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2_guess = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         y_ref = y_arr if (ref_x.size and ref_y.size) else _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
-        idx_lo = int(np.argmin(np.abs(x_arr - lo)))
-        idx_hi = int(np.argmin(np.abs(x_arr - hi)))
-        ec1 = max(float(y_ref[idx_lo]), 1.0e-30)
-        ec2 = max(float(y_ref[idx_hi]), ec1 * 1.000001)
+        # Estimate Ec at dragged X via interpolation on a monotonic X grid.
+        # This avoids ambiguous nearest-point picks when current values repeat
+        # (or are slightly out-of-order) and removes one-sample dips.
+        finite_xy = np.isfinite(x_arr) & np.isfinite(y_ref)
+        x_f = np.asarray(x_arr[finite_xy], dtype=float)
+        y_f = np.asarray(y_ref[finite_xy], dtype=float)
+        if x_f.size == 0:
+            return
+        order = np.argsort(x_f, kind="mergesort")
+        x_s = x_f[order]
+        y_s = y_f[order]
+        # Collapse duplicate X points by median Y at each X.
+        x_u, inv = np.unique(x_s, return_inverse=True)
+        y_u = np.empty_like(x_u, dtype=float)
+        for k in range(x_u.size):
+            y_u[k] = float(np.median(y_s[inv == k]))
+        if x_u.size == 1:
+            y_lo = y_hi = float(y_u[0])
+        else:
+            x_lo_eval = float(np.clip(lo, x_u[0], x_u[-1]))
+            x_hi_eval = float(np.clip(hi, x_u[0], x_u[-1]))
+            y_lo = float(np.interp(x_lo_eval, x_u, y_u))
+            y_hi = float(np.interp(x_hi_eval, x_u, y_u))
+        # When the picked point lands on a tiny negative/near-zero corrected
+        # value (common around baseline crossing), clamping directly to 1e-30
+        # creates a confusing Ec1=1e-24 µV/cm display. Prefer the smallest
+        # physically meaningful positive level seen on the same curve.
+        pos = np.asarray(y_ref, dtype=float)
+        pos = pos[np.isfinite(pos) & (pos > 0.0)]
+        # Use a robust positive floor (percentile), not absolute minimum,
+        # to avoid one-point tiny outliers driving Ec1 toward 1e-24 display.
+        positive_floor = float(np.percentile(pos, 5.0)) if pos.size else 1.0e-12
+        ec1 = max(y_lo, positive_floor)
+        ec2 = max(y_hi, ec1 * 1.000001)
         from_si = 1.0e6 if has_length else 1.0e3
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
         _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
@@ -3011,7 +3093,11 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     y_arr = y_arr[order]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
-    ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
+    ec1_in = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    pos_y = y_arr[np.isfinite(y_arr) & (y_arr > 0.0)]
+    # Avoid artificial 1e-30 fallback when the entered value is <= 0.
+    ec1_floor = float(np.percentile(pos_y, 5.0)) if pos_y.size else 1.0e-12
+    ec1 = max(float(ec1_in), ec1_floor)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
     x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
@@ -4182,6 +4268,270 @@ def _open_export_dialog(app) -> None:
     dialog.exec_()
 
 
+def _export_ec1_lowx_scan_csv(app) -> None:
+    """Export a diagnostic Ec1 -> Low(X) table for IEC Step-4 debugging."""
+    if _active_fit_method(app) != FIT_METHOD_LOG_LOG:
+        QMessageBox.information(app, "Export Ec1→Low(X)", "This export is available in Log-log (IEC) mode only.")
+        return
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    if not ok:
+        QMessageBox.warning(app, "Export Ec1→Low(X)", "Could not build Step-4 reference curve. Run fit first.")
+        return
+    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+    x = np.asarray(ref.get("x", []), dtype=float)
+    y = np.asarray(ref.get("y", []), dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y) & (x > 0)
+    x = x[valid]
+    y = y[valid]
+    x_all = np.asarray(x, dtype=float)
+    y_all = np.asarray(y, dtype=float)
+    # Keep one physical branch before sorting; prefer the run that contains
+    # the global max-current point (Step-4 region of interest).
+    if x.size >= 3:
+        peak_idx = int(np.argmax(x))
+        dx = np.diff(x)
+        run_starts = [0]
+        run_ends = []
+        for i, d in enumerate(dx, start=1):
+            if d < 0.0:
+                run_ends.append(i)
+                run_starts.append(i)
+        run_ends.append(x.size)
+        best_len = -1
+        best = (0, x.size)
+        for a, b in zip(run_starts, run_ends):
+            if not (a <= peak_idx < b):
+                continue
+            seg_len = b - a
+            if seg_len > best_len:
+                best_len = seg_len
+                best = (a, b)
+        if best_len < 0:
+            for a, b in zip(run_starts, run_ends):
+                seg_len = b - a
+                if seg_len > best_len:
+                    best_len = seg_len
+                    best = (a, b)
+        a, b = best
+        x = x[a:b]
+        y = y[a:b]
+    if x.size < 3:
+        # Fallback: keep full valid reference if branch selection is too strict.
+        x = x_all
+        y = y_all
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+    # Use the same duplicate-current handling as the IEC picker:
+    # collapse duplicated current values and keep the upper branch.
+    x_u, inv = np.unique(x, return_inverse=True)
+    if x_u.size != x.size:
+        y_u = np.full(x_u.shape, -np.inf, dtype=float)
+        np.maximum.at(y_u, inv, y)
+        good = np.isfinite(y_u)
+        x = x_u[good]
+        y = y_u[good]
+        if x.size < 3:
+            # Fallback: export still useful on sparse traces; skip duplicate-collapse.
+            x = x_all
+            y = y_all
+            order = np.argsort(x)
+            x = x[order]
+            y = y[order]
+    if x.size < 3:
+        QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough reference points to export.")
+        return
+    pos = y[np.isfinite(y) & (y > 0.0)]
+    if pos.size == 0:
+        # Fallback: if selected branch has no positive values, use full
+        # reference positivity so export still works for diagnostics.
+        y_all = np.asarray(ref.get("y", []), dtype=float)
+        pos = y_all[np.isfinite(y_all) & (y_all > 0.0)]
+    if pos.size == 0:
+        QMessageBox.warning(app, "Export Ec1→Low(X)", "Reference curve has no positive E values.")
+        return
+    ec1_min = float(np.percentile(pos, 2.0))
+    ec1_max = float(np.percentile(pos, 98.0))
+    if ec1_max <= ec1_min:
+        ec1_max = ec1_min * 1.01
+    ec1_grid = np.geomspace(max(ec1_min, 1e-30), max(ec1_max, ec1_min * 1.01), 200)
+    # Keep Ec2 consistent with the current UI (same condition as the fit), so
+    # the scan reflects the real picker behavior.
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec2_ui = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    rows = []
+    for ec1 in ec1_grid:
+        ec2 = max(float(ec2_ui), float(ec1) * 1.000001)
+        lo_x, hi_x = pick_loglog_i_window_from_thresholds(x, y, ec1=float(ec1), ec2=float(ec2))
+        y_lo = float(np.interp(lo_x, x, y))
+        # local neighborhood around Low(X) for root-cause inspection
+        idx = int(np.argmin(np.abs(x - lo_x)))
+        i0 = max(0, idx - 1)
+        i1 = min(x.size - 1, idx + 1)
+        y_prev = float(y[i0])
+        y_next = float(y[i1])
+        rows.append((float(ec1), float(ec2), float(lo_x), float(hi_x), y_lo, y_prev, y_next))
+    unit = "uV/cm" if has_length else "uV"
+    from_si = 1.0e6 if has_length else 1.0e3
+    out = np.asarray(rows, dtype=float)
+    out[:, 0] = out[:, 0] * from_si
+    out[:, 1] = out[:, 1] * from_si
+    out[:, 4] = out[:, 4] * from_si
+    out[:, 5] = out[:, 5] * from_si
+    out[:, 6] = out[:, 6] * from_si
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Export Ec1→Low(X) CSV", str(Path(default_dir) / "ec1_lowx_scan.csv"), "CSV Files (*.csv);;All Files (*)"
+    )
+    if not path:
+        return
+    header = (
+        f"Ec1_{unit},Ec2_{unit},LowX_A,HighX_A,"
+        f"E_at_LowX_{unit},E_prev_{unit},E_next_{unit}"
+    )
+    np.savetxt(path, out, delimiter=",", header=header, comments="")
+    QMessageBox.information(app, "Export Ec1→Low(X)", f"Exported {out.shape[0]} rows to:\n{path}")
+
+
+def _export_corrected_reference_tdms(app) -> None:
+    """Export Current + corrected + smoothed-corrected curves to a new TDMS."""
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    if not ok:
+        QMessageBox.warning(app, "Export corrected TDMS", "Could not build Step-4 reference curve. Run fit first.")
+        return
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(app, "Export corrected TDMS", "No fit result available.")
+        return
+    result, _parent, _sig, _label, x, y, t = resolved
+    x_arr_full = np.asarray(x, dtype=float)
+    y_corr = np.asarray(y, dtype=float) - (float(result.V0) + float(result.R) * x_arr_full)
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    y_sm = _adaptive_smooth_visual(_despike_corrected_signal(y_corr), ec1, ec2)
+    n = int(min(x_arr_full.size, y_corr.size, y_sm.size))
+    if n < 3:
+        QMessageBox.warning(app, "Export corrected TDMS", "Not enough points to export.")
+        return
+    x_arr = x_arr_full[:n]
+    y_corr = y_corr[:n]
+    y_sm = y_sm[:n]
+    t_arr = np.asarray(t, dtype=float)[:n] if np.asarray(t, dtype=float).size >= n else np.arange(n, dtype=float)
+
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Export corrected TDMS", str(Path(default_dir) / "corrected_reference.tdms"), "TDMS Files (*.tdms)"
+    )
+    if not path:
+        return
+    objects = [
+        GroupObject("Step4Reference"),
+        ChannelObject("Step4Reference", "Time", t_arr),
+        ChannelObject("Step4Reference", "Current", x_arr),
+        ChannelObject("Step4Reference", "Y_corrected", y_corr),
+        ChannelObject("Step4Reference", "Y_smoothed_corrected", y_sm),
+    ]
+    with TdmsWriter(str(path)) as writer:
+        writer.write_segment(objects)
+    QMessageBox.information(app, "Export corrected TDMS", f"Exported {n} points to:\n{path}")
+
+
+def _export_point_trace_csv(app) -> None:
+    """Export a forensic trace around the current in Low(X)."""
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(app, "Trace point origin", "No fit result available.")
+        return
+    result, _parent, _sig, _label, x, y, t = resolved
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+    n = int(min(x.size, y.size))
+    if n < 3:
+        QMessageBox.warning(app, "Trace point origin", "Not enough data.")
+        return
+    x = x[:n]
+    y = y[:n]
+    t = t[:n] if t.size >= n else np.arange(n, dtype=float)
+    baseline = float(result.V0) + float(result.R) * x
+    y_corr = y - baseline
+    ec1_guess = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * (1.0e-6 if app.data_fit_use_length_cb.isChecked() else 1.0e-3), 1e-12)
+    ec2_guess = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * (1.0e-6 if app.data_fit_use_length_cb.isChecked() else 1.0e-3), ec1_guess * 1.000001)
+    y_sm = _adaptive_smooth_visual(y_corr, ec1_guess, ec2_guess)
+    target_x = _float_from(app.data_fit_power_low_x, float(np.median(x)))
+    order = np.argsort(np.abs(x - target_x))
+    k = min(120, n)
+    sel = np.sort(order[:k])
+    out = np.column_stack([
+        sel.astype(float),
+        t[sel],
+        x[sel],
+        y[sel],
+        baseline[sel],
+        y_corr[sel],
+        y_sm[sel],
+    ])
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Trace point origin CSV", str(Path(default_dir) / "point_trace.csv"), "CSV Files (*.csv)"
+    )
+    if not path:
+        return
+    header = "index,time_s,current_A,y_raw,baseline_v0_plus_rI,y_corrected,y_smoothed_corrected"
+    np.savetxt(path, out, delimiter=",", header=header, comments="")
+    QMessageBox.information(app, "Trace point origin", f"Exported {out.shape[0]} nearby samples to:\n{path}")
+
+
+def _export_current_window_tdms(app, i_low: float, i_high: float) -> None:
+    """Export a fixed current window to TDMS for easy sharing/debug."""
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(app, "Export current window", "No fit result available.")
+        return
+    result, _parent, _sig, _label, x, y, t = resolved
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+    n = int(min(x.size, y.size))
+    if n < 3:
+        QMessageBox.warning(app, "Export current window", "Not enough points.")
+        return
+    x = x[:n]
+    y = y[:n]
+    t = t[:n] if t.size >= n else np.arange(n, dtype=float)
+    y_corr = y - (float(result.V0) + float(result.R) * x)
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    y_sm = _adaptive_smooth_visual(_despike_corrected_signal(y_corr), ec1, ec2)
+    mask = np.isfinite(x) & np.isfinite(y) & (x >= float(i_low)) & (x <= float(i_high))
+    if np.count_nonzero(mask) < 3:
+        QMessageBox.warning(app, "Export current window", f"No enough points in [{i_low}, {i_high}] A.")
+        return
+    xw, yw, tw, ycw, ysw = x[mask], y[mask], t[mask], y_corr[mask], y_sm[mask]
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Export current window TDMS", str(Path(default_dir) / f"window_{i_low:.0f}_{i_high:.0f}A.tdms"), "TDMS Files (*.tdms)"
+    )
+    if not path:
+        return
+    objects = [
+        GroupObject("CurrentWindow"),
+        ChannelObject("CurrentWindow", "Time", tw),
+        ChannelObject("CurrentWindow", "Current", xw),
+        ChannelObject("CurrentWindow", "Y_raw", yw),
+        ChannelObject("CurrentWindow", "Y_corrected", ycw),
+        ChannelObject("CurrentWindow", "Y_smoothed_corrected", ysw),
+    ]
+    with TdmsWriter(str(path)) as writer:
+        writer.write_segment(objects)
+    QMessageBox.information(app, "Export current window", f"Exported {xw.size} points in [{i_low}, {i_high}] A:\n{path}")
+
+
 def _refresh_save_settings_enabled(app) -> None:
     """Apply the dependency rules between the four metadata-saving checkboxes.
 
@@ -4376,6 +4726,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
         QMessageBox.warning(app, "Data Fitting", "No points available to build corrected curve.")
         return
     y_corr = y - (float(result.V0) + float(result.R) * x)
+    y_corr = _despike_corrected_signal(y_corr)
 
     sig = ("__corrected__", str(base_sig))
     existing = None
@@ -4595,6 +4946,7 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
     y_corr = y - (float(result.V0) + float(result.R) * x)
+    y_corr = _despike_corrected_signal(y_corr)
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
@@ -4658,6 +5010,7 @@ def _add_smoothed_curve_from_current(app) -> None:
     else:
         result, _parent_entry, base_sig, base_label, x, y, t = resolved
         y_corr = y - (float(result.V0) + float(result.R) * x)
+        y_corr = _despike_corrected_signal(y_corr)
         has_length = app.data_fit_use_length_cb.isChecked()
         to_si = 1.0e-6 if has_length else 1.0e-3
         ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
