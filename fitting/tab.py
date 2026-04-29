@@ -2899,8 +2899,24 @@ def _on_band_dragged(app, window: str) -> None:
         y_ref = y_arr if (ref_x.size and ref_y.size) else _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
         idx_lo = int(np.argmin(np.abs(x_arr - lo)))
         idx_hi = int(np.argmin(np.abs(x_arr - hi)))
-        y_lo = float(y_ref[idx_lo])
-        y_hi = float(y_ref[idx_hi])
+        # Use a tiny local neighborhood median instead of a single point.
+        # This avoids one-sample numerical dips affecting Ec picks when
+        # dragging the window.
+        def _local_median(arr: np.ndarray, idx: int, half_window: int = 2) -> float:
+            lo_i = max(0, int(idx) - int(half_window))
+            hi_i = min(arr.size, int(idx) + int(half_window) + 1)
+            seg = np.asarray(arr[lo_i:hi_i], dtype=float)
+            seg = seg[np.isfinite(seg)]
+            if seg.size == 0:
+                return float("nan")
+            return float(np.median(seg))
+
+        y_lo = _local_median(y_ref, idx_lo)
+        y_hi = _local_median(y_ref, idx_hi)
+        if not np.isfinite(y_lo):
+            y_lo = float(y_ref[idx_lo])
+        if not np.isfinite(y_hi):
+            y_hi = float(y_ref[idx_hi])
         # When the picked point lands on a tiny negative/near-zero corrected
         # value (common around baseline crossing), clamping directly to 1e-30
         # creates a confusing Ec1=1e-24 µV/cm display. Prefer the smallest
