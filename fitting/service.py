@@ -210,29 +210,29 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     return sm
 
 
-def pick_loglog_i_window_from_thresholds(
+def pick_loglog_i_window_details(
     x_sorted: np.ndarray,
     e_sc_smoothed: np.ndarray,
     *,
     ec1: float,
     ec2: float,
     guard_fraction: float = DEFAULT_EC_WINDOW_GUARD_FRAC,
-) -> tuple[float, float]:
-    """Pick (Low(X), High(X)) from corrected+smoothed IEC thresholds."""
+) -> tuple[float, float, int, int, float, float]:
+    """Pick window and exact points used by the backward IEC threshold walk."""
     xs = np.asarray(x_sorted, dtype=float)
     ys = np.asarray(e_sc_smoothed, dtype=float)
     n = int(min(xs.size, ys.size))
     if n == 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, -1, -1, float('nan'), float('nan')
     xs = xs[:n]
     ys = ys[:n]
     finite = np.isfinite(xs) & np.isfinite(ys)
     if not np.any(finite):
-        return 0.0, 0.0
+        return 0.0, 0.0, -1, -1, float('nan'), float('nan')
     xs = xs[finite]
     ys = ys[finite]
     if xs.size == 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, -1, -1, float('nan'), float('nan')
 
     x_min = float(np.min(xs))
     x_max = float(np.max(xs))
@@ -243,8 +243,6 @@ def pick_loglog_i_window_from_thresholds(
     idx_hi_all = np.where((ys >= ec2) & in_guard)[0]
     idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
 
-    # Low(X): walk backwards from High(X) on the corrected+smoothed curve and
-    # pick the first point that is at or below Ec1.
     idx_lo = idx_hi
     for j in range(idx_hi, -1, -1):
         if ys[j] <= ec1:
@@ -255,6 +253,21 @@ def pick_loglog_i_window_from_thresholds(
     i_hi = float(xs[idx_hi])
     if i_hi <= i_lo:
         i_hi = i_lo + max(1e-12, 0.01 * (span if span > 0 else 1.0))
+    return i_lo, i_hi, idx_lo, idx_hi, float(ys[idx_lo]), float(ys[idx_hi])
+
+
+def pick_loglog_i_window_from_thresholds(
+    x_sorted: np.ndarray,
+    e_sc_smoothed: np.ndarray,
+    *,
+    ec1: float,
+    ec2: float,
+    guard_fraction: float = DEFAULT_EC_WINDOW_GUARD_FRAC,
+) -> tuple[float, float]:
+    """Pick (Low(X), High(X)) from corrected+smoothed IEC thresholds."""
+    i_lo, i_hi, _, _, _, _ = pick_loglog_i_window_details(
+        x_sorted, e_sc_smoothed, ec1=ec1, ec2=ec2, guard_fraction=guard_fraction,
+    )
     return i_lo, i_hi
 
 
@@ -662,13 +675,9 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    I_lo, I_hi = pick_loglog_i_window_from_thresholds(
+    I_lo, I_hi, idx_lo, idx_hi, e_lo, e_hi = pick_loglog_i_window_details(
         xs, e_sc_bounds, ec1=Ec1, ec2=Ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
     )
-    idx_lo = int(np.argmin(np.abs(xs - I_lo)))
-    idx_hi = int(np.argmin(np.abs(xs - I_hi)))
-    e_lo = float(e_sc_bounds[idx_lo]) if xs.size else float("nan")
-    e_hi = float(e_sc_bounds[idx_hi]) if xs.size else float("nan")
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared, idx_lo, idx_hi, e_lo, e_hi)
 
