@@ -236,17 +236,18 @@ def pick_loglog_i_window_from_thresholds(
     x_guard_lo = x_min + float(np.clip(guard_fraction, 0.0, 0.95)) * span
     in_guard = xs >= x_guard_lo
 
-    idx_hi_all = np.where((ys >= ec2) & in_guard)[0]
+    # Build a monotonic envelope for threshold picking so tiny local dips
+    # (from smoothing/quantization/noise) cannot create phantom Ec crossings.
+    ys_env = np.maximum.accumulate(ys)
+
+    idx_hi_all = np.where((ys_env >= ec2) & in_guard)[0]
     idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
 
-    # Low(X): walk backwards from High(X) while current decreases and stop at
-    # the first point that reaches Ec1 (or below).
+    # Low(X): walk backwards from High(X) while current decreases and keep
+    # points that are still inside the Ec window on the monotonic envelope.
     idx_lo = idx_hi
     for j in range(idx_hi, -1, -1):
-        # Choose the earliest point on the rising branch that is still in
-        # the IEC window (>= Ec1). Using <= Ec1 would latch onto tiny/noisy
-        # dips that are outside the intended fitting band.
-        if ys[j] >= ec1:
+        if ys_env[j] >= ec1:
             idx_lo = j
         else:
             break
