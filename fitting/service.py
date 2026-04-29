@@ -240,10 +240,14 @@ def pick_loglog_i_window_from_thresholds(
     idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
 
     # Low(X): walk backwards from High(X) while current decreases and stop at
-    # the first point that reaches Ec1 (or below).
+    # the first point that is still inside the decade window (>= Ec1).
+    #
+    # Using "<= Ec1" here is incorrect for noisy traces: one tiny dip can force
+    # Low(X) onto an outlier far below the real transition, even if no such
+    # physical point exists on the smoothed reference curve.
     idx_lo = idx_hi
     for j in range(idx_hi, -1, -1):
-        if ys[j] <= ec1:
+        if ys[j] >= ec1:
             idx_lo = j
             break
 
