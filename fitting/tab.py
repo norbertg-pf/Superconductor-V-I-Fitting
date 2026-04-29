@@ -4237,6 +4237,8 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     valid = np.isfinite(x) & np.isfinite(y) & (x > 0)
     x = x[valid]
     y = y[valid]
+    x_all = np.asarray(x, dtype=float)
+    y_all = np.asarray(y, dtype=float)
     # Keep one physical branch before sorting; prefer the run that contains
     # the global max-current point (Step-4 region of interest).
     if x.size >= 3:
@@ -4268,8 +4270,9 @@ def _export_ec1_lowx_scan_csv(app) -> None:
         x = x[a:b]
         y = y[a:b]
     if x.size < 3:
-        QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough reference points to export.")
-        return
+        # Fallback: keep full valid reference if branch selection is too strict.
+        x = x_all
+        y = y_all
     order = np.argsort(x)
     x = x[order]
     y = y[order]
@@ -4283,8 +4286,15 @@ def _export_ec1_lowx_scan_csv(app) -> None:
         x = x_u[good]
         y = y_u[good]
         if x.size < 3:
-            QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough unique-current points after preprocessing.")
-            return
+            # Fallback: export still useful on sparse traces; skip duplicate-collapse.
+            x = x_all
+            y = y_all
+            order = np.argsort(x)
+            x = x[order]
+            y = y[order]
+    if x.size < 3:
+        QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough reference points to export.")
+        return
     pos = y[np.isfinite(y) & (y > 0.0)]
     if pos.size == 0:
         # Fallback: if selected branch has no positive values, use full
