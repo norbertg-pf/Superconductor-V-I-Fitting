@@ -4239,6 +4239,18 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     order = np.argsort(x)
     x = x[order]
     y = y[order]
+    # Use the same duplicate-current handling as the IEC picker:
+    # collapse duplicated current values and keep the upper branch.
+    x_u, inv = np.unique(x, return_inverse=True)
+    if x_u.size != x.size:
+        y_u = np.full(x_u.shape, -np.inf, dtype=float)
+        np.maximum.at(y_u, inv, y)
+        good = np.isfinite(y_u)
+        x = x_u[good]
+        y = y_u[good]
+        if x.size < 3:
+            QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough unique-current points after preprocessing.")
+            return
     pos = y[np.isfinite(y) & (y > 0.0)]
     if pos.size == 0:
         QMessageBox.warning(app, "Export Ec1→Low(X)", "Reference curve has no positive E values.")
