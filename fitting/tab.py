@@ -3603,11 +3603,15 @@ def _write_fit_report_same_group(report_path: Path,
                                       properties=props)
                     )
         out_objects: list = list(existing_groups) + list(existing_channels)
+        debug_curve_objects = list(debug_curve_objects or [])
         if unmatched:
             out_objects.append(GroupObject("FitResults"))
             for name, props in unmatched.items():
                 data = np.array([np.nan], dtype=np.float64)
                 out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+        if debug_curve_objects:
+            out_objects.append(GroupObject("FitDebug"))
+            out_objects.extend(debug_curve_objects)
         with TdmsWriter(str(report_path)) as writer:
             writer.write_segment(out_objects)
         return str(report_path)
@@ -3683,7 +3687,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
                 debug_curve_objects.append(ChannelObject("FitDebug", f"{safe}__E_corr_smooth", np.asarray(e_dbg, dtype=np.float64)))
 
     if not save_separate and same_group:
-        return _write_fit_report_same_group(report_path, new_entries)
+        return _write_fit_report_same_group(report_path, new_entries, debug_curve_objects)
 
     if save_separate:
         # Preserve FitResults channels from prior runs that this fit didn't touch
