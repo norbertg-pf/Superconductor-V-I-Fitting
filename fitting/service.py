@@ -245,6 +245,7 @@ def pick_loglog_i_window_details(
 
     idx_lo = idx_hi
     i_lo = float(xs[idx_lo])
+    e_lo_used = float(ys[idx_lo])
     # Walk backward and detect the Ec1 crossing segment. When found,
     # interpolate I at Ec1 so Low(X) is on-threshold instead of a potentially
     # much lower sample.
@@ -260,16 +261,18 @@ def pick_loglog_i_window_details(
             else:
                 i_lo = x0
             idx_lo = j - 1
+            e_lo_used = float(ec1)
             break
         if y1 <= ec1:
             idx_lo = j
             i_lo = float(xs[j])
+            e_lo_used = float(ys[j])
             break
 
     i_hi = float(xs[idx_hi])
     if i_hi <= i_lo:
         i_hi = i_lo + max(1e-12, 0.01 * (span if span > 0 else 1.0))
-    return i_lo, i_hi, idx_lo, idx_hi, float(ys[idx_lo]), float(ys[idx_hi])
+    return i_lo, i_hi, idx_lo, idx_hi, e_lo_used, float(ys[idx_hi])
 
 
 def pick_loglog_i_window_from_thresholds(
