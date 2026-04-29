@@ -1110,11 +1110,11 @@ def setup_data_fitting_tab_layout(app):
     trim_group = QGroupBox("Step 2: Curve trimming")
     trim_layout = QGridLayout(trim_group)
     trim_layout.addWidget(QLabel("Trim start (A):"), 0, 0)
-    app.data_fit_trim_lead_abs = QLineEdit("50")
+    app.data_fit_trim_lead_abs = QLineEdit("10")
     app.data_fit_trim_lead_abs.setMaximumWidth(80)
     trim_layout.addWidget(app.data_fit_trim_lead_abs, 0, 1)
     trim_layout.addWidget(QLabel("Trim start (% of Imax):"), 0, 2)
-    app.data_fit_trim_lead_pct = QLineEdit("10")
+    app.data_fit_trim_lead_pct = QLineEdit("5")
     app.data_fit_trim_lead_pct.setMaximumWidth(80)
     trim_layout.addWidget(app.data_fit_trim_lead_pct, 0, 3)
     app.data_fit_trim_drop_cb = QCheckBox("Auto-trim end after strong current drop (with 1% guard)")
@@ -1595,8 +1595,8 @@ def _trim_curve_segments(app, x: np.ndarray, y: np.ndarray, t: np.ndarray):
     y = np.asarray(y[:n], dtype=float)
     t = np.asarray(t[:n], dtype=float) if t is not None else np.arange(n, dtype=float)
     abs_max = float(np.max(np.abs(x))) if n else 0.0
-    lead_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_lead_abs", None), 50.0))
-    lead_pct = _float_from(getattr(app, "data_fit_trim_lead_pct", None), 10.0, as_fraction=True)
+    lead_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_lead_abs", None), 10.0))
+    lead_pct = _float_from(getattr(app, "data_fit_trim_lead_pct", None), 5.0, as_fraction=True)
     lead_cut = min(max(lead_abs, lead_pct * abs_max), abs_max)
     keep = np.abs(x) >= lead_cut
     cut_idx = None
