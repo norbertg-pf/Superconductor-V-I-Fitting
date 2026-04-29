@@ -238,17 +238,42 @@ def pick_loglog_i_window_from_thresholds(
 
     idx_hi_all = np.where((ys >= ec2) & in_guard)[0]
     idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
-
-    # Low(X): walk backwards from High(X) while current decreases and stop at
-    # the first point that reaches Ec1 (or below).
-    idx_lo = idx_hi
-    for j in range(idx_hi, -1, -1):
-        if ys[j] <= ec1:
-            idx_lo = j
-            break
-
-    i_lo = float(xs[idx_lo])
     i_hi = float(xs[idx_hi])
+    # Refine High(X) by linear interpolation at Ec2 crossing.
+    if idx_hi > 0:
+        y0 = float(ys[idx_hi - 1])
+        y1 = float(ys[idx_hi])
+        x0 = float(xs[idx_hi - 1])
+        x1 = float(xs[idx_hi])
+        if np.isfinite(y0) and np.isfinite(y1) and abs(y1 - y0) > 0.0:
+            if (y0 - ec2) * (y1 - ec2) <= 0.0:
+                frac = float((ec2 - y0) / (y1 - y0))
+                frac = float(np.clip(frac, 0.0, 1.0))
+                i_hi = x0 + frac * (x1 - x0)
+
+    # Low(X): walk backwards and find a real Ec1 crossing
+    # (below -> above) nearest to High(X). This avoids selecting isolated dips.
+    i_lo = float(xs[0])
+    found_cross = False
+    for j in range(idx_hi - 1, -1, -1):
+        y0 = float(ys[j])
+        y1 = float(ys[j + 1])
+        if not (np.isfinite(y0) and np.isfinite(y1)):
+            continue
+        if y0 <= ec1 <= y1 and y1 > y0:
+            x0 = float(xs[j])
+            x1 = float(xs[j + 1])
+            frac = float((ec1 - y0) / (y1 - y0)) if abs(y1 - y0) > 0.0 else 1.0
+            frac = float(np.clip(frac, 0.0, 1.0))
+            i_lo = x0 + frac * (x1 - x0)
+            found_cross = True
+            break
+    if not found_cross:
+        # Fallback: first point in guard region that is >= Ec1; if none, use xmin.
+        idx_lo_all = np.where(ys >= ec1)[0]
+        if idx_lo_all.size:
+            i_lo = float(xs[int(idx_lo_all[0])])
+
     if i_hi <= i_lo:
         i_hi = i_lo + max(1e-12, 0.01 * (span if span > 0 else 1.0))
     return i_lo, i_hi
