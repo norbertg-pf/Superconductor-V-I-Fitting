@@ -107,6 +107,12 @@ class FitResult:
     ec2: float = 0.0
     n_window_I: tuple[float, float] = (0.0, 0.0)
     n_points_used: int = 0
+    n_window_low_idx: int = -1
+    n_window_high_idx: int = -1
+    n_window_low_e: float = float("nan")
+    n_window_high_e: float = float("nan")
+    n_window_ref_x: Optional[np.ndarray] = None
+    n_window_ref_e: Optional[np.ndarray] = None
     # Parameter uncertainties (standard errors) and goodness of fit.
     sigma_Ic: float = 0.0
     sigma_n: float = 0.0
@@ -206,29 +212,29 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     return sm
 
 
-def pick_loglog_i_window_from_thresholds(
+def pick_loglog_i_window_details(
     x_sorted: np.ndarray,
     e_sc_smoothed: np.ndarray,
     *,
     ec1: float,
     ec2: float,
     guard_fraction: float = DEFAULT_EC_WINDOW_GUARD_FRAC,
-) -> tuple[float, float]:
-    """Pick (Low(X), High(X)) from corrected+smoothed IEC thresholds."""
+) -> tuple[float, float, int, int, float, float]:
+    """Pick window and exact points used by the backward IEC threshold walk."""
     xs = np.asarray(x_sorted, dtype=float)
     ys = np.asarray(e_sc_smoothed, dtype=float)
     n = int(min(xs.size, ys.size))
     if n == 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, -1, -1, float('nan'), float('nan')
     xs = xs[:n]
     ys = ys[:n]
     finite = np.isfinite(xs) & np.isfinite(ys)
     if not np.any(finite):
-        return 0.0, 0.0
+        return 0.0, 0.0, -1, -1, float('nan'), float('nan')
     xs = xs[finite]
     ys = ys[finite]
     if xs.size == 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, -1, -1, float('nan'), float('nan')
 
     x_min = float(np.min(xs))
     x_max = float(np.max(xs))
@@ -239,18 +245,50 @@ def pick_loglog_i_window_from_thresholds(
     idx_hi_all = np.where((ys >= ec2) & in_guard)[0]
     idx_hi = int(idx_hi_all[0]) if idx_hi_all.size else int(xs.size - 1)
 
-    # Low(X): walk backwards from High(X) while current decreases and stop at
-    # the first point that reaches Ec1 (or below).
     idx_lo = idx_hi
-    for j in range(idx_hi, -1, -1):
-        if ys[j] <= ec1:
+    i_lo = float(xs[idx_lo])
+    e_lo_used = float(ys[idx_lo])
+    # Walk backward and detect the Ec1 crossing segment. When found,
+    # interpolate I at Ec1 so Low(X) is on-threshold instead of a potentially
+    # much lower sample.
+    for j in range(idx_hi, 0, -1):
+        y0 = float(ys[j - 1])
+        y1 = float(ys[j])
+        if (y0 <= ec1 <= y1) or (y1 <= ec1 <= y0):
+            x0 = float(xs[j - 1])
+            x1 = float(xs[j])
+            if y1 != y0:
+                frac = (ec1 - y0) / (y1 - y0)
+                i_lo = x0 + frac * (x1 - x0)
+            else:
+                i_lo = x0
+            idx_lo = j - 1
+            e_lo_used = float(ec1)
+            break
+        if y1 <= ec1:
             idx_lo = j
+            i_lo = float(xs[j])
+            e_lo_used = float(ys[j])
             break
 
-    i_lo = float(xs[idx_lo])
     i_hi = float(xs[idx_hi])
     if i_hi <= i_lo:
         i_hi = i_lo + max(1e-12, 0.01 * (span if span > 0 else 1.0))
+    return i_lo, i_hi, idx_lo, idx_hi, e_lo_used, float(ys[idx_hi])
+
+
+def pick_loglog_i_window_from_thresholds(
+    x_sorted: np.ndarray,
+    e_sc_smoothed: np.ndarray,
+    *,
+    ec1: float,
+    ec2: float,
+    guard_fraction: float = DEFAULT_EC_WINDOW_GUARD_FRAC,
+) -> tuple[float, float]:
+    """Pick (Low(X), High(X)) from corrected+smoothed IEC thresholds."""
+    i_lo, i_hi, _, _, _, _ = pick_loglog_i_window_details(
+        x_sorted, e_sc_smoothed, ec1=ec1, ec2=ec2, guard_fraction=guard_fraction,
+    )
     return i_lo, i_hi
 
 
@@ -534,7 +572,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         point_sigma: Optional[np.ndarray] = None,
                         weight_mode: str = DEFAULT_WEIGHT_MODE,
                         ) -> tuple[float, float, float, int, tuple[float, float],
-                                   float, float, float]:
+                                   float, float, float, int, int, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
 
     E_sc = y - V0 - R*x is the baseline-subtracted signal. To keep Step-4
@@ -594,8 +632,16 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             f"[{Ec1:.3g}, {Ec2:.3g}] on the corrected+smoothed curve. "
             "Slow the ramp, reduce averaging, or widen the decade."
         )
-    log_I = np.log10(xs[mask])
-    e_fit = np.clip(e_sc_bounds[mask], 1e-30, None)
+    x_fit = xs[mask]
+    e_fit = e_sc_bounds[mask]
+    pos_fit = np.isfinite(x_fit) & np.isfinite(e_fit) & (x_fit > 0) & (e_fit > 0)
+    if int(np.count_nonzero(pos_fit)) < 4:
+        raise ValueError(
+            "Not enough strictly positive corrected+smoothed points in the Ec window "
+            "for log-log fit after removing non-positive values."
+        )
+    log_I = np.log10(x_fit[pos_fit])
+    e_fit = e_fit[pos_fit]
     log_E = np.log10(e_fit)
     w = np.ones_like(log_E, dtype=float)
     if point_sigma is not None and weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
@@ -650,11 +696,11 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    I_lo, I_hi = pick_loglog_i_window_from_thresholds(
+    I_lo, I_hi, idx_lo, idx_hi, e_lo, e_hi = pick_loglog_i_window_details(
         xs, e_sc_bounds, ec1=Ec1, ec2=Ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
     )
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
-            sigma_Ic, sigma_n, r_squared)
+            sigma_Ic, sigma_n, r_squared, idx_lo, idx_hi, e_lo, e_hi)
 
 
 def _ramp_ratio(V0: float, criterion: float) -> float:
@@ -739,7 +785,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         crit_for_ic = Vc if (Vc is not None and Vc > 0) else settings.ec2
         try:
             (Ic, n_value, chi_sqr, n_pts, n_window,
-             sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
+             sigma_Ic, sigma_n, r_squared, idx_lo, idx_hi, e_lo, e_hi) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
                 criterion_E=crit_for_ic,
                 point_sigma=point_sigma,
@@ -757,6 +803,12 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         if thermal_applied:
             fit_y = fit_y + V_ofs
         ratio = _ramp_ratio(V0, crit_for_ic)
+        order_dbg = np.argsort(x)
+        xs_dbg = np.asarray(x[order_dbg], dtype=float)
+        e_dbg = np.asarray(y[order_dbg] - V0 - R * xs_dbg, dtype=float)
+        pos_dbg = xs_dbg > 0
+        xs_dbg = xs_dbg[pos_dbg]
+        e_dbg = adaptive_smooth_for_ec_window(e_dbg[pos_dbg], settings.ec1, settings.ec2)
         return FitResult(
             ok=True,
             message="IEC 61788 log-log n-value fit succeeded.",
@@ -781,6 +833,12 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             ec2=settings.ec2,
             n_window_I=n_window,
             n_points_used=n_pts,
+            n_window_low_idx=idx_lo,
+            n_window_high_idx=idx_hi,
+            n_window_low_e=e_lo,
+            n_window_high_e=e_hi,
+            n_window_ref_x=xs_dbg,
+            n_window_ref_e=e_dbg,
             sigma_Ic=sigma_Ic,
             sigma_n=sigma_n,
             r_squared=r_squared,

@@ -3011,8 +3011,17 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     y_arr = y_arr[order]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
-    ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
-    ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
+    ec1_ui = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6)
+    ec2_ui = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6)
+    # Avoid silently collapsing to an ultra-tiny floor (1e-30 V), which can
+    # show up as 1e-24 in µV units and create confusing Low(X) behavior when
+    # the user field is empty/zero/invalid.
+    if not np.isfinite(ec1_ui) or ec1_ui <= 0.0:
+        ec1_ui = DEFAULT_EC1_V_PER_CM * 1.0e6
+    if not np.isfinite(ec2_ui) or ec2_ui <= ec1_ui:
+        ec2_ui = max(DEFAULT_EC2_V_PER_CM * 1.0e6, ec1_ui * 10.0)
+    ec1 = ec1_ui * to_si
+    ec2 = max(ec2_ui * to_si, ec1 * 1.000001)
     x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
     x_lo, x_hi = pick_loglog_i_window_from_thresholds(
@@ -3320,6 +3329,10 @@ def _format_result(result) -> str:
             f"N={result.n_points_used}"
             + ("  (too few — noisy)" if getattr(result, "insufficient_n_points", False) else "")
         )
+        lines.append(
+            f"window debug  = lo[idx={getattr(result, 'n_window_low_idx', -1)}, E={getattr(result, 'n_window_low_e', float('nan')):.6g}], "
+            f"hi[idx={getattr(result, 'n_window_high_idx', -1)}, E={getattr(result, 'n_window_high_e', float('nan')):.6g}]"
+        )
     else:
         lines.append(f"iterations    = {result.iterations}")
         lines.append(f"Ic history    = [{', '.join(f'{v:.4g}' for v in result.ic_history)}]")
@@ -3555,7 +3568,8 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
 
 
 def _write_fit_report_same_group(report_path: Path,
-                                 new_entries: dict[str, dict]) -> Optional[str]:
+                                 new_entries: dict[str, dict],
+                                 debug_curve_objects: Optional[list[ChannelObject]] = None) -> Optional[str]:
     """Attach fit properties as channel metadata on the matching source channels.
 
     Reads the source TDMS, merges each curve's fit properties into the
@@ -3590,11 +3604,15 @@ def _write_fit_report_same_group(report_path: Path,
                                       properties=props)
                     )
         out_objects: list = list(existing_groups) + list(existing_channels)
+        debug_curve_objects = list(debug_curve_objects or [])
         if unmatched:
             out_objects.append(GroupObject("FitResults"))
             for name, props in unmatched.items():
                 data = np.array([np.nan], dtype=np.float64)
                 out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+        if debug_curve_objects:
+            out_objects.append(GroupObject("FitDebug"))
+            out_objects.extend(debug_curve_objects)
         with TdmsWriter(str(report_path)) as writer:
             writer.write_segment(out_objects)
         return str(report_path)
@@ -3652,8 +3670,25 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 
     new_entries = {lbl: _fit_result_properties(r) for lbl, r in persistent}
 
+    debug_curve_objects = []
+    for lbl, res in persistent:
+        x_raw = getattr(res, "n_window_ref_x", None) if res is not None else None
+        e_raw = getattr(res, "n_window_ref_e", None) if res is not None else None
+        if x_raw is None or e_raw is None:
+            continue
+        x_dbg = np.asarray(x_raw, dtype=float)
+        e_dbg = np.asarray(e_raw, dtype=float)
+        if x_dbg.size and e_dbg.size:
+            n_dbg = int(min(x_dbg.size, e_dbg.size))
+            x_dbg = x_dbg[:n_dbg]
+            e_dbg = e_dbg[:n_dbg]
+            if n_dbg > 0:
+                safe = ''.join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in str(lbl))
+                debug_curve_objects.append(ChannelObject("FitDebug", f"{safe}__I_A", np.asarray(x_dbg, dtype=np.float64)))
+                debug_curve_objects.append(ChannelObject("FitDebug", f"{safe}__E_corr_smooth", np.asarray(e_dbg, dtype=np.float64)))
+
     if not save_separate and same_group:
-        return _write_fit_report_same_group(report_path, new_entries)
+        return _write_fit_report_same_group(report_path, new_entries, debug_curve_objects)
 
     if save_separate:
         # Preserve FitResults channels from prior runs that this fit didn't touch
@@ -3672,9 +3707,12 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
                 existing = {}
         merged = {**existing, **new_entries}
         objects = [GroupObject("FitResults")]
+        if debug_curve_objects:
+            objects.append(GroupObject("FitDebug"))
         for name, props in merged.items():
             data = np.array([np.nan], dtype=np.float64)
             objects.append(ChannelObject("FitResults", name, data, properties=props))
+        objects.extend(debug_curve_objects)
         try:
             with TdmsWriter(str(report_path)) as writer:
                 writer.write_segment(objects)
@@ -3687,9 +3725,12 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     # adds a new segment; readers see the latest properties, which is the
     # overwrite semantics requested for re-runs.
     objects = [GroupObject("FitResults")]
+    if debug_curve_objects:
+        objects.append(GroupObject("FitDebug"))
     for name, props in new_entries.items():
         data = np.array([np.nan], dtype=np.float64)
         objects.append(ChannelObject("FitResults", name, data, properties=props))
+    objects.extend(debug_curve_objects)
     try:
         with TdmsWriter(str(report_path), mode="a") as writer:
             writer.write_segment(objects)
