@@ -719,7 +719,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     ``FIT_METHOD_NONLINEAR``.
     """
     settings = settings or FitSettings()
-    t, x, y = trim_vi_curve(t, x, y, settings)
+    t_raw, x_raw, y_raw = _clean_arrays(t, x, y)
+    t, x, y = trim_vi_curve(t_raw, x_raw, y_raw, settings)
     if x.size < 8:
         return FitResult(ok=False, message="Not enough valid samples to fit.")
 
@@ -737,7 +738,9 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     V_ofs = 0.0
     thermal_applied = False
     if getattr(settings, "subtract_thermal_offset", True):
-        V_ofs, n_zero = estimate_thermal_offset(x, y, settings.zero_i_frac)
+        # Keep Step 1 reliable: estimate V_ofs from the original cleaned trace,
+        # then apply it to the trimmed working trace for Step 2/3/4.
+        V_ofs, n_zero = estimate_thermal_offset(x_raw, y_raw, settings.zero_i_frac)
         if n_zero > 0:
             y = y - V_ofs
             thermal_applied = True

@@ -4592,7 +4592,8 @@ def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, setting
     n = int(min(t_arr.size, x_arr.size, y_arr.size))
     if n < 8:
         raise ValueError("Not enough valid samples to fit.")
-    t_arr, x_arr, y_arr = trim_vi_curve(t_arr[:n], x_arr[:n], y_arr[:n], settings)
+    t_raw, x_raw, y_raw = t_arr[:n], x_arr[:n], y_arr[:n]
+    t_arr, x_arr, y_arr = trim_vi_curve(t_raw, x_raw, y_raw, settings)
     if x_arr.size < 8:
         raise ValueError("Not enough valid samples to fit.")
     x_min = float(np.min(x_arr))
@@ -4602,7 +4603,9 @@ def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, setting
 
     V_ofs = 0.0
     if getattr(settings, "subtract_thermal_offset", True):
-        V_ofs, n_zero = estimate_thermal_offset(x_arr, y_arr, settings.zero_i_frac)
+        # Match full-fit behavior: Step 1 uses the original cleaned curve so
+        # V_ofs remains available even when the beginning is trimmed away.
+        V_ofs, n_zero = estimate_thermal_offset(x_raw, y_raw, settings.zero_i_frac)
         if n_zero > 0:
             y_arr = y_arr - V_ofs
         else:
