@@ -652,6 +652,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_add_corrected_btn.clicked.connect(lambda: (_add_corrected_curve_from_last_fit(app), robust_view(app)))
     app.data_fit_export_ec_scan_btn.clicked.connect(lambda: _export_ec1_lowx_scan_csv(app))
     app.data_fit_export_ref_tdms_btn.clicked.connect(lambda: _export_corrected_reference_tdms(app))
+    app.data_fit_trace_dip_btn.clicked.connect(lambda: _export_point_trace_csv(app))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
     # Mutually exclusive radios fire toggled() twice per click (deselect +
@@ -1232,6 +1233,12 @@ def setup_data_fitting_tab_layout(app):
         "Current, Y_corrected, Y_smoothed_corrected."
     )
     power_layout.addWidget(app.data_fit_export_ref_tdms_btn, 8, 0, 1, 4)
+    app.data_fit_trace_dip_btn = QPushButton("Trace point origin CSV")
+    app.data_fit_trace_dip_btn.setToolTip(
+        "Debug tool: export raw and corrected samples around the current\n"
+        "in Low(X) so you can see exactly where a dip originates."
+    )
+    power_layout.addWidget(app.data_fit_trace_dip_btn, 9, 0, 1, 4)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
@@ -4397,6 +4404,52 @@ def _export_corrected_reference_tdms(app) -> None:
     with TdmsWriter(str(path)) as writer:
         writer.write_segment(objects)
     QMessageBox.information(app, "Export corrected TDMS", f"Exported {n} points to:\n{path}")
+
+
+def _export_point_trace_csv(app) -> None:
+    """Export a forensic trace around the current in Low(X)."""
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(app, "Trace point origin", "No fit result available.")
+        return
+    result, _parent, _sig, _label, x, y, t = resolved
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+    n = int(min(x.size, y.size))
+    if n < 3:
+        QMessageBox.warning(app, "Trace point origin", "Not enough data.")
+        return
+    x = x[:n]
+    y = y[:n]
+    t = t[:n] if t.size >= n else np.arange(n, dtype=float)
+    baseline = float(result.V0) + float(result.R) * x
+    y_corr = y - baseline
+    ec1_guess = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * (1.0e-6 if app.data_fit_use_length_cb.isChecked() else 1.0e-3), 1e-12)
+    ec2_guess = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * (1.0e-6 if app.data_fit_use_length_cb.isChecked() else 1.0e-3), ec1_guess * 1.000001)
+    y_sm = _adaptive_smooth_visual(y_corr, ec1_guess, ec2_guess)
+    target_x = _float_from(app.data_fit_power_low_x, float(np.median(x)))
+    order = np.argsort(np.abs(x - target_x))
+    k = min(120, n)
+    sel = np.sort(order[:k])
+    out = np.column_stack([
+        sel.astype(float),
+        t[sel],
+        x[sel],
+        y[sel],
+        baseline[sel],
+        y_corr[sel],
+        y_sm[sel],
+    ])
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Trace point origin CSV", str(Path(default_dir) / "point_trace.csv"), "CSV Files (*.csv)"
+    )
+    if not path:
+        return
+    header = "index,time_s,current_A,y_raw,baseline_v0_plus_rI,y_corrected,y_smoothed_corrected"
+    np.savetxt(path, out, delimiter=",", header=header, comments="")
+    QMessageBox.information(app, "Trace point origin", f"Exported {out.shape[0]} nearby samples to:\n{path}")
 
 
 def _refresh_save_settings_enabled(app) -> None:
