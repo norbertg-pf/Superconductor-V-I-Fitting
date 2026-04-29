@@ -4237,9 +4237,10 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     valid = np.isfinite(x) & np.isfinite(y) & (x > 0)
     x = x[valid]
     y = y[valid]
-    # Keep one physical branch (longest non-decreasing-current run) before
-    # sorting, so diagnostics are not polluted by mixed up/down sweeps.
+    # Keep one physical branch before sorting; prefer the run that contains
+    # the global max-current point (Step-4 region of interest).
     if x.size >= 3:
+        peak_idx = int(np.argmax(x))
         dx = np.diff(x)
         run_starts = [0]
         run_ends = []
@@ -4251,10 +4252,18 @@ def _export_ec1_lowx_scan_csv(app) -> None:
         best_len = -1
         best = (0, x.size)
         for a, b in zip(run_starts, run_ends):
+            if not (a <= peak_idx < b):
+                continue
             seg_len = b - a
             if seg_len > best_len:
                 best_len = seg_len
                 best = (a, b)
+        if best_len < 0:
+            for a, b in zip(run_starts, run_ends):
+                seg_len = b - a
+                if seg_len > best_len:
+                    best_len = seg_len
+                    best = (a, b)
         a, b = best
         x = x[a:b]
         y = y[a:b]

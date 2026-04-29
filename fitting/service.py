@@ -231,9 +231,10 @@ def pick_loglog_i_window_from_thresholds(
         return 0.0, 0.0
     # Keep one physical ramp branch before any X-sorting. The raw trace can
     # contain up/down sweeps; mixing them at equal/near-equal current creates
-    # non-physical jumps in E(I). We choose the longest non-decreasing-current
-    # contiguous run.
+    # non-physical jumps in E(I). Prefer the non-decreasing run that contains
+    # the global max-current point (the Step-4 region of interest).
     if xs.size >= 3:
+        peak_idx = int(np.argmax(xs))
         dx = np.diff(xs)
         run_starts = [0]
         run_ends = []
@@ -245,10 +246,19 @@ def pick_loglog_i_window_from_thresholds(
         best_len = -1
         best = (0, xs.size)
         for a, b in zip(run_starts, run_ends):
+            if not (a <= peak_idx < b):
+                continue
             seg_len = b - a
             if seg_len > best_len:
                 best_len = seg_len
                 best = (a, b)
+        # Fallback if peak is not inside any non-decreasing run (very noisy trace).
+        if best_len < 0:
+            for a, b in zip(run_starts, run_ends):
+                seg_len = b - a
+                if seg_len > best_len:
+                    best_len = seg_len
+                    best = (a, b)
         a, b = best
         xs = xs[a:b]
         ys = ys[a:b]
