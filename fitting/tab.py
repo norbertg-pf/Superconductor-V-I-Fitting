@@ -2941,8 +2941,10 @@ def _on_band_dragged(app, window: str) -> None:
         # physically meaningful positive level seen on the same curve.
         pos = np.asarray(y_ref, dtype=float)
         pos = pos[np.isfinite(pos) & (pos > 0.0)]
-        positive_floor = float(np.min(pos)) if pos.size else 1.0e-30
-        ec1 = max(y_lo, positive_floor, 1.0e-30)
+        # Use a robust positive floor (percentile), not absolute minimum,
+        # to avoid one-point tiny outliers driving Ec1 toward 1e-24 display.
+        positive_floor = float(np.percentile(pos, 5.0)) if pos.size else 1.0e-12
+        ec1 = max(y_lo, positive_floor)
         ec2 = max(y_hi, ec1 * 1.000001)
         from_si = 1.0e6 if has_length else 1.0e3
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
