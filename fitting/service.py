@@ -237,11 +237,10 @@ def pick_loglog_i_window_from_thresholds(
     ys = ys[order]
     xs_u, inv = np.unique(xs, return_inverse=True)
     if xs_u.size != xs.size:
-        ys_u = np.empty_like(xs_u, dtype=float)
-        for k in range(xs_u.size):
-            grp = ys[inv == k]
-            grp = grp[np.isfinite(grp)]
-            ys_u[k] = float(np.max(grp)) if grp.size else float("nan")
+        # O(N): aggregate duplicate-current groups with vectorized max, avoiding
+        # per-group masking loops that can freeze UI on large traces.
+        ys_u = np.full(xs_u.shape, -np.inf, dtype=float)
+        np.maximum.at(ys_u, inv, ys)
         good = np.isfinite(ys_u)
         xs = xs_u[good]
         ys = ys_u[good]
