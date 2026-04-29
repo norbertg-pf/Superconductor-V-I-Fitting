@@ -27,6 +27,8 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QDialog,
+    QDialogButtonBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -671,6 +673,28 @@ def _connect_data_fitting_actions(app):
         lambda checked: _on_fit_method_changed(app) if checked else None
     )
     app.data_fit_plot_scale_btn.clicked.connect(lambda: _toggle_plot_scale(app))
+    if getattr(app, "data_fit_config_btn", None) is not None:
+        app.data_fit_config_btn.clicked.connect(lambda: _open_fit_config_dialog(app))
+
+
+
+def _open_fit_config_dialog(app) -> None:
+    dialog = QDialog(app)
+    dialog.setWindowTitle("Fit config")
+    layout = QVBoxLayout(dialog)
+    group = getattr(app, "data_fit_iter_group", None)
+    if group is not None:
+        group.setParent(dialog)
+        group.setVisible(True)
+        layout.addWidget(group)
+    btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    btns.rejected.connect(dialog.reject)
+    btns.accepted.connect(dialog.accept)
+    layout.addWidget(btns)
+    dialog.exec()
+    if group is not None:
+        group.setParent(app)
+        group.setVisible(False)
 
 
 def _on_transform_inputs_changed(app) -> None:
@@ -1223,7 +1247,7 @@ def setup_data_fitting_tab_layout(app):
         "Robust: weighted + Huber reweighting to suppress outliers."
     )
     power_layout.addWidget(QLabel("Point weighting:"), 2, 0, 1, 1)
-    power_layout.addWidget(app.data_fit_weight_mode_cb, 2, 1, 1, 2)
+    power_layout.addWidget(app.data_fit_weight_mode_cb, 2, 1, 1, 1)
 
     # Toggle between linear/linear and log/log axes. Text tracks current mode.
     app.data_fit_plot_scale_btn = QPushButton("Switch to log-log plot")
@@ -1232,7 +1256,10 @@ def setup_data_fitting_tab_layout(app):
         "Log-log also updates the graph-settings dialog (Scale → Log10\n"
         "on both axes) so the setting persists when you re-open it."
     )
-    power_layout.addWidget(app.data_fit_plot_scale_btn, 0, 3, 2, 1)
+    power_layout.addWidget(app.data_fit_plot_scale_btn, 2, 2, 1, 1)
+    app.data_fit_config_btn = QPushButton("Config")
+    app.data_fit_config_btn.setToolTip("Open Ic iteration and criterion settings.")
+    power_layout.addWidget(app.data_fit_config_btn, 0, 3, 2, 1)
     app.data_fit_add_corrected_btn = QPushButton("Add corrected curve")
     app.data_fit_add_corrected_btn.setToolTip(
         "Add the baseline-corrected curve from the last successful fit:\n"
@@ -1311,7 +1338,8 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_chi_tol, 0, 3)
     iter_layout.addWidget(app.data_fit_vc_label, 1, 2)
     iter_layout.addWidget(app.data_fit_vc_input, 1, 3)
-    left.addWidget(iter_group)
+    iter_group.setVisible(False)
+    app.data_fit_iter_group = iter_group
 
     run_row = QHBoxLayout()
     app.data_fit_run_btn = QPushButton("Run Fit")
