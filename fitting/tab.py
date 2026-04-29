@@ -3332,6 +3332,7 @@ def _format_result(result) -> str:
 
 
 _FIT_PROPERTY_PREFIX = "fit_"
+_FIT_CURVES_GROUP = "FitCurves"
 _FIT_PROPERTY_KEYS = (
     "method", "method_compliant", "fit_status", "fit_message",
     "fit_timestamp", "Ic_A", "sigma_Ic_A", "n_value", "sigma_n",
@@ -3407,6 +3408,32 @@ def _fit_result_properties(result) -> dict:
               "thermal_offset_applied", "uses_sample_length"):
         props[k] = "True" if props[k] else "False"
     return props
+
+
+def _fit_curve_group_objects(results: list[tuple[str, object]]) -> list:
+    """Build TDMS channels for fitted service curves (Y) and matching current (X)."""
+    objects: list = []
+    for label, result in results:
+        if result is None:
+            continue
+        fit_y = getattr(result, "fit_y", None)
+        fit_x = getattr(result, "fit_x", None)
+        if fit_y is None or fit_x is None:
+            continue
+        y_arr = np.asarray(fit_y, dtype=float)
+        x_arr = np.asarray(fit_x, dtype=float)
+        if y_arr.size == 0 or x_arr.size == 0:
+            continue
+        n = min(y_arr.size, x_arr.size)
+        y_arr = y_arr[:n]
+        x_arr = x_arr[:n]
+        if n == 0:
+            continue
+        objects.append(ChannelObject(_FIT_CURVES_GROUP, f"{label}_ys", y_arr))
+        objects.append(ChannelObject(_FIT_CURVES_GROUP, f"{label}_current", x_arr))
+    if objects:
+        return [GroupObject(_FIT_CURVES_GROUP)] + objects
+    return []
 
 
 def _prefix_fit_props(props: dict) -> dict:
@@ -3555,7 +3582,8 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
 
 
 def _write_fit_report_same_group(report_path: Path,
-                                 new_entries: dict[str, dict]) -> Optional[str]:
+                                 new_entries: dict[str, dict],
+                                 curve_results: list[tuple[str, object]]) -> Optional[str]:
     """Attach fit properties as channel metadata on the matching source channels.
 
     Reads the source TDMS, merges each curve's fit properties into the
@@ -3576,7 +3604,7 @@ def _write_fit_report_same_group(report_path: Path,
         unmatched: dict[str, dict] = dict(new_entries)
         with TdmsFile.read(str(report_path)) as tfile:
             for grp in tfile.groups():
-                if grp.name == "FitResults":
+                if grp.name in ("FitResults", _FIT_CURVES_GROUP):
                     continue
                 existing_groups.append(GroupObject(grp.name, properties=dict(grp.properties)))
                 for ch in grp.channels():
@@ -3595,6 +3623,8 @@ def _write_fit_report_same_group(report_path: Path,
             for name, props in unmatched.items():
                 data = np.array([np.nan], dtype=np.float64)
                 out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+        curve_objects = _fit_curve_group_objects(curve_results)
+        out_objects.extend(curve_objects)
         with TdmsWriter(str(report_path)) as writer:
             writer.write_segment(out_objects)
         return str(report_path)
@@ -3653,7 +3683,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     new_entries = {lbl: _fit_result_properties(r) for lbl, r in persistent}
 
     if not save_separate and same_group:
-        return _write_fit_report_same_group(report_path, new_entries)
+        return _write_fit_report_same_group(report_path, new_entries, persistent)
 
     if save_separate:
         # Preserve FitResults channels from prior runs that this fit didn't touch
@@ -3675,6 +3705,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
         for name, props in merged.items():
             data = np.array([np.nan], dtype=np.float64)
             objects.append(ChannelObject("FitResults", name, data, properties=props))
+        objects.extend(_fit_curve_group_objects(persistent))
         try:
             with TdmsWriter(str(report_path)) as writer:
                 writer.write_segment(objects)
@@ -3690,6 +3721,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     for name, props in new_entries.items():
         data = np.array([np.nan], dtype=np.float64)
         objects.append(ChannelObject("FitResults", name, data, properties=props))
+    objects.extend(_fit_curve_group_objects(persistent))
     try:
         with TdmsWriter(str(report_path), mode="a") as writer:
             writer.write_segment(objects)
@@ -3703,9 +3735,10 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
             if report_path.exists():
                 with TdmsFile.read(str(report_path)) as tfile:
                     for grp in tfile.groups():
-                        if grp.name == "FitResults":
+                        if grp.name in ("FitResults", _FIT_CURVES_GROUP):
                             for ch in grp.channels():
-                                existing_fit[ch.name] = dict(ch.properties)
+                                if grp.name == "FitResults":
+                                    existing_fit[ch.name] = dict(ch.properties)
                             continue
                         existing_groups.append(GroupObject(grp.name, properties=dict(grp.properties)))
                         for ch in grp.channels():
@@ -3719,6 +3752,7 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
             for name, props in merged.items():
                 data = np.array([np.nan], dtype=np.float64)
                 out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+            out_objects.extend(_fit_curve_group_objects(persistent))
             with TdmsWriter(str(report_path)) as writer:
                 writer.write_segment(out_objects)
         except Exception as exc:
