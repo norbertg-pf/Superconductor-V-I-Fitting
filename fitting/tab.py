@@ -651,6 +651,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_add_plot_btn.clicked.connect(lambda: (_add_plot_from_current(app), robust_view(app)))
     app.data_fit_add_corrected_btn.clicked.connect(lambda: (_add_corrected_curve_from_last_fit(app), robust_view(app)))
     app.data_fit_export_ec_scan_btn.clicked.connect(lambda: _export_ec1_lowx_scan_csv(app))
+    app.data_fit_export_ref_tdms_btn.clicked.connect(lambda: _export_corrected_reference_tdms(app))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
     # Mutually exclusive radios fire toggled() twice per click (deselect +
@@ -1225,6 +1226,12 @@ def setup_data_fitting_tab_layout(app):
         "corrected+smoothed reference curve used by window picking."
     )
     power_layout.addWidget(app.data_fit_export_ec_scan_btn, 7, 0, 1, 4)
+    app.data_fit_export_ref_tdms_btn = QPushButton("Export corrected TDMS")
+    app.data_fit_export_ref_tdms_btn.setToolTip(
+        "Export Step-4 reference signals to a new TDMS file:\n"
+        "Current, Y_corrected, Y_smoothed_corrected."
+    )
+    power_layout.addWidget(app.data_fit_export_ref_tdms_btn, 8, 0, 1, 4)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
@@ -4346,6 +4353,48 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     )
     np.savetxt(path, out, delimiter=",", header=header, comments="")
     QMessageBox.information(app, "Export Ec1→Low(X)", f"Exported {out.shape[0]} rows to:\n{path}")
+
+
+def _export_corrected_reference_tdms(app) -> None:
+    """Export Current + corrected + smoothed-corrected curves to a new TDMS."""
+    ok = _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
+    if not ok:
+        QMessageBox.warning(app, "Export corrected TDMS", "Could not build Step-4 reference curve. Run fit first.")
+        return
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(app, "Export corrected TDMS", "No fit result available.")
+        return
+    result, _parent, _sig, _label, x, y, t = resolved
+    y_corr = np.asarray(y, dtype=float) - (float(result.V0) + float(result.R) * np.asarray(x, dtype=float))
+    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
+    x_ref = np.asarray(ref.get("x", []), dtype=float)
+    y_sm = np.asarray(ref.get("y", []), dtype=float)
+    n = int(min(np.asarray(x, dtype=float).size, y_corr.size, x_ref.size, y_sm.size))
+    if n < 3:
+        QMessageBox.warning(app, "Export corrected TDMS", "Not enough points to export.")
+        return
+    x_arr = np.asarray(x, dtype=float)[:n]
+    y_corr = y_corr[:n]
+    y_sm = y_sm[:n]
+    t_arr = np.asarray(t, dtype=float)[:n] if np.asarray(t, dtype=float).size >= n else np.arange(n, dtype=float)
+
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Export corrected TDMS", str(Path(default_dir) / "corrected_reference.tdms"), "TDMS Files (*.tdms)"
+    )
+    if not path:
+        return
+    objects = [
+        GroupObject("Step4Reference"),
+        ChannelObject("Step4Reference", "Time", t_arr),
+        ChannelObject("Step4Reference", "Current", x_arr),
+        ChannelObject("Step4Reference", "Y_corrected", y_corr),
+        ChannelObject("Step4Reference", "Y_smoothed_corrected", y_sm),
+    ]
+    with TdmsWriter(str(path)) as writer:
+        writer.write_segment(objects)
+    QMessageBox.information(app, "Export corrected TDMS", f"Exported {n} points to:\n{path}")
 
 
 def _refresh_save_settings_enabled(app) -> None:
