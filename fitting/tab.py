@@ -2897,26 +2897,29 @@ def _on_band_dragged(app, window: str) -> None:
         ec1_guess = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
         ec2_guess = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
         y_ref = y_arr if (ref_x.size and ref_y.size) else _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
-        idx_lo = int(np.argmin(np.abs(x_arr - lo)))
-        idx_hi = int(np.argmin(np.abs(x_arr - hi)))
-        # Use a tiny local neighborhood median instead of a single point.
-        # This avoids one-sample numerical dips affecting Ec picks when
-        # dragging the window.
-        def _local_median(arr: np.ndarray, idx: int, half_window: int = 2) -> float:
-            lo_i = max(0, int(idx) - int(half_window))
-            hi_i = min(arr.size, int(idx) + int(half_window) + 1)
-            seg = np.asarray(arr[lo_i:hi_i], dtype=float)
-            seg = seg[np.isfinite(seg)]
-            if seg.size == 0:
-                return float("nan")
-            return float(np.median(seg))
-
-        y_lo = _local_median(y_ref, idx_lo)
-        y_hi = _local_median(y_ref, idx_hi)
-        if not np.isfinite(y_lo):
-            y_lo = float(y_ref[idx_lo])
-        if not np.isfinite(y_hi):
-            y_hi = float(y_ref[idx_hi])
+        # Estimate Ec at dragged X via interpolation on a monotonic X grid.
+        # This avoids ambiguous nearest-point picks when current values repeat
+        # (or are slightly out-of-order) and removes one-sample dips.
+        finite_xy = np.isfinite(x_arr) & np.isfinite(y_ref)
+        x_f = np.asarray(x_arr[finite_xy], dtype=float)
+        y_f = np.asarray(y_ref[finite_xy], dtype=float)
+        if x_f.size == 0:
+            return
+        order = np.argsort(x_f, kind="mergesort")
+        x_s = x_f[order]
+        y_s = y_f[order]
+        # Collapse duplicate X points by median Y at each X.
+        x_u, inv = np.unique(x_s, return_inverse=True)
+        y_u = np.empty_like(x_u, dtype=float)
+        for k in range(x_u.size):
+            y_u[k] = float(np.median(y_s[inv == k]))
+        if x_u.size == 1:
+            y_lo = y_hi = float(y_u[0])
+        else:
+            x_lo_eval = float(np.clip(lo, x_u[0], x_u[-1]))
+            x_hi_eval = float(np.clip(hi, x_u[0], x_u[-1]))
+            y_lo = float(np.interp(x_lo_eval, x_u, y_u))
+            y_hi = float(np.interp(x_hi_eval, x_u, y_u))
         # When the picked point lands on a tiny negative/near-zero corrected
         # value (common around baseline crossing), clamping directly to 1e-30
         # creates a confusing Ec1=1e-24 µV/cm display. Prefer the smallest
