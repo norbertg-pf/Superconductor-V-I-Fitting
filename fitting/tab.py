@@ -2899,8 +2899,17 @@ def _on_band_dragged(app, window: str) -> None:
         y_ref = y_arr if (ref_x.size and ref_y.size) else _adaptive_smooth_visual(y_arr, ec1_guess, ec2_guess)
         idx_lo = int(np.argmin(np.abs(x_arr - lo)))
         idx_hi = int(np.argmin(np.abs(x_arr - hi)))
-        ec1 = max(float(y_ref[idx_lo]), 1.0e-30)
-        ec2 = max(float(y_ref[idx_hi]), ec1 * 1.000001)
+        y_lo = float(y_ref[idx_lo])
+        y_hi = float(y_ref[idx_hi])
+        # When the picked point lands on a tiny negative/near-zero corrected
+        # value (common around baseline crossing), clamping directly to 1e-30
+        # creates a confusing Ec1=1e-24 µV/cm display. Prefer the smallest
+        # physically meaningful positive level seen on the same curve.
+        pos = np.asarray(y_ref, dtype=float)
+        pos = pos[np.isfinite(pos) & (pos > 0.0)]
+        positive_floor = float(np.min(pos)) if pos.size else 1.0e-30
+        ec1 = max(y_lo, positive_floor, 1.0e-30)
+        ec2 = max(y_hi, ec1 * 1.000001)
         from_si = 1.0e6 if has_length else 1.0e3
         _set_silently(app.data_fit_power_low, f"{ec1 * from_si:.6g}")
         _set_silently(app.data_fit_power_vfrac, f"{ec2 * from_si:.6g}")
