@@ -1618,6 +1618,28 @@ def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndar
     y_out = y_arr[mask]
     t_out = t_arr[mask] if t_arr is not None else None
     return x_out, y_out, t_out
+
+
+def _trim_active_curve_entry_in_place(app) -> bool:
+    """Trim the active stored curve entry in-place so the user sees removed points."""
+    active_key = _curve_profile_key_from_ui(app)
+    for entry in getattr(app, "data_fit_curves", []):
+        if str(entry.get("signature")) != str(active_key):
+            continue
+        x = np.asarray(entry.get("x", []), dtype=float)
+        y = np.asarray(entry.get("y", []), dtype=float)
+        t = np.asarray(entry.get("t", []), dtype=float)
+        if x.size == 0 or y.size == 0:
+            return False
+        x_t, y_t, t_t = _trim_xyz_with_step15(app, x, y, t if t.size else None)
+        if x_t.size == 0 or y_t.size == 0:
+            return False
+        entry["x"] = x_t
+        entry["y"] = y_t
+        entry["t"] = (t_t if t_t is not None else np.asarray([]))
+        _refresh_curve_item(entry)
+        return True
+    return False
 def _build_trim_mask(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if x is None or x.size == 0:
         return None
@@ -3999,6 +4021,11 @@ def run_fit(app):
             fit_entry["x"] = ex
             fit_entry["y"] = ey
             fit_entry["t"] = et
+            entry["x"] = ex
+            entry["y"] = ey
+            entry["t"] = et
+            if entry.get("plot_item") is not None:
+                _refresh_curve_item(entry)
             # Each curve carries its own fit method / windows / criterion via
             # the per-curve profile stored in app.data_fit_curve_profiles.
             try:
@@ -4509,6 +4536,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using Step-1/2/3 values."""
     app.data_fit_show_trimmed_preview = True
     refresh_preview(app)
+    _trim_active_curve_entry_in_place(app)
     resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         QMessageBox.warning(
@@ -4803,6 +4831,7 @@ def _add_smoothed_curve_from_current(app) -> None:
     """Create corrected+smoothed Step-4 reference curve and plot a copy."""
     app.data_fit_show_trimmed_preview = True
     refresh_preview(app)
+    _trim_active_curve_entry_in_place(app)
     resolved = _resolve_or_compute_step123_reference(app)
     if resolved is None:
         ok = False
