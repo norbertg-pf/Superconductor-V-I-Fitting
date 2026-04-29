@@ -1547,7 +1547,7 @@ def _block_average(arr: np.ndarray, window: int) -> np.ndarray:
     return arr[: n_bins * window].reshape(n_bins, window).mean(axis=1)
 
 
-def _apply_transforms(app):
+def _apply_transforms(app, *, apply_step_trimming: bool = False):
     controller = app.data_fit_controller
     t_scale, t_offset = _scale_offset_from_inputs(app, "time")
     x_scale, x_offset = _scale_offset_from_inputs(app, "x")
@@ -1572,7 +1572,7 @@ def _apply_transforms(app):
     x_original = np.asarray(x, dtype=float) if x is not None else None
     t_original = np.asarray(t, dtype=float) if t is not None else None
     y_original = np.asarray(y, dtype=float) if y is not None else None
-    trim_mask = _build_trim_mask(app, x_original)
+    trim_mask = _build_trim_mask(app, x_original) if apply_step_trimming else None
     if trim_mask is not None and np.any(trim_mask):
         if t is not None:
             t = t[trim_mask]
@@ -2600,10 +2600,10 @@ def _on_use_length_changed(app):
         _save_active_curve_profile(app)
 
 
-def refresh_preview(app):
+def refresh_preview(app, *, apply_step_trimming: bool = False):
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_step_trimming=apply_step_trimming)
     x = transformed["x"]
     y = transformed["y"]
     app.data_fit_model_curve.setData([], [])
@@ -3162,6 +3162,8 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         if source == "pct":
             _update_loglog_power_x_from_ec(app)
+            _resolve_or_compute_step123_reference(app)
+            refresh_preview(app, apply_step_trimming=True)
         else:
             _refresh_pct_from_x(app, window, which)
         ctx = _data_ctx(app)
@@ -3842,18 +3844,6 @@ def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
 
-    def _loglog_window_fields_present() -> bool:
-        try:
-            lo_txt = (app.data_fit_power_low_x.text() or "").strip()
-            hi_txt = (app.data_fit_power_high_x.text() or "").strip()
-            if not lo_txt or not hi_txt:
-                return False
-            lo_v = float(lo_txt)
-            hi_v = float(hi_txt)
-        except (TypeError, ValueError):
-            return False
-        return np.isfinite(lo_v) and np.isfinite(hi_v) and hi_v > lo_v
-
     def _recompute_loglog_i_window_for_entry(result_obj, entry_obj, entry_settings_obj) -> None:
         """Recompute IEC I-window for one fitted curve and persist to its profile."""
         if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
@@ -3932,7 +3922,7 @@ def run_fit(app):
     # Multi-curve mode: fit only curves explicitly marked "include in fit".
     curves = getattr(app, "data_fit_curves", [])
     included = [c for c in curves if c.get("include_in_fit", True)]
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_step_trimming=True)
     has_preview = bool(getattr(app, "data_fit_preview_visible", True))
     preview_included = bool(getattr(app, "data_fit_preview_include_in_fit", True))
     if has_preview and preview_included:
@@ -4007,7 +3997,7 @@ def run_fit(app):
                     hi_w = float(n_window[1])
                 except (TypeError, ValueError, IndexError):
                     lo_w = hi_w = 0.0
-                if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
                     _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
                     _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
                     app.data_fit_power_window_manual = False
@@ -4088,7 +4078,7 @@ def run_fit(app):
                 )
         return
     controller.last_result = result
-    if not _loglog_window_fields_present():
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         _apply_step4_window_from_reference(result)
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
@@ -4098,7 +4088,7 @@ def run_fit(app):
             hi_w = float(n_window[1])
         except (TypeError, ValueError, IndexError):
             lo_w = hi_w = 0.0
-        if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
             _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
             app.data_fit_power_window_manual = False
@@ -4521,6 +4511,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     existing["label"] = f"{base_label} corrected"
     _refresh_curve_item(existing)
     _refresh_curve_profile_selector(app)
+    refresh_preview(app, apply_step_trimming=True)
 
 
 def _resolve_fit_parent_and_result(app):
@@ -4562,7 +4553,7 @@ def _resolve_fit_parent_and_result(app):
         base_sig = parent_entry.get("signature", parent_entry.get("label", "curve"))
         base_label = parent_entry.get("label", "Curve")
     else:
-        transformed = _apply_transforms(app)
+        transformed = _apply_transforms(app, apply_step_trimming=True)
         x = np.asarray(transformed.get("x", []), dtype=float)
         y = np.asarray(transformed.get("y", []), dtype=float)
         t = np.asarray(transformed.get("time", []), dtype=float)
@@ -4610,7 +4601,7 @@ def _resolve_reference_curve_data(app):
             (t[:n] if t.size else np.asarray([])),
         )
 
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_step_trimming=True)
     x = np.asarray(transformed.get("x", []), dtype=float)
     y = np.asarray(transformed.get("y", []), dtype=float)
     t = np.asarray(transformed.get("time", []), dtype=float)
@@ -4810,6 +4801,7 @@ def _add_smoothed_curve_from_current(app) -> None:
         existing["fit_result"] = result
         _refresh_curve_item(existing)
         _refresh_curve_profile_selector(app)
+        refresh_preview(app, apply_step_trimming=True)
         ok = True
     if not ok:
         QMessageBox.warning(
