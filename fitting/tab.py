@@ -676,6 +676,7 @@ def _connect_data_fitting_actions(app):
     app.data_fit_export_ec_scan_btn.clicked.connect(lambda: _export_ec1_lowx_scan_csv(app))
     app.data_fit_export_ref_tdms_btn.clicked.connect(lambda: _export_corrected_reference_tdms(app))
     app.data_fit_trace_dip_btn.clicked.connect(lambda: _export_point_trace_csv(app))
+    app.data_fit_export_3750_3760_btn.clicked.connect(lambda: _export_current_window_tdms(app, 3750.0, 3760.0))
     app.data_fit_plot_summary_btn.clicked.connect(lambda: _open_plot_summary(app))
     app.data_fit_curve_profile_cb.currentIndexChanged.connect(lambda _: _on_curve_profile_changed(app))
     # Mutually exclusive radios fire toggled() twice per click (deselect +
@@ -1262,6 +1263,12 @@ def setup_data_fitting_tab_layout(app):
         "in Low(X) so you can see exactly where a dip originates."
     )
     power_layout.addWidget(app.data_fit_trace_dip_btn, 9, 0, 1, 4)
+    app.data_fit_export_3750_3760_btn = QPushButton("Export 3750–3760A TDMS")
+    app.data_fit_export_3750_3760_btn.setToolTip(
+        "Export only samples with current between 3750 A and 3760 A\n"
+        "to a new TDMS file (raw/corrected/smoothed)."
+    )
+    power_layout.addWidget(app.data_fit_export_3750_3760_btn, 10, 0, 1, 4)
 
     # --- window editors (rows 2-4) ---
     app.data_fit_power_low = _percent_edit(DEFAULT_POWER_LOW_FRAC)
@@ -4476,6 +4483,53 @@ def _export_point_trace_csv(app) -> None:
     header = "index,time_s,current_A,y_raw,baseline_v0_plus_rI,y_corrected,y_smoothed_corrected"
     np.savetxt(path, out, delimiter=",", header=header, comments="")
     QMessageBox.information(app, "Trace point origin", f"Exported {out.shape[0]} nearby samples to:\n{path}")
+
+
+def _export_current_window_tdms(app, i_low: float, i_high: float) -> None:
+    """Export a fixed current window to TDMS for easy sharing/debug."""
+    resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        QMessageBox.warning(app, "Export current window", "No fit result available.")
+        return
+    result, _parent, _sig, _label, x, y, t = resolved
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+    n = int(min(x.size, y.size))
+    if n < 3:
+        QMessageBox.warning(app, "Export current window", "Not enough points.")
+        return
+    x = x[:n]
+    y = y[:n]
+    t = t[:n] if t.size >= n else np.arange(n, dtype=float)
+    y_corr = y - (float(result.V0) + float(result.R) * x)
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    y_sm = _adaptive_smooth_visual(_despike_corrected_signal(y_corr), ec1, ec2)
+    mask = np.isfinite(x) & np.isfinite(y) & (x >= float(i_low)) & (x <= float(i_high))
+    if np.count_nonzero(mask) < 3:
+        QMessageBox.warning(app, "Export current window", f"No enough points in [{i_low}, {i_high}] A.")
+        return
+    xw, yw, tw, ycw, ysw = x[mask], y[mask], t[mask], y_corr[mask], y_sm[mask]
+    default_dir = _preset_dir(app)
+    path, _ = QFileDialog.getSaveFileName(
+        app, "Export current window TDMS", str(Path(default_dir) / f"window_{i_low:.0f}_{i_high:.0f}A.tdms"), "TDMS Files (*.tdms)"
+    )
+    if not path:
+        return
+    objects = [
+        GroupObject("CurrentWindow"),
+        ChannelObject("CurrentWindow", "Time", tw),
+        ChannelObject("CurrentWindow", "Current", xw),
+        ChannelObject("CurrentWindow", "Y_raw", yw),
+        ChannelObject("CurrentWindow", "Y_corrected", ycw),
+        ChannelObject("CurrentWindow", "Y_smoothed_corrected", ysw),
+    ]
+    with TdmsWriter(str(path)) as writer:
+        writer.write_segment(objects)
+    QMessageBox.information(app, "Export current window", f"Exported {xw.size} points in [{i_low}, {i_high}] A:\n{path}")
 
 
 def _refresh_save_settings_enabled(app) -> None:
