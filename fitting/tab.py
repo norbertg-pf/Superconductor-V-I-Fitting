@@ -972,6 +972,15 @@ def setup_data_fitting_tab_layout(app):
         "settings should coexist without overwriting each other.\n"
         "Greyed out when 'Save fit results to a separate TDMS file' is checked."
     )
+    # Hidden host keeps settings widgets alive when dialogs close/reopen.
+    app.data_fit_settings_host = QWidget(app.ui_state.data_fitting_tab)
+    app.data_fit_settings_host.hide()
+    app.data_fit_settings_host_layout = QVBoxLayout(app.data_fit_settings_host)
+    app.data_fit_settings_host_layout.setContentsMargins(0, 0, 0, 0)
+    app.data_fit_settings_host_layout.addWidget(app.data_fit_auto_load_cb)
+    app.data_fit_settings_host_layout.addWidget(app.data_fit_autosave_cb)
+    app.data_fit_settings_host_layout.addWidget(app.data_fit_save_separate_cb)
+    app.data_fit_settings_host_layout.addWidget(app.data_fit_same_group_cb)
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
     ch_grid = QGridLayout(app.data_fit_channels_group)
@@ -1228,7 +1237,7 @@ def setup_data_fitting_tab_layout(app):
     power_layout.addWidget(app.data_fit_weight_mode_cb, 2, 1, 1, 2)
 
     # Step-4 settings shortcut near weighting/method controls.
-    app.data_fit_step4_settings_btn = QPushButton("Settings")
+    app.data_fit_step4_settings_btn = QPushButton("Fit config")
     app.data_fit_step4_settings_btn.setToolTip(
         "Open Data Fitting settings (including Ic iteration and criterion controls)."
     )
@@ -1320,6 +1329,8 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_chi_tol, 0, 3)
     iter_layout.addWidget(app.data_fit_vc_label, 1, 2)
     iter_layout.addWidget(app.data_fit_vc_input, 1, 3)
+    if getattr(app, "data_fit_settings_host_layout", None) is not None:
+        app.data_fit_settings_host_layout.addWidget(app.data_fit_iter_group)
     run_row = QHBoxLayout()
     app.data_fit_run_btn = QPushButton("Run Fit")
     app.data_fit_run_btn.setStyleSheet("font-weight: bold; background-color: #0078D7; color: white; padding: 8px;")
@@ -4349,6 +4360,20 @@ def _open_settings_dialog(app) -> None:
     if getattr(app, "data_fit_iter_group", None) is not None:
         root.addWidget(app.data_fit_iter_group)
 
+    def _restore_settings_widgets() -> None:
+        host_layout = getattr(app, "data_fit_settings_host_layout", None)
+        if host_layout is None:
+            return
+        for w in (
+            getattr(app, "data_fit_auto_load_cb", None),
+            getattr(app, "data_fit_autosave_cb", None),
+            getattr(app, "data_fit_save_separate_cb", None),
+            getattr(app, "data_fit_same_group_cb", None),
+            getattr(app, "data_fit_iter_group", None),
+        ):
+            if w is not None:
+                host_layout.addWidget(w)
+
     # Re-evaluate dependency rules every time the dialog opens, in case the
     # user has changed checkbox state via a preset since the last open.
     _refresh_save_settings_enabled(app)
@@ -4360,6 +4385,7 @@ def _open_settings_dialog(app) -> None:
     button_row.addWidget(close_btn)
     root.addLayout(button_row)
 
+    dialog.finished.connect(lambda _: _restore_settings_widgets())
     dialog.exec_()
 
 
