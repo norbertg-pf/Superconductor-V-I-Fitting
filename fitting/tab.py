@@ -3329,6 +3329,10 @@ def _format_result(result) -> str:
             f"N={result.n_points_used}"
             + ("  (too few — noisy)" if getattr(result, "insufficient_n_points", False) else "")
         )
+        lines.append(
+            f"window debug  = lo[idx={getattr(result, 'n_window_low_idx', -1)}, E={getattr(result, 'n_window_low_e', float('nan')):.6g}], "
+            f"hi[idx={getattr(result, 'n_window_high_idx', -1)}, E={getattr(result, 'n_window_high_e', float('nan')):.6g}]"
+        )
     else:
         lines.append(f"iterations    = {result.iterations}")
         lines.append(f"Ic history    = [{', '.join(f'{v:.4g}' for v in result.ic_history)}]")

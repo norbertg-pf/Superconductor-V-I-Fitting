@@ -107,6 +107,10 @@ class FitResult:
     ec2: float = 0.0
     n_window_I: tuple[float, float] = (0.0, 0.0)
     n_points_used: int = 0
+    n_window_low_idx: int = -1
+    n_window_high_idx: int = -1
+    n_window_low_e: float = float("nan")
+    n_window_high_e: float = float("nan")
     # Parameter uncertainties (standard errors) and goodness of fit.
     sigma_Ic: float = 0.0
     sigma_n: float = 0.0
@@ -534,7 +538,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                         point_sigma: Optional[np.ndarray] = None,
                         weight_mode: str = DEFAULT_WEIGHT_MODE,
                         ) -> tuple[float, float, float, int, tuple[float, float],
-                                   float, float, float]:
+                                   float, float, float, int, int, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
 
     E_sc = y - V0 - R*x is the baseline-subtracted signal. To keep Step-4
@@ -661,8 +665,12 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     I_lo, I_hi = pick_loglog_i_window_from_thresholds(
         xs, e_sc_bounds, ec1=Ec1, ec2=Ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
     )
+    idx_lo = int(np.argmin(np.abs(xs - I_lo)))
+    idx_hi = int(np.argmin(np.abs(xs - I_hi)))
+    e_lo = float(e_sc_bounds[idx_lo]) if xs.size else float("nan")
+    e_hi = float(e_sc_bounds[idx_hi]) if xs.size else float("nan")
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
-            sigma_Ic, sigma_n, r_squared)
+            sigma_Ic, sigma_n, r_squared, idx_lo, idx_hi, e_lo, e_hi)
 
 
 def _ramp_ratio(V0: float, criterion: float) -> float:
@@ -747,7 +755,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         crit_for_ic = Vc if (Vc is not None and Vc > 0) else settings.ec2
         try:
             (Ic, n_value, chi_sqr, n_pts, n_window,
-             sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
+             sigma_Ic, sigma_n, r_squared, idx_lo, idx_hi, e_lo, e_hi) = fit_n_value_log_log(
                 x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
                 criterion_E=crit_for_ic,
                 point_sigma=point_sigma,
@@ -789,6 +797,10 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             ec2=settings.ec2,
             n_window_I=n_window,
             n_points_used=n_pts,
+            n_window_low_idx=idx_lo,
+            n_window_high_idx=idx_hi,
+            n_window_low_e=e_lo,
+            n_window_high_e=e_hi,
             sigma_Ic=sigma_Ic,
             sigma_n=sigma_n,
             r_squared=r_squared,
