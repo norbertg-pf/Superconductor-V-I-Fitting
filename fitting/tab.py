@@ -4398,15 +4398,18 @@ def _export_corrected_reference_tdms(app) -> None:
         QMessageBox.warning(app, "Export corrected TDMS", "No fit result available.")
         return
     result, _parent, _sig, _label, x, y, t = resolved
-    y_corr = np.asarray(y, dtype=float) - (float(result.V0) + float(result.R) * np.asarray(x, dtype=float))
-    ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-    x_ref = np.asarray(ref.get("x", []), dtype=float)
-    y_sm = np.asarray(ref.get("y", []), dtype=float)
-    n = int(min(np.asarray(x, dtype=float).size, y_corr.size, x_ref.size, y_sm.size))
+    x_arr_full = np.asarray(x, dtype=float)
+    y_corr = np.asarray(y, dtype=float) - (float(result.V0) + float(result.R) * x_arr_full)
+    has_length = app.data_fit_use_length_cb.isChecked()
+    to_si = 1.0e-6 if has_length else 1.0e-3
+    ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    y_sm = _adaptive_smooth_visual(_despike_corrected_signal(y_corr), ec1, ec2)
+    n = int(min(x_arr_full.size, y_corr.size, y_sm.size))
     if n < 3:
         QMessageBox.warning(app, "Export corrected TDMS", "Not enough points to export.")
         return
-    x_arr = np.asarray(x, dtype=float)[:n]
+    x_arr = x_arr_full[:n]
     y_corr = y_corr[:n]
     y_sm = y_sm[:n]
     t_arr = np.asarray(t, dtype=float)[:n] if np.asarray(t, dtype=float).size >= n else np.arange(n, dtype=float)
@@ -4889,6 +4892,7 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
     y_corr = y - (float(result.V0) + float(result.R) * x)
+    y_corr = _despike_corrected_signal(y_corr)
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
