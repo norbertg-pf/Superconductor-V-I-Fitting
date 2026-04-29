@@ -2600,10 +2600,10 @@ def _on_use_length_changed(app):
         _save_active_curve_profile(app)
 
 
-def refresh_preview(app):
+def refresh_preview(app, *, apply_step_trimming: bool = False):
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_step_trimming=apply_step_trimming)
     x = transformed["x"]
     y = transformed["y"]
     app.data_fit_model_curve.setData([], [])
@@ -3162,6 +3162,8 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         if source == "pct":
             _update_loglog_power_x_from_ec(app)
+            _resolve_or_compute_step123_reference(app)
+            refresh_preview(app, apply_step_trimming=True)
         else:
             _refresh_pct_from_x(app, window, which)
         ctx = _data_ctx(app)
@@ -4509,6 +4511,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     existing["label"] = f"{base_label} corrected"
     _refresh_curve_item(existing)
     _refresh_curve_profile_selector(app)
+    refresh_preview(app, apply_step_trimming=True)
 
 
 def _resolve_fit_parent_and_result(app):
@@ -4798,6 +4801,7 @@ def _add_smoothed_curve_from_current(app) -> None:
         existing["fit_result"] = result
         _refresh_curve_item(existing)
         _refresh_curve_profile_selector(app)
+        refresh_preview(app, apply_step_trimming=True)
         ok = True
     if not ok:
         QMessageBox.warning(
