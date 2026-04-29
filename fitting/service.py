@@ -260,13 +260,24 @@ def pick_loglog_i_window_from_thresholds(
     order = np.argsort(xs, kind="mergesort")
     xs = xs[order]
     ys = ys[order]
-    xs_u, inv = np.unique(xs, return_inverse=True)
-    if xs_u.size != xs.size:
-        # O(N): aggregate duplicate-current groups with vectorized max, avoiding
-        # per-group masking loops that can freeze UI on large traces.
-        ys_u = np.full(xs_u.shape, -np.inf, dtype=float)
+    # DAQ often produces "stair-step" current with jitter: many samples around
+    # one current level, then a jump to the next. Collapse near-equal currents
+    # into bins (not only exactly equal values).
+    if xs.size >= 2:
+        dx = np.diff(xs)
+        pos_dx = dx[dx > 0.0]
+        if pos_dx.size:
+            step = float(np.percentile(pos_dx, 10))
+            x_tol = max(step * 0.5, 1e-12)
+        else:
+            x_tol = 1e-12
+        x0 = float(xs[0])
+        bins = np.rint((xs - x0) / x_tol).astype(np.int64)
+        b_unique, inv = np.unique(bins, return_inverse=True)
+        xs_u = x0 + b_unique.astype(float) * x_tol
+        ys_u = np.full(b_unique.shape, -np.inf, dtype=float)
         np.maximum.at(ys_u, inv, ys)
-        good = np.isfinite(ys_u)
+        good = np.isfinite(xs_u) & np.isfinite(ys_u)
         xs = xs_u[good]
         ys = ys_u[good]
         if xs.size == 0:
