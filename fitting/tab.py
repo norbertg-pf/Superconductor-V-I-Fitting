@@ -3842,18 +3842,6 @@ def run_fit(app):
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
 
-    def _loglog_window_fields_present() -> bool:
-        try:
-            lo_txt = (app.data_fit_power_low_x.text() or "").strip()
-            hi_txt = (app.data_fit_power_high_x.text() or "").strip()
-            if not lo_txt or not hi_txt:
-                return False
-            lo_v = float(lo_txt)
-            hi_v = float(hi_txt)
-        except (TypeError, ValueError):
-            return False
-        return np.isfinite(lo_v) and np.isfinite(hi_v) and hi_v > lo_v
-
     def _recompute_loglog_i_window_for_entry(result_obj, entry_obj, entry_settings_obj) -> None:
         """Recompute IEC I-window for one fitted curve and persist to its profile."""
         if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
@@ -4007,7 +3995,7 @@ def run_fit(app):
                     hi_w = float(n_window[1])
                 except (TypeError, ValueError, IndexError):
                     lo_w = hi_w = 0.0
-                if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
                     _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
                     _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
                     app.data_fit_power_window_manual = False
@@ -4088,7 +4076,7 @@ def run_fit(app):
                 )
         return
     controller.last_result = result
-    if not _loglog_window_fields_present():
+    if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         _apply_step4_window_from_reference(result)
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
@@ -4098,7 +4086,7 @@ def run_fit(app):
             hi_w = float(n_window[1])
         except (TypeError, ValueError, IndexError):
             lo_w = hi_w = 0.0
-        if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
             _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
             app.data_fit_power_window_manual = False
