@@ -4258,7 +4258,7 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     from_si = 1.0e6 if has_length else 1.0e3
     out = np.asarray(rows, dtype=float)
     out[:, 0] = out[:, 0] * from_si
-    default_dir = _default_export_dir(app)
+    default_dir = _preset_dir(app)
     path, _ = QFileDialog.getSaveFileName(
         app, "Export Ec1→Low(X) CSV", str(Path(default_dir) / "ec1_lowx_scan.csv"), "CSV Files (*.csv);;All Files (*)"
     )
