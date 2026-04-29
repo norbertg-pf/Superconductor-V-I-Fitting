@@ -582,6 +582,7 @@ class DataFittingController:
             y = _block_average(y, win)
         if settings.sample_length_cm and settings.sample_length_cm > 0:
             y = y / float(settings.sample_length_cm)
+        x, y, t, _ = _trim_curve_segments(getattr(self, "app", None) or self, x, y, t)
         result = run_full_fit(t, x, y, settings)
         self.last_result = result
         return result, result.message
@@ -639,6 +640,16 @@ def _connect_data_fitting_actions(app):
         app.data_fit_zero_i_frac.editingFinished.connect(
             lambda: _save_active_curve_profile(app)
         )
+    for w in (
+        getattr(app, "data_fit_trim_lead_abs", None),
+        getattr(app, "data_fit_trim_lead_pct", None),
+    ):
+        if w is not None:
+            w.editingFinished.connect(lambda: (_on_transform_inputs_changed(app), _save_active_curve_profile(app)))
+    if getattr(app, "data_fit_trim_drop_cb", None) is not None:
+        app.data_fit_trim_drop_cb.toggled.connect(
+            lambda _: (_on_transform_inputs_changed(app), _save_active_curve_profile(app))
+        )
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -670,7 +681,7 @@ def _on_transform_inputs_changed(app) -> None:
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
     if ctx is not None:
-        _, _, x_arr, y_arr, _ = ctx
+        _, _, x_arr, y_arr, _, *_ = ctx
         _update_fit_bands(app, x_arr, y_arr)
 
 
@@ -1096,7 +1107,22 @@ def setup_data_fitting_tab_layout(app):
     offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
     left.addWidget(offset_group)
 
-    didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
+    trim_group = QGroupBox("Step 2: Curve trimming")
+    trim_layout = QGridLayout(trim_group)
+    trim_layout.addWidget(QLabel("Trim start (A):"), 0, 0)
+    app.data_fit_trim_lead_abs = QLineEdit("10")
+    app.data_fit_trim_lead_abs.setMaximumWidth(80)
+    trim_layout.addWidget(app.data_fit_trim_lead_abs, 0, 1)
+    trim_layout.addWidget(QLabel("Trim start (% of Imax):"), 0, 2)
+    app.data_fit_trim_lead_pct = QLineEdit("5")
+    app.data_fit_trim_lead_pct.setMaximumWidth(80)
+    trim_layout.addWidget(app.data_fit_trim_lead_pct, 0, 3)
+    app.data_fit_trim_drop_cb = QCheckBox("Auto-trim end after strong current drop (with 2% guard)")
+    app.data_fit_trim_drop_cb.setChecked(True)
+    trim_layout.addWidget(app.data_fit_trim_drop_cb, 1, 0, 1, 4)
+    left.addWidget(trim_group)
+
+    didt_group = QGroupBox("Step 3: di/dt window (fraction of Imax)")
     didt_layout = QGridLayout(didt_group)
     app.data_fit_didt_low = _percent_edit(DEFAULT_DIDT_LOW_FRAC)
     app.data_fit_didt_high = _percent_edit(DEFAULT_DIDT_HIGH_FRAC)
@@ -1112,7 +1138,7 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(didt_group)
 
-    linear_group = QGroupBox("Step 3: Linear baseline window (fraction of Imax)")
+    linear_group = QGroupBox("Step 4: Linear baseline window (fraction of Imax)")
     linear_layout = QGridLayout(linear_group)
     app.data_fit_linear_low = _percent_edit(DEFAULT_LINEAR_LOW_FRAC)
     app.data_fit_linear_high = _percent_edit(DEFAULT_LINEAR_HIGH_FRAC)
@@ -1150,7 +1176,7 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(linear_group)
 
-    power_group = QGroupBox("Step 4: Ic and n-value")
+    power_group = QGroupBox("Step 5: Ic and n-value")
     power_layout = QGridLayout(power_group)
 
     # --- method selector (row 0) ---
@@ -1539,16 +1565,53 @@ def _apply_transforms(app):
     sample_length = _active_sample_length(app)
     if sample_length is not None and y is not None:
         y = y / sample_length
+    x_trim, y_trim, t_trim, trim_meta = _trim_curve_segments(app, x, y, t)
     return {
-        "time": t,
-        "x": x,
-        "y": y,
+        "time": t_trim,
+        "x": x_trim,
+        "y": y_trim,
+        "time_full": t,
+        "x_full": x,
+        "y_full": y,
+        "time_trimmed": t_trim,
+        "x_trimmed": x_trim,
+        "y_trimmed": y_trim,
+        "trim_meta": trim_meta,
         "scales": {
             "time": (t_scale, t_offset),
             "x": (x_scale, x_offset),
             "y": (y_scale, y_offset),
         },
     }
+
+
+def _trim_curve_segments(app, x: np.ndarray, y: np.ndarray, t: np.ndarray):
+    if x is None or y is None:
+        return x, y, t, {"enabled": False}
+    n = int(min(x.size, y.size, t.size if t is not None else x.size))
+    if n <= 0:
+        return x, y, t, {"enabled": False}
+    x = np.asarray(x[:n], dtype=float)
+    y = np.asarray(y[:n], dtype=float)
+    t = np.asarray(t[:n], dtype=float) if t is not None else np.arange(n, dtype=float)
+    abs_max = float(np.max(np.abs(x))) if n else 0.0
+    lead_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_lead_abs", None), 10.0))
+    lead_pct = _float_from(getattr(app, "data_fit_trim_lead_pct", None), 5.0, as_fraction=True)
+    lead_cut = min(max(lead_abs, lead_pct * abs_max), abs_max)
+    keep = np.abs(x) >= lead_cut
+    cut_idx = None
+    if bool(getattr(app, "data_fit_trim_drop_cb", None) and app.data_fit_trim_drop_cb.isChecked()) and n > 6:
+        dx = np.diff(x)
+        peak_idx = int(np.argmax(x))
+        post = np.where(np.arange(dx.size) >= peak_idx)[0]
+        drop_idx = post[dx[post] < (-0.05 * max(abs_max, 1e-12))]
+        if drop_idx.size:
+            cut_idx = int(drop_idx[0] + 1)
+            pre_guard = max(0, int(cut_idx - round(0.02 * n)))
+            keep[pre_guard:] = False
+    if not np.any(keep):
+        keep[:] = True
+    return x[keep], y[keep], t[keep], {"enabled": True, "lead_cut": lead_cut, "drop_idx": cut_idx, "mask": keep, "x_full": x}
 
 
 def _settings_from_inputs(app) -> FitSettings:
@@ -2391,7 +2454,7 @@ def _on_fit_method_changed(app) -> None:
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
     if ctx is not None:
-        _, _, x_arr, y_arr, _ = ctx
+        _, _, x_arr, y_arr, _, *_ = ctx
         _update_fit_bands(app, x_arr, y_arr)
     _update_band_states(app)
     _update_equation_label(app)
@@ -2877,7 +2940,7 @@ def _on_band_dragged(app, window: str) -> None:
     ctx = _data_ctx(app)
     if ctx is None:
         return
-    x_min, x_max, x, y, y_max = ctx
+    x_min, x_max, x, y, y_max, trim_lo, trim_hi, _trim_meta = ctx
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         lo, hi = sorted((lo, hi))
         ref = getattr(app, "data_fit_power_ref_curve", None) or {}
@@ -2927,6 +2990,8 @@ def _data_ctx(app):
     transformed = _apply_transforms(app)
     x = transformed["x"]
     y = transformed["y"]
+    x_full = transformed.get("x_full", x)
+    trim_meta = transformed.get("trim_meta", {})
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         ref = getattr(app, "data_fit_power_ref_curve", None) or {}
         ref_x = np.asarray(ref.get("x", []), dtype=float)
@@ -2937,12 +3002,14 @@ def _data_ctx(app):
             y = ref_y[:n_ref]
     if x is None or x.size == 0:
         return None
-    x_min = float(np.min(x))
-    x_max = float(np.max(x))
+    x_min = float(np.min(x_full))
+    x_max = float(np.max(x_full))
     if x_max <= x_min:
         return None
+    trim_lo = float(np.min(x)) if (x is not None and x.size) else x_min
+    trim_hi = float(np.max(x)) if (x is not None and x.size) else x_max
     y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
-    return x_min, x_max, x, y, y_max
+    return x_min, x_max, x, y, y_max, trim_lo, trim_hi, trim_meta
 
 
 def _pct_to_x(pct: float, x_min: float, x_max: float) -> float:
@@ -3036,13 +3103,15 @@ def _refresh_x_from_pct(app, window: str, which: str) -> None:
     ctx = _data_ctx(app)
     if ctx is None:
         return
-    x_min, x_max, x, y, y_max = ctx
+    x_min, x_max, x, y, y_max, trim_lo, trim_hi, _trim_meta = ctx
     pct_widget, x_widget, axis = app.data_fit_window_inputs[(window, which)]
     try:
         pct = float(pct_widget.text())
     except ValueError:
         return
     x_val = _vpct_to_x(pct, x, y, y_max, x_max) if axis == "Vmax" else _pct_to_x(pct, x_min, x_max)
+    if axis != "Vmax":
+        x_val = float(np.clip(x_val, trim_lo, trim_hi))
     _set_silently(x_widget, f"{x_val:.6g}")
 
 
@@ -3052,12 +3121,14 @@ def _refresh_pct_from_x(app, window: str, which: str) -> None:
     ctx = _data_ctx(app)
     if ctx is None:
         return
-    x_min, x_max, x, y, y_max = ctx
+    x_min, x_max, x, y, y_max, trim_lo, trim_hi, _trim_meta = ctx
     pct_widget, x_widget, axis = app.data_fit_window_inputs[(window, which)]
     try:
         x_val = float(x_widget.text())
     except ValueError:
         return
+    if axis != "Vmax":
+        x_val = float(np.clip(x_val, trim_lo, trim_hi))
     pct = _x_to_vpct(x_val, x, y, y_max) if axis == "Vmax" else _x_to_pct(x_val, x_min, x_max)
     _set_silently(pct_widget, f"{pct:.4f}")
 
@@ -3077,7 +3148,7 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
             _refresh_pct_from_x(app, window, which)
         ctx = _data_ctx(app)
         if ctx is not None:
-            _, _, x_arr, y_arr, _ = ctx
+            _, _, x_arr, y_arr, _, *_ = ctx
             _update_fit_bands(app, x_arr, y_arr)
         _update_band_states(app)
         _save_active_curve_profile(app)
@@ -3088,7 +3159,7 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
         _refresh_pct_from_x(app, window, which)
     ctx = _data_ctx(app)
     if ctx is not None:
-        _, _, x_arr, y_arr, _ = ctx
+        _, _, x_arr, y_arr, _, *_ = ctx
         _update_fit_bands(app, x_arr, y_arr)
     _update_band_states(app)
     _save_active_curve_profile(app)
