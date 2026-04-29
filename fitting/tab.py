@@ -1117,7 +1117,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_trim_lead_pct = QLineEdit("5")
     app.data_fit_trim_lead_pct.setMaximumWidth(80)
     trim_layout.addWidget(app.data_fit_trim_lead_pct, 0, 3)
-    app.data_fit_trim_drop_cb = QCheckBox("Auto-trim end after strong current drop (with 1% guard)")
+    app.data_fit_trim_drop_cb = QCheckBox("Auto-trim end after strong current drop (with 2% guard)")
     app.data_fit_trim_drop_cb.setChecked(True)
     trim_layout.addWidget(app.data_fit_trim_drop_cb, 1, 0, 1, 4)
     left.addWidget(trim_group)
@@ -1607,7 +1607,7 @@ def _trim_curve_segments(app, x: np.ndarray, y: np.ndarray, t: np.ndarray):
         drop_idx = post[dx[post] < (-0.05 * max(abs_max, 1e-12))]
         if drop_idx.size:
             cut_idx = int(drop_idx[0] + 1)
-            pre_guard = max(0, int(cut_idx - round(0.01 * n)))
+            pre_guard = max(0, int(cut_idx - round(0.02 * n)))
             keep[pre_guard:] = False
     if not np.any(keep):
         keep[:] = True
