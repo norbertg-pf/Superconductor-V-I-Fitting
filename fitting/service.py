@@ -229,6 +229,24 @@ def pick_loglog_i_window_from_thresholds(
     ys = ys[finite]
     if xs.size == 0:
         return 0.0, 0.0
+    # If multiple points share the same current, keep the upper branch.
+    # Physically, Step-4 should follow the transition branch; this also avoids
+    # interpolation through mixed points from different ramp passes.
+    order = np.argsort(xs, kind="mergesort")
+    xs = xs[order]
+    ys = ys[order]
+    xs_u, inv = np.unique(xs, return_inverse=True)
+    if xs_u.size != xs.size:
+        ys_u = np.empty_like(xs_u, dtype=float)
+        for k in range(xs_u.size):
+            grp = ys[inv == k]
+            grp = grp[np.isfinite(grp)]
+            ys_u[k] = float(np.max(grp)) if grp.size else float("nan")
+        good = np.isfinite(ys_u)
+        xs = xs_u[good]
+        ys = ys_u[good]
+        if xs.size == 0:
+            return 0.0, 0.0
 
     x_min = float(np.min(xs))
     x_max = float(np.max(xs))
