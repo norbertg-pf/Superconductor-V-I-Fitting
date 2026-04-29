@@ -3665,6 +3665,23 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
 
     new_entries = {lbl: _fit_result_properties(r) for lbl, r in persistent}
 
+    debug_curve_objects = []
+    for lbl, res in persistent:
+        x_raw = getattr(res, "n_window_ref_x", None) if res is not None else None
+        e_raw = getattr(res, "n_window_ref_e", None) if res is not None else None
+        if x_raw is None or e_raw is None:
+            continue
+        x_dbg = np.asarray(x_raw, dtype=float)
+        e_dbg = np.asarray(e_raw, dtype=float)
+        if x_dbg.size and e_dbg.size:
+            n_dbg = int(min(x_dbg.size, e_dbg.size))
+            x_dbg = x_dbg[:n_dbg]
+            e_dbg = e_dbg[:n_dbg]
+            if n_dbg > 0:
+                safe = ''.join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in str(lbl))
+                debug_curve_objects.append(ChannelObject("FitDebug", f"{safe}__I_A", np.asarray(x_dbg, dtype=np.float64)))
+                debug_curve_objects.append(ChannelObject("FitDebug", f"{safe}__E_corr_smooth", np.asarray(e_dbg, dtype=np.float64)))
+
     if not save_separate and same_group:
         return _write_fit_report_same_group(report_path, new_entries)
 
@@ -3685,9 +3702,12 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
                 existing = {}
         merged = {**existing, **new_entries}
         objects = [GroupObject("FitResults")]
+        if debug_curve_objects:
+            objects.append(GroupObject("FitDebug"))
         for name, props in merged.items():
             data = np.array([np.nan], dtype=np.float64)
             objects.append(ChannelObject("FitResults", name, data, properties=props))
+        objects.extend(debug_curve_objects)
         try:
             with TdmsWriter(str(report_path)) as writer:
                 writer.write_segment(objects)
@@ -3700,9 +3720,12 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     # adds a new segment; readers see the latest properties, which is the
     # overwrite semantics requested for re-runs.
     objects = [GroupObject("FitResults")]
+    if debug_curve_objects:
+        objects.append(GroupObject("FitDebug"))
     for name, props in new_entries.items():
         data = np.array([np.nan], dtype=np.float64)
         objects.append(ChannelObject("FitResults", name, data, properties=props))
+    objects.extend(debug_curve_objects)
     try:
         with TdmsWriter(str(report_path), mode="a") as writer:
             writer.write_segment(objects)

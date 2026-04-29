@@ -111,6 +111,8 @@ class FitResult:
     n_window_high_idx: int = -1
     n_window_low_e: float = float("nan")
     n_window_high_e: float = float("nan")
+    n_window_ref_x: Optional[np.ndarray] = None
+    n_window_ref_e: Optional[np.ndarray] = None
     # Parameter uncertainties (standard errors) and goodness of fit.
     sigma_Ic: float = 0.0
     sigma_n: float = 0.0
@@ -801,6 +803,12 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         if thermal_applied:
             fit_y = fit_y + V_ofs
         ratio = _ramp_ratio(V0, crit_for_ic)
+        order_dbg = np.argsort(x)
+        xs_dbg = np.asarray(x[order_dbg], dtype=float)
+        e_dbg = np.asarray(y[order_dbg] - V0 - R * xs_dbg, dtype=float)
+        pos_dbg = xs_dbg > 0
+        xs_dbg = xs_dbg[pos_dbg]
+        e_dbg = adaptive_smooth_for_ec_window(e_dbg[pos_dbg], settings.ec1, settings.ec2)
         return FitResult(
             ok=True,
             message="IEC 61788 log-log n-value fit succeeded.",
@@ -829,6 +837,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             n_window_high_idx=idx_hi,
             n_window_low_e=e_lo,
             n_window_high_e=e_hi,
+            n_window_ref_x=xs_dbg,
+            n_window_ref_e=e_dbg,
             sigma_Ic=sigma_Ic,
             sigma_n=sigma_n,
             r_squared=r_squared,
