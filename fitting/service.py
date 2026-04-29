@@ -246,6 +246,10 @@ def pick_loglog_i_window_from_thresholds(
         ys = ys_u[good]
         if xs.size == 0:
             return 0.0, 0.0
+    # Enforce monotone upper envelope for Step-4 threshold detection.
+    # This rejects residual mixed-branch downward glitches that are not
+    # physically meaningful for Ec crossing search.
+    ys = np.maximum.accumulate(ys)
 
     x_min = float(np.min(xs))
     x_max = float(np.max(xs))

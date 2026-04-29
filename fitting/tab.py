@@ -4251,6 +4251,8 @@ def _export_ec1_lowx_scan_csv(app) -> None:
         if x.size < 3:
             QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough unique-current points after preprocessing.")
             return
+    # Match service picker behavior: monotone upper envelope.
+    y = np.maximum.accumulate(y)
     pos = y[np.isfinite(y) & (y > 0.0)]
     if pos.size == 0:
         QMessageBox.warning(app, "Export Ec1→Low(X)", "Reference curve has no positive E values.")
