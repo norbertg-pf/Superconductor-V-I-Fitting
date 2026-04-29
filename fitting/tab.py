@@ -4233,6 +4233,27 @@ def _export_ec1_lowx_scan_csv(app) -> None:
     valid = np.isfinite(x) & np.isfinite(y) & (x > 0)
     x = x[valid]
     y = y[valid]
+    # Keep one physical branch (longest non-decreasing-current run) before
+    # sorting, so diagnostics are not polluted by mixed up/down sweeps.
+    if x.size >= 3:
+        dx = np.diff(x)
+        run_starts = [0]
+        run_ends = []
+        for i, d in enumerate(dx, start=1):
+            if d < 0.0:
+                run_ends.append(i)
+                run_starts.append(i)
+        run_ends.append(x.size)
+        best_len = -1
+        best = (0, x.size)
+        for a, b in zip(run_starts, run_ends):
+            seg_len = b - a
+            if seg_len > best_len:
+                best_len = seg_len
+                best = (a, b)
+        a, b = best
+        x = x[a:b]
+        y = y[a:b]
     if x.size < 3:
         QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough reference points to export.")
         return
@@ -4251,8 +4272,6 @@ def _export_ec1_lowx_scan_csv(app) -> None:
         if x.size < 3:
             QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough unique-current points after preprocessing.")
             return
-    # Match service picker behavior: monotone upper envelope.
-    y = np.maximum.accumulate(y)
     pos = y[np.isfinite(y) & (y > 0.0)]
     if pos.size == 0:
         QMessageBox.warning(app, "Export Ec1→Low(X)", "Reference curve has no positive E values.")

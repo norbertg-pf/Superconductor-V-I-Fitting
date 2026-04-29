@@ -229,6 +229,31 @@ def pick_loglog_i_window_from_thresholds(
     ys = ys[finite]
     if xs.size == 0:
         return 0.0, 0.0
+    # Keep one physical ramp branch before any X-sorting. The raw trace can
+    # contain up/down sweeps; mixing them at equal/near-equal current creates
+    # non-physical jumps in E(I). We choose the longest non-decreasing-current
+    # contiguous run.
+    if xs.size >= 3:
+        dx = np.diff(xs)
+        run_starts = [0]
+        run_ends = []
+        for i, d in enumerate(dx, start=1):
+            if d < 0.0:
+                run_ends.append(i)
+                run_starts.append(i)
+        run_ends.append(xs.size)
+        best_len = -1
+        best = (0, xs.size)
+        for a, b in zip(run_starts, run_ends):
+            seg_len = b - a
+            if seg_len > best_len:
+                best_len = seg_len
+                best = (a, b)
+        a, b = best
+        xs = xs[a:b]
+        ys = ys[a:b]
+        if xs.size == 0:
+            return 0.0, 0.0
     # If multiple points share the same current, keep the upper branch.
     # Physically, Step-4 should follow the transition branch; this also avoids
     # interpolation through mixed points from different ramp passes.
@@ -246,10 +271,6 @@ def pick_loglog_i_window_from_thresholds(
         ys = ys_u[good]
         if xs.size == 0:
             return 0.0, 0.0
-    # Enforce monotone upper envelope for Step-4 threshold detection.
-    # This rejects residual mixed-branch downward glitches that are not
-    # physically meaningful for Ec crossing search.
-    ys = np.maximum.accumulate(ys)
 
     x_min = float(np.min(xs))
     x_max = float(np.max(xs))
