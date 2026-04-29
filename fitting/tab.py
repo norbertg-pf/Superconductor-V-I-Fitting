@@ -639,6 +639,14 @@ def _connect_data_fitting_actions(app):
         app.data_fit_zero_i_frac.editingFinished.connect(
             lambda: _save_active_curve_profile(app)
         )
+    for w in (
+        getattr(app, "data_fit_trim_start_abs", None),
+        getattr(app, "data_fit_trim_start_pct", None),
+    ):
+        if w is not None:
+            w.editingFinished.connect(lambda: refresh_preview(app))
+    if getattr(app, "data_fit_trim_quench_cb", None) is not None:
+        app.data_fit_trim_quench_cb.toggled.connect(lambda _: refresh_preview(app))
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -707,6 +715,12 @@ def _reset_data_fitting_defaults(app) -> None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
         app.data_fit_zero_i_frac.setText(f"{DEFAULT_ZERO_I_FRAC * 100:.2f}")
+    if getattr(app, "data_fit_trim_start_abs", None) is not None:
+        app.data_fit_trim_start_abs.setText("10")
+    if getattr(app, "data_fit_trim_start_pct", None) is not None:
+        app.data_fit_trim_start_pct.setText("5.00")
+    if getattr(app, "data_fit_trim_quench_cb", None) is not None:
+        app.data_fit_trim_quench_cb.setChecked(True)
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
@@ -1095,6 +1109,21 @@ def setup_data_fitting_tab_layout(app):
     )
     offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
     left.addWidget(offset_group)
+
+    trim_group = QGroupBox("Step 1.5: Trim noisy start and quench tail")
+    trim_layout = QGridLayout(trim_group)
+    trim_layout.addWidget(QLabel("Trim start by smaller of:"), 0, 0, 1, 2)
+    trim_layout.addWidget(QLabel("Current (A):"), 1, 0)
+    app.data_fit_trim_start_abs = QLineEdit("10")
+    app.data_fit_trim_start_abs.setMaximumWidth(80)
+    trim_layout.addWidget(app.data_fit_trim_start_abs, 1, 1)
+    trim_layout.addWidget(QLabel("Current (% of Imax):"), 1, 2)
+    app.data_fit_trim_start_pct = _percent_edit(0.05)
+    trim_layout.addWidget(app.data_fit_trim_start_pct, 1, 3)
+    app.data_fit_trim_quench_cb = QCheckBox("Auto-trim quench drop and cut 2% before drop")
+    app.data_fit_trim_quench_cb.setChecked(True)
+    trim_layout.addWidget(app.data_fit_trim_quench_cb, 2, 0, 1, 4)
+    left.addWidget(trim_group)
 
     didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
     didt_layout = QGridLayout(didt_group)
@@ -1539,16 +1568,68 @@ def _apply_transforms(app):
     sample_length = _active_sample_length(app)
     if sample_length is not None and y is not None:
         y = y / sample_length
+    x_original = np.asarray(x, dtype=float) if x is not None else None
+    t_original = np.asarray(t, dtype=float) if t is not None else None
+    y_original = np.asarray(y, dtype=float) if y is not None else None
+    trim_mask = _build_trim_mask(app, x_original)
+    if trim_mask is not None and np.any(trim_mask):
+        if t is not None:
+            t = t[trim_mask]
+        if x is not None:
+            x = x[trim_mask]
+        if y is not None:
+            y = y[trim_mask]
     return {
         "time": t,
         "x": x,
         "y": y,
+        "time_original": t_original,
+        "x_original": x_original,
+        "y_original": y_original,
+        "trim_mask": trim_mask,
         "scales": {
             "time": (t_scale, t_offset),
             "x": (x_scale, x_offset),
             "y": (y_scale, y_offset),
         },
     }
+
+
+def _build_trim_mask(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if x is None or x.size == 0:
+        return None
+    mask = np.isfinite(x)
+    if not np.any(mask):
+        return None
+    x_fin = np.asarray(x, dtype=float)
+    keep_low_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_start_abs", None), 10.0))
+    keep_low_pct = max(0.0, _float_from(getattr(app, "data_fit_trim_start_pct", None), 5.0, as_fraction=True))
+    x_max = float(np.nanmax(x_fin[mask]))
+    start_cut = min(keep_low_abs, keep_low_pct * max(x_max, 0.0))
+    if start_cut > 0:
+        mask &= x_fin >= start_cut
+    if bool(getattr(app, "data_fit_trim_quench_cb", None) and app.data_fit_trim_quench_cb.isChecked()):
+        stop_idx = _detect_quench_drop_index(x_fin)
+        if stop_idx is not None and stop_idx > 3:
+            margin_pts = max(1, int(0.02 * x_fin.size))
+            stop_idx = max(0, stop_idx - margin_pts)
+            idx = np.arange(x_fin.size)
+            mask &= idx <= stop_idx
+    return mask
+
+
+def _detect_quench_drop_index(x: np.ndarray) -> Optional[int]:
+    if x is None or x.size < 10:
+        return None
+    peak_idx = int(np.nanargmax(x))
+    peak = float(x[peak_idx])
+    if peak_idx >= x.size - 3 or peak <= 0:
+        return None
+    drop_threshold = peak * 0.98
+    for i in range(peak_idx + 1, x.size):
+        if x[i] < drop_threshold and x[i] < x[i - 1]:
+            return i
+    return None
 
 
 def _settings_from_inputs(app) -> FitSettings:
@@ -2925,8 +3006,13 @@ def _on_band_dragged(app, window: str) -> None:
 
 def _data_ctx(app):
     transformed = _apply_transforms(app)
-    x = transformed["x"]
-    y = transformed["y"]
+    x = transformed.get("x_original")
+    y = transformed.get("y_original")
+    x_trimmed = transformed.get("x")
+    if x_trimmed is not None and x_trimmed.size > 0:
+        trim_low_bound = float(np.min(x_trimmed))
+    else:
+        trim_low_bound = None
     if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         ref = getattr(app, "data_fit_power_ref_curve", None) or {}
         ref_x = np.asarray(ref.get("x", []), dtype=float)
@@ -2939,6 +3025,8 @@ def _data_ctx(app):
         return None
     x_min = float(np.min(x))
     x_max = float(np.max(x))
+    if trim_low_bound is not None and x_min < trim_low_bound:
+        x_min = trim_low_bound
     if x_max <= x_min:
         return None
     y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
