@@ -3047,7 +3047,11 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     y_arr = y_arr[order]
     has_length = app.data_fit_use_length_cb.isChecked()
     to_si = 1.0e-6 if has_length else 1.0e-3
-    ec1 = max(_float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si, 1.0e-30)
+    ec1_in = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+    pos_y = y_arr[np.isfinite(y_arr) & (y_arr > 0.0)]
+    # Avoid artificial 1e-30 fallback when the entered value is <= 0.
+    ec1_floor = float(np.percentile(pos_y, 5.0)) if pos_y.size else 1.0e-12
+    ec1 = max(float(ec1_in), ec1_floor)
     ec2 = max(_float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si, ec1 * 1.000001)
     x_min = float(np.min(x_arr))
     x_max = float(np.max(x_arr))
@@ -4273,6 +4277,11 @@ def _export_ec1_lowx_scan_csv(app) -> None:
             QMessageBox.warning(app, "Export Ec1→Low(X)", "Not enough unique-current points after preprocessing.")
             return
     pos = y[np.isfinite(y) & (y > 0.0)]
+    if pos.size == 0:
+        # Fallback: if selected branch has no positive values, use full
+        # reference positivity so export still works for diagnostics.
+        y_all = np.asarray(ref.get("y", []), dtype=float)
+        pos = y_all[np.isfinite(y_all) & (y_all > 0.0)]
     if pos.size == 0:
         QMessageBox.warning(app, "Export Ec1→Low(X)", "Reference curve has no positive E values.")
         return
