@@ -31,6 +31,8 @@ DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 # Fraction of Imax below which samples are considered part of the quiescent
 # "I = 0" segment used to estimate the thermal offset V_ofs (Step 1).
 DEFAULT_ZERO_I_FRAC = 0.02      # 2 %
+DEFAULT_TRIM_START_A = 50.0
+DEFAULT_TRIM_START_FRAC = 0.05
 # Post-fit warning thresholds.
 RAMP_INDUCTIVE_WARN_RATIO = 0.10   # |L·dI/dt| / (Ec·L_v) above this → quasi-static assumption violated
 MIN_N_WINDOW_POINTS = 50           # IEC decade fit becomes noisy with too few samples
@@ -79,6 +81,10 @@ class FitSettings:
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
     weight_mode: str = DEFAULT_WEIGHT_MODE
     baseline_mode: str = DEFAULT_BASELINE_MODE
+    trim_start_abs_a: float = DEFAULT_TRIM_START_A
+    trim_start_frac: float = DEFAULT_TRIM_START_FRAC
+    trim_use_percent: bool = False
+    trim_rampdown_tail: bool = True
 
 
 @dataclass
@@ -121,6 +127,35 @@ class FitResult:
     thermal_offset_applied: bool = False
     weighting_mode: str = DEFAULT_WEIGHT_MODE
     baseline_mode: str = DEFAULT_BASELINE_MODE
+
+
+def trim_vi_curve(
+    t: np.ndarray, x: np.ndarray, y: np.ndarray, settings: FitSettings
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Trim noisy start and optional ramp-down tail before Step 1."""
+    t, x, y = _clean_arrays(t, x, y)
+    if x.size == 0:
+        return t, x, y
+
+    threshold_a = float(getattr(settings, "trim_start_abs_a", DEFAULT_TRIM_START_A))
+    if bool(getattr(settings, "trim_use_percent", False)):
+        x_max = float(np.max(np.abs(x))) if x.size else 0.0
+        threshold_a = float(getattr(settings, "trim_start_frac", DEFAULT_TRIM_START_FRAC)) * x_max
+    start_idx = int(np.searchsorted(np.abs(x), max(0.0, threshold_a), side="left"))
+    start_idx = min(max(0, start_idx), max(0, x.size - 1))
+
+    end_idx = int(x.size)
+    if bool(getattr(settings, "trim_rampdown_tail", True)) and x.size >= 6:
+        dx = np.diff(x)
+        if dx.size >= 3:
+            noise_floor = max(1e-12, float(np.median(np.abs(dx))) * 3.0)
+            falling = np.where(dx < -noise_floor)[0]
+            if falling.size:
+                first_drop = int(falling[0] + 1)
+                guard = max(1, int(round(0.01 * x.size)))
+                end_idx = max(start_idx + 3, first_drop - guard)
+
+    return t[start_idx:end_idx], x[start_idx:end_idx], y[start_idx:end_idx]
 
 
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
@@ -684,7 +719,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     ``FIT_METHOD_NONLINEAR``.
     """
     settings = settings or FitSettings()
-    t, x, y = _clean_arrays(t, x, y)
+    t, x, y = trim_vi_curve(t, x, y, settings)
     if x.size < 8:
         return FitResult(ok=False, message="Not enough valid samples to fit.")
 

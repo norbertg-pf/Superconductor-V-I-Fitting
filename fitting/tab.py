@@ -57,6 +57,8 @@ from .service import (
     DEFAULT_LINEAR_HIGH_FRAC,
     DEFAULT_LINEAR_LOW_FRAC,
     DEFAULT_MAX_ITERATIONS,
+    DEFAULT_TRIM_START_A,
+    DEFAULT_TRIM_START_FRAC,
     DEFAULT_POWER_LOW_FRAC,
     DEFAULT_POWER_V_FRAC,
     DEFAULT_VC_VOLTS,
@@ -74,6 +76,7 @@ from .service import (
     RAMP_INDUCTIVE_WARN_RATIO,
     robust_view_range,
     run_full_fit,
+    trim_vi_curve,
     pick_loglog_i_window_from_thresholds,
 )
 from .extras import (
@@ -272,6 +275,18 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_zero_i_frac", None) is not None
             else ""
         ),
+        "trim_start_abs_a": getattr(app, "data_fit_trim_start_abs_a", QLineEdit("")).text(),
+        "trim_start_frac": getattr(app, "data_fit_trim_start_frac", QLineEdit("")).text(),
+        "trim_use_percent": (
+            app.data_fit_trim_use_percent_cb.isChecked()
+            if getattr(app, "data_fit_trim_use_percent_cb", None) is not None
+            else False
+        ),
+        "trim_rampdown_tail": (
+            app.data_fit_trim_rampdown_cb.isChecked()
+            if getattr(app, "data_fit_trim_rampdown_cb", None) is not None
+            else True
+        ),
         "show_didt": (
             app.data_fit_show_didt.isChecked()
             if getattr(app, "data_fit_show_didt", None) is not None
@@ -376,6 +391,10 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         _set_silently(app.data_fit_power_high_x, str(profile["power_high_x"]))
     if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
         _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
+    if "trim_start_abs_a" in profile and getattr(app, "data_fit_trim_start_abs_a", None) is not None:
+        _set_silently(app.data_fit_trim_start_abs_a, str(profile["trim_start_abs_a"]))
+    if "trim_start_frac" in profile and getattr(app, "data_fit_trim_start_frac", None) is not None:
+        _set_silently(app.data_fit_trim_start_frac, str(profile["trim_start_frac"]))
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         cb = app.data_fit_subtract_vofs_cb
         cb.blockSignals(True)
@@ -383,6 +402,10 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
             cb.setChecked(bool(profile["subtract_vofs"]))
         finally:
             cb.blockSignals(False)
+    if "trim_use_percent" in profile and getattr(app, "data_fit_trim_use_percent_cb", None) is not None:
+        app.data_fit_trim_use_percent_cb.setChecked(bool(profile["trim_use_percent"]))
+    if "trim_rampdown_tail" in profile and getattr(app, "data_fit_trim_rampdown_cb", None) is not None:
+        app.data_fit_trim_rampdown_cb.setChecked(bool(profile["trim_rampdown_tail"]))
     for attr, key in (
         ("data_fit_show_didt", "show_didt"),
         ("data_fit_show_linear", "show_linear"),
@@ -402,6 +425,8 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
 
 
 def _float_from(widget: QLineEdit, fallback: float, as_fraction: bool = False) -> float:
+    if widget is None:
+        return fallback / 100.0 if as_fraction else fallback
     try:
         v = float(widget.text())
     except (TypeError, ValueError):
@@ -639,6 +664,14 @@ def _connect_data_fitting_actions(app):
         app.data_fit_zero_i_frac.editingFinished.connect(
             lambda: _save_active_curve_profile(app)
         )
+    for attr in ("data_fit_trim_start_abs_a", "data_fit_trim_start_frac"):
+        w = getattr(app, attr, None)
+        if w is not None:
+            w.editingFinished.connect(lambda: _save_active_curve_profile(app))
+    for attr in ("data_fit_trim_use_percent_cb", "data_fit_trim_rampdown_cb"):
+        w = getattr(app, attr, None)
+        if w is not None:
+            w.toggled.connect(lambda _: _save_active_curve_profile(app))
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -707,6 +740,14 @@ def _reset_data_fitting_defaults(app) -> None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
         app.data_fit_zero_i_frac.setText(f"{DEFAULT_ZERO_I_FRAC * 100:.2f}")
+    if getattr(app, "data_fit_trim_start_abs_a", None) is not None:
+        app.data_fit_trim_start_abs_a.setText(f"{DEFAULT_TRIM_START_A:.6g}")
+    if getattr(app, "data_fit_trim_start_frac", None) is not None:
+        app.data_fit_trim_start_frac.setText(f"{DEFAULT_TRIM_START_FRAC * 100:.2f}")
+    if getattr(app, "data_fit_trim_use_percent_cb", None) is not None:
+        app.data_fit_trim_use_percent_cb.setChecked(False)
+    if getattr(app, "data_fit_trim_rampdown_cb", None) is not None:
+        app.data_fit_trim_rampdown_cb.setChecked(True)
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
@@ -1094,6 +1135,22 @@ def setup_data_fitting_tab_layout(app):
         "I = 0 segment. Typical value: 2% (0.02)."
     )
     offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
+    offset_layout.addWidget(QLabel("Trim curve start (A):"), 3, 0)
+    app.data_fit_trim_start_abs_a = QLineEdit(f"{DEFAULT_TRIM_START_A:.6g}")
+    app.data_fit_trim_start_abs_a.setMaximumWidth(90)
+    offset_layout.addWidget(app.data_fit_trim_start_abs_a, 3, 1)
+    offset_layout.addWidget(QLabel("or start trim (% of Imax):"), 3, 2)
+    app.data_fit_trim_start_frac = _percent_edit(DEFAULT_TRIM_START_FRAC)
+    offset_layout.addWidget(app.data_fit_trim_start_frac, 3, 3)
+    app.data_fit_trim_use_percent_cb = QCheckBox("Use % instead of A")
+    app.data_fit_trim_use_percent_cb.setChecked(False)
+    offset_layout.addWidget(app.data_fit_trim_use_percent_cb, 4, 0, 1, 2)
+    app.data_fit_trim_rampdown_cb = QCheckBox("Trim ramp-down tail automatically")
+    app.data_fit_trim_rampdown_cb.setChecked(True)
+    app.data_fit_trim_rampdown_cb.setToolTip(
+        "Automatically stop before the first strong current drop and keep a 1% guard."
+    )
+    offset_layout.addWidget(app.data_fit_trim_rampdown_cb, 4, 2, 1, 2)
     left.addWidget(offset_group)
 
     didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
@@ -1610,6 +1667,10 @@ def _settings_from_inputs(app) -> FitSettings:
             if getattr(app, "data_fit_baseline_mode_cb", None) is not None
             else DEFAULT_BASELINE_MODE
         ),
+        trim_start_abs_a=_float_from(getattr(app, "data_fit_trim_start_abs_a", None), DEFAULT_TRIM_START_A),
+        trim_start_frac=_float_from(getattr(app, "data_fit_trim_start_frac", None), DEFAULT_TRIM_START_FRAC * 100, as_fraction=True),
+        trim_use_percent=bool(getattr(app, "data_fit_trim_use_percent_cb", None) is not None and app.data_fit_trim_use_percent_cb.isChecked()),
+        trim_rampdown_tail=bool(getattr(app, "data_fit_trim_rampdown_cb", None) is None or app.data_fit_trim_rampdown_cb.isChecked()),
     )
     return settings
 
@@ -1724,6 +1785,10 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
         weight_mode=weight_mode,
         baseline_mode=baseline_mode,
+        trim_start_abs_a=_profile_text_float(profile, "trim_start_abs_a", DEFAULT_TRIM_START_A),
+        trim_start_frac=_profile_text_float(profile, "trim_start_frac", DEFAULT_TRIM_START_FRAC * 100, as_fraction=True),
+        trim_use_percent=bool(profile.get("trim_use_percent", False)),
+        trim_rampdown_tail=bool(profile.get("trim_rampdown_tail", True)),
     )
 
 
@@ -4527,15 +4592,7 @@ def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, setting
     n = int(min(t_arr.size, x_arr.size, y_arr.size))
     if n < 8:
         raise ValueError("Not enough valid samples to fit.")
-    t_arr = t_arr[:n]
-    x_arr = x_arr[:n]
-    y_arr = y_arr[:n]
-    valid = np.isfinite(t_arr) & np.isfinite(x_arr) & np.isfinite(y_arr)
-    if not np.any(valid):
-        raise ValueError("No finite points after cleaning.")
-    t_arr = t_arr[valid]
-    x_arr = x_arr[valid]
-    y_arr = y_arr[valid]
+    t_arr, x_arr, y_arr = trim_vi_curve(t_arr[:n], x_arr[:n], y_arr[:n], settings)
     if x_arr.size < 8:
         raise ValueError("Not enough valid samples to fit.")
     x_min = float(np.min(x_arr))
