@@ -594,8 +594,16 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             f"[{Ec1:.3g}, {Ec2:.3g}] on the corrected+smoothed curve. "
             "Slow the ramp, reduce averaging, or widen the decade."
         )
-    log_I = np.log10(xs[mask])
-    e_fit = np.clip(e_sc_bounds[mask], 1e-30, None)
+    x_fit = xs[mask]
+    e_fit = e_sc_bounds[mask]
+    pos_fit = np.isfinite(x_fit) & np.isfinite(e_fit) & (x_fit > 0) & (e_fit > 0)
+    if int(np.count_nonzero(pos_fit)) < 4:
+        raise ValueError(
+            "Not enough strictly positive corrected+smoothed points in the Ec window "
+            "for log-log fit after removing non-positive values."
+        )
+    log_I = np.log10(x_fit[pos_fit])
+    e_fit = e_fit[pos_fit]
     log_E = np.log10(e_fit)
     w = np.ones_like(log_E, dtype=float)
     if point_sigma is not None and weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
