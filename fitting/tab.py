@@ -47,6 +47,7 @@ from .service import (
     BASELINE_MODE_HUBER,
     BASELINE_MODE_OLS,
     BASELINE_MODE_THEIL_SEN,
+    DEFAULT_DIDT_MODE,
     DEFAULT_CHI_SQR_TOL,
     DEFAULT_BASELINE_MODE,
     DEFAULT_DIDT_HIGH_FRAC,
@@ -78,6 +79,9 @@ from .service import (
     robust_view_range,
     run_full_fit,
     pick_loglog_i_window_from_thresholds,
+    DIDT_MODE_HUBER,
+    DIDT_MODE_OLS,
+    DIDT_MODE_THEIL_SEN,
 )
 from .extras import (
     ExportPlotDialog,
@@ -265,6 +269,11 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_baseline_mode_cb", None) is not None
             else DEFAULT_BASELINE_MODE
         ),
+        "didt_mode": (
+            app.data_fit_didt_mode_cb.currentData()
+            if getattr(app, "data_fit_didt_mode_cb", None) is not None
+            else DEFAULT_DIDT_MODE
+        ),
         "subtract_vofs": (
             app.data_fit_subtract_vofs_cb.isChecked()
             if getattr(app, "data_fit_subtract_vofs_cb", None) is not None
@@ -363,6 +372,15 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
             app.data_fit_baseline_mode_cb.setCurrentIndex(idx)
         finally:
             app.data_fit_baseline_mode_cb.blockSignals(False)
+    if "didt_mode" in profile and getattr(app, "data_fit_didt_mode_cb", None) is not None:
+        idx = app.data_fit_didt_mode_cb.findData(profile["didt_mode"])
+        if idx < 0:
+            idx = 0
+        app.data_fit_didt_mode_cb.blockSignals(True)
+        try:
+            app.data_fit_didt_mode_cb.setCurrentIndex(idx)
+        finally:
+            app.data_fit_didt_mode_cb.blockSignals(False)
     if method == FIT_METHOD_LOG_LOG:
         low_key, high_key = "loglog_low", "loglog_high"
     else:
@@ -621,6 +639,8 @@ def _connect_data_fitting_actions(app):
         app.data_fit_weight_mode_cb.currentIndexChanged.connect(lambda _: _save_active_curve_profile(app))
     if getattr(app, "data_fit_baseline_mode_cb", None) is not None:
         app.data_fit_baseline_mode_cb.currentIndexChanged.connect(lambda _: _save_active_curve_profile(app))
+    if getattr(app, "data_fit_didt_mode_cb", None) is not None:
+        app.data_fit_didt_mode_cb.currentIndexChanged.connect(lambda _: _save_active_curve_profile(app))
     app.data_fit_graph_btn.clicked.connect(lambda: _open_graph_settings(app))
     app.data_fit_save_preset_btn.clicked.connect(lambda: _save_preset(app))
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
@@ -737,6 +757,9 @@ def _reset_data_fitting_defaults(app) -> None:
     if getattr(app, "data_fit_baseline_mode_cb", None) is not None:
         idx_default_baseline = app.data_fit_baseline_mode_cb.findData(DEFAULT_BASELINE_MODE)
         app.data_fit_baseline_mode_cb.setCurrentIndex(max(0, idx_default_baseline))
+    if getattr(app, "data_fit_didt_mode_cb", None) is not None:
+        idx_default_didt = app.data_fit_didt_mode_cb.findData(DEFAULT_DIDT_MODE)
+        app.data_fit_didt_mode_cb.setCurrentIndex(max(0, idx_default_didt))
     if getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
         app.data_fit_subtract_vofs_cb.setChecked(True)
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
@@ -1160,10 +1183,31 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_show_didt = QCheckBox("Show / edit")
     app.data_fit_show_didt.setChecked(False)
     app.data_fit_show_didt.setToolTip("Show/hide the blue band for this window on the plot.")
+    app.data_fit_didt_mode_cb = QComboBox()
+    app.data_fit_didt_mode_cb.addItem("OLS (legacy)", DIDT_MODE_OLS)
+    app.data_fit_didt_mode_cb.addItem("Huber robust", DIDT_MODE_HUBER)
+    app.data_fit_didt_mode_cb.addItem("Theil-Sen robust", DIDT_MODE_THEIL_SEN)
+    idx_default_didt = app.data_fit_didt_mode_cb.findData(DEFAULT_DIDT_MODE)
+    app.data_fit_didt_mode_cb.setCurrentIndex(max(0, idx_default_didt))
+    app.data_fit_didt_mode_cb.setMaximumWidth(145)
+    app.data_fit_didt_mode_cb.setToolTip(
+        "Step-2 di/dt slope estimator.\n"
+        "OLS: standard least-squares (legacy behavior).\n"
+        "Huber robust: reduces outlier influence.\n"
+        "Theil-Sen robust: median-slope fit, very stable on noisy ramps."
+    )
+    didt_mode_wrap = QWidget()
+    didt_mode_row = QHBoxLayout(didt_mode_wrap)
+    didt_mode_row.setContentsMargins(0, 0, 0, 0)
+    didt_mode_row.setSpacing(6)
+    didt_mode_row.addWidget(QLabel("di/dt mode:"))
+    didt_mode_row.addWidget(app.data_fit_didt_mode_cb)
+    didt_mode_row.addStretch(1)
     _fill_window_grid(
         didt_layout, app.data_fit_show_didt,
         low_label="Low (%)", low_pct=app.data_fit_didt_low, low_x=app.data_fit_didt_low_x,
         high_label="High (%)", high_pct=app.data_fit_didt_high, high_x=app.data_fit_didt_high_x,
+        extra_widget=didt_mode_wrap,
     )
     left.addWidget(didt_group)
 
@@ -1764,6 +1808,11 @@ def _settings_from_inputs(app) -> FitSettings:
             if getattr(app, "data_fit_baseline_mode_cb", None) is not None
             else DEFAULT_BASELINE_MODE
         ),
+        didt_mode=(
+            app.data_fit_didt_mode_cb.currentData()
+            if getattr(app, "data_fit_didt_mode_cb", None) is not None
+            else DEFAULT_DIDT_MODE
+        ),
     )
     return settings
 
@@ -1819,6 +1868,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
     method = profile.get("fit_method", DEFAULT_FIT_METHOD)
     weight_mode = profile.get("weight_mode", WEIGHT_MODE_EQUAL)
     baseline_mode = profile.get("baseline_mode", DEFAULT_BASELINE_MODE)
+    didt_mode = profile.get("didt_mode", DEFAULT_DIDT_MODE)
 
     if sample_length is not None:
         # vc input is Ec in µV/cm → convert to V/cm.
@@ -1878,6 +1928,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
         weight_mode=weight_mode,
         baseline_mode=baseline_mode,
+        didt_mode=didt_mode,
     )
 
 
@@ -4755,7 +4806,8 @@ def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, setting
             y_arr = y_arr - V_ofs
         else:
             V_ofs = 0.0
-    di_dt = estimate_di_dt(t_arr, x_arr, settings.didt_low_frac, settings.didt_high_frac)
+    didt_mode = str(getattr(settings, "didt_mode", DEFAULT_DIDT_MODE) or DEFAULT_DIDT_MODE)
+    di_dt = estimate_di_dt(t_arr, x_arr, settings.didt_low_frac, settings.didt_high_frac, mode=didt_mode)
     lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
     lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
     baseline_mode = str(getattr(settings, "baseline_mode", DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE)
