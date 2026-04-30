@@ -21,7 +21,7 @@ DEFAULT_POWER_LOW_FRAC = 0.05
 DEFAULT_POWER_V_FRAC = 0.80
 DEFAULT_MAX_ITERATIONS = 10
 DEFAULT_IC_TOLERANCE = 0.001    # 0.1 %
-DEFAULT_CHI_SQR_TOL = 1.0e-9    # OriginLab-style tolerance on the fitter cost function
+DEFAULT_CHI_SQR_TOL = 1.0e-14    # OriginLab-style tolerance on the fitter cost function
 DEFAULT_VC_VOLTS = 1.0e-3
 DEFAULT_EC_V_PER_CM = 1.0e-6    # 1 uV/cm = 100 uV/m, IEC 61788-3/-21 default for HTS at 77 K
 DEFAULT_EC1_V_PER_CM = 1.0e-7   # 0.1 uV/cm, lower end of IEC decade n-value window
