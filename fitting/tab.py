@@ -2076,6 +2076,8 @@ def open_file_dialog(app):
     path, _ = QFileDialog.getOpenFileName(app, "Select TDMS recording", start_dir, "TDMS Files (*.tdms);;All Files (*)")
     if not path:
         return
+    # Start from a true clean slate (same behavior as Clear) before loading.
+    _reset_data_fitting_defaults(app)
     # Clear stale curves and result text so the new file starts on an
     # empty plot rather than piling on top of the previous load.
     _clear_plot_state_for_new_recording(app)
@@ -2105,6 +2107,9 @@ def refresh_current_recording(app, path: Optional[str] = None):
     if not path:
         runtime_state = getattr(app, "runtime_state", None)
         path = getattr(runtime_state, "last_tdms_filepath", "") or ""
+    # "Use current measurement" should also reset all fitting controls to
+    # defaults before bringing in the selected recording.
+    _reset_data_fitting_defaults(app)
     # Clear stale curves and result text so a new acquisition starts on an
     # empty plot rather than piling on top of the previous run's results.
     _clear_plot_state_for_new_recording(app)
