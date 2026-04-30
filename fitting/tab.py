@@ -304,6 +304,26 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
         # recalculated window for each plotted curve.
         "power_low_x": app.data_fit_power_low_x.text(),
         "power_high_x": app.data_fit_power_high_x.text(),
+        "trim_start_abs": (
+            app.data_fit_trim_start_abs.text()
+            if getattr(app, "data_fit_trim_start_abs", None) is not None
+            else ""
+        ),
+        "trim_start_pct": (
+            app.data_fit_trim_start_pct.text()
+            if getattr(app, "data_fit_trim_start_pct", None) is not None
+            else ""
+        ),
+        "trim_quench": (
+            app.data_fit_trim_quench_cb.isChecked()
+            if getattr(app, "data_fit_trim_quench_cb", None) is not None
+            else True
+        ),
+        "avg_window": (
+            app.data_fit_avg_input.text()
+            if getattr(app, "data_fit_avg_input", None) is not None
+            else "1"
+        ),
     }
     # Method-specific Step-4 slots: active widget values go into the active
     # method's slot; the inactive method's slot is preserved from the prior
@@ -416,6 +436,21 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
                 widget.setChecked(bool(profile[key]))
             finally:
                 widget.blockSignals(False)
+    for attr, key in (
+        ("data_fit_trim_start_abs", "trim_start_abs"),
+        ("data_fit_trim_start_pct", "trim_start_pct"),
+        ("data_fit_avg_input", "avg_window"),
+    ):
+        widget = getattr(app, attr, None)
+        if widget is not None and key in profile and profile[key] != "":
+            _set_silently(widget, str(profile[key]))
+    if "trim_quench" in profile and getattr(app, "data_fit_trim_quench_cb", None) is not None:
+        cb = app.data_fit_trim_quench_cb
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(bool(profile["trim_quench"]))
+        finally:
+            cb.blockSignals(False)
     _update_method_mode_ui(app)
     _update_band_states(app)
     _update_equation_label(app)
@@ -667,9 +702,13 @@ def _connect_data_fitting_actions(app):
         getattr(app, "data_fit_trim_start_pct", None),
     ):
         if w is not None:
-            w.editingFinished.connect(lambda: refresh_preview(app))
+            w.editingFinished.connect(lambda: (refresh_preview(app), _save_active_curve_profile(app)))
     if getattr(app, "data_fit_trim_quench_cb", None) is not None:
-        app.data_fit_trim_quench_cb.toggled.connect(lambda _: refresh_preview(app))
+        app.data_fit_trim_quench_cb.toggled.connect(
+            lambda _: (refresh_preview(app), _save_active_curve_profile(app))
+        )
+    if getattr(app, "data_fit_avg_input", None) is not None:
+        app.data_fit_avg_input.editingFinished.connect(lambda: _save_active_curve_profile(app))
     app.data_fit_add_smoothed_btn.clicked.connect(lambda: (_add_smoothed_curve_from_current(app), robust_view(app)))
     app.data_fit_export_btn.clicked.connect(lambda: _open_export_dialog(app))
     app.data_fit_settings_btn.clicked.connect(lambda: _open_settings_dialog(app))
@@ -3079,10 +3118,14 @@ def _update_band_states(app) -> None:
 
 
 def _on_show_power_toggled(app, checked: bool) -> None:
-    """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists."""
+    """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists.
+
+    Toggling Show/edit must NOT initiate a full Step-4 fit; it only refreshes
+    the Low(X)/High(X) window from the existing fit reference (if any).
+    """
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
-        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=True)
-        _update_loglog_power_x_from_ec(app, auto_run_fit=True)
+        _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
+        _update_loglog_power_x_from_ec(app, auto_run_fit=False)
     _update_band_states(app)
     refresh_preview(app)
 
@@ -3306,7 +3349,9 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
     widget.setModified(False)
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         if source == "pct":
-            _update_loglog_power_x_from_ec(app)
+            # Ec1/Ec2 edits should refresh the Low(X)/High(X) windows but
+            # must NOT trigger a full Step-4 fit on their own.
+            _update_loglog_power_x_from_ec(app, auto_run_fit=False)
         else:
             _refresh_pct_from_x(app, window, which)
         ctx = _data_ctx(app)
@@ -4164,16 +4209,32 @@ def run_fit(app):
         if last_ok is not None:
             controller.last_result = last_ok
             if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
-                n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
-                try:
-                    lo_w = float(n_window[0])
-                    hi_w = float(n_window[1])
-                except (TypeError, ValueError, IndexError):
-                    lo_w = hi_w = 0.0
-                if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
-                    _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
-                    _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+                # Each fitted entry stored its recomputed Low/High X in its
+                # per-curve profile; reload the active curve's profile so the
+                # visible widgets reflect that curve's window (not last_ok's).
+                active_profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+                active_key = _curve_profile_key_from_ui(app)
+                active_profile = active_profiles.get(active_key) if isinstance(active_profiles, dict) else None
+                if active_profile and ("power_low_x" in active_profile or "power_high_x" in active_profile):
+                    lo_txt = str(active_profile.get("power_low_x", "")).strip()
+                    hi_txt = str(active_profile.get("power_high_x", "")).strip()
+                    if lo_txt:
+                        _set_silently(app.data_fit_power_low_x, lo_txt)
+                    if hi_txt:
+                        _set_silently(app.data_fit_power_high_x, hi_txt)
                     app.data_fit_power_window_manual = False
+                else:
+                    n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
+                    try:
+                        lo_w = float(n_window[0])
+                        hi_w = float(n_window[1])
+                    except (TypeError, ValueError, IndexError):
+                        lo_w = hi_w = 0.0
+                    if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                        _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+                        _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+                        app.data_fit_power_window_manual = False
+                        _save_active_curve_profile(app)
             _show_fit_overlays(
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
@@ -4206,6 +4267,9 @@ def run_fit(app):
             app.data_fit_result_text.setPlainText(
                 current + f"\nFit report written to: {report_path}"
             )
+        # Run Fit always reframes the plot via Robust auto-range so the user
+        # immediately sees the fit window without manually rescaling.
+        robust_view(app)
         return
 
     # Single-curve mode: use current channel selection.
@@ -4251,8 +4315,7 @@ def run_fit(app):
                 )
         return
     controller.last_result = result
-    if not _loglog_window_fields_present():
-        _apply_step4_window_from_reference(result)
+    _apply_step4_window_from_reference(result)
     app.data_fit_result_text.setPlainText(_format_result(result))
     if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
         n_window = getattr(result, "n_window_I", None) or (0.0, 0.0)
@@ -4261,10 +4324,11 @@ def run_fit(app):
             hi_w = float(n_window[1])
         except (TypeError, ValueError, IndexError):
             lo_w = hi_w = 0.0
-        if (not _loglog_window_fields_present()) and np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
             _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
             app.data_fit_power_window_manual = False
+            _save_active_curve_profile(app)
     if result.fit_x is not None and result.fit_y is not None:
         app.data_fit_model_curve.setData(result.fit_x, result.fit_y)
     _upsert_fit_curve_entry(
@@ -4300,6 +4364,9 @@ def run_fit(app):
         app.data_fit_result_text.setPlainText(
             current + f"\nFit report written to: {report_path}"
         )
+    # Run Fit always reframes the plot via Robust auto-range so the user
+    # immediately sees the fit window without manually rescaling.
+    robust_view(app)
 
 
 def _hide_fit_overlays(app) -> None:
