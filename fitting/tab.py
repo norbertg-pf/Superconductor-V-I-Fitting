@@ -105,6 +105,7 @@ class _FitParamTable(pg.TextItem):
         self.setZValue(50)
         self._dragging = False
         self._drag_offset = None
+        self._user_positioned = False
         self.setFlag(self.ItemIsMovable, True) if hasattr(self, "setFlag") else None
 
     @staticmethod
@@ -171,6 +172,7 @@ class _FitParamTable(pg.TextItem):
             self._drag_offset = self.pos() - ev.buttonDownPos(Qt.LeftButton)
         new_pos = ev.pos() + (self._drag_offset or 0)
         self.setPos(new_pos)
+        self._user_positioned = True
 
     def mouseDoubleClickEvent(self, ev):  # noqa: N802 pyqtgraph API
         """Allow the user to edit the HTML content directly."""
@@ -3161,12 +3163,19 @@ def _on_show_power_toggled(app, checked: bool) -> None:
 
     Toggling Show/edit must NOT initiate a full Step-4 fit; it only refreshes
     the Low(X)/High(X) window from the existing fit reference (if any).
+    Toggling must also not change the user's current zoom — refresh_preview
+    re-applies the robust auto-range, so we snapshot/restore the view here.
     """
+    vb = app.data_fit_plot.getPlotItem().getViewBox()
+    saved_x = tuple(vb.viewRange()[0])
+    saved_y = tuple(vb.viewRange()[1])
     if checked and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         _ensure_step4_reference_curve(app, create_plot_entry=False, auto_run_fit=False)
         _update_loglog_power_x_from_ec(app, auto_run_fit=False)
     _update_band_states(app)
     refresh_preview(app)
+    vb.setXRange(saved_x[0], saved_x[1], padding=0)
+    vb.setYRange(saved_y[0], saved_y[1], padding=0)
 
 
 def _on_band_dragged(app, window: str) -> None:
@@ -4334,6 +4343,7 @@ def run_fit(app):
         # Run Fit always reframes the plot via Robust auto-range so the user
         # immediately sees the fit window without manually rescaling.
         robust_view(app)
+        _reposition_param_table(app)
         return
 
     # Single-curve mode: use current channel selection.
@@ -4431,6 +4441,7 @@ def run_fit(app):
     # Run Fit always reframes the plot via Robust auto-range so the user
     # immediately sees the fit window without manually rescaling.
     robust_view(app)
+    _reposition_param_table(app)
 
 
 def _hide_fit_overlays(app) -> None:
@@ -4443,6 +4454,7 @@ def _hide_fit_overlays(app) -> None:
     if hasattr(app, "data_fit_param_table"):
         app.data_fit_param_table.setVisible(False)
         app.data_fit_param_table.clear_parameters()
+        app.data_fit_param_table._user_positioned = False
 
 
 def _show_fit_overlays(
@@ -4470,12 +4482,29 @@ def _show_fit_overlays(
         table.set_parameters(result)
     else:
         table.set_parameters_for_curves(table_entries)
-    # Place near the top-left of the view on first show, then leave where the user drags it.
-    if table.pos().x() == 0 and table.pos().y() == 0:
+    # Anchor to the top-left of the current view unless the user dragged it.
+    if not getattr(table, "_user_positioned", False):
         vb = app.data_fit_plot.getPlotItem().getViewBox()
         vr = vb.viewRange()
         table.setPos(vr[0][0], vr[1][1])
     table.setVisible(True)
+
+
+def _reposition_param_table(app) -> None:
+    """Re-anchor the parameter table to the current view top-left.
+
+    Called after a view-changing reframe (e.g. ``robust_view``) so the
+    overlay does not end up outside the new visible range. Skipped when
+    the user has dragged the table to a custom position in this session.
+    """
+    table = getattr(app, "data_fit_param_table", None)
+    if table is None or not table.isVisible():
+        return
+    if getattr(table, "_user_positioned", False):
+        return
+    vb = app.data_fit_plot.getPlotItem().getViewBox()
+    vr = vb.viewRange()
+    table.setPos(vr[0][0], vr[1][1])
 
 
 def _plot_residuals(app, result) -> None:
@@ -5292,6 +5321,17 @@ def _upsert_fit_curve_entry(app, source_entry: dict, result) -> None:
     fit_color = parent_color.darker(118)
     fit_color_name = fit_color.name(QColor.HexRgb)
     fit_alpha_pct = int(round((fit_color.alpha() / 255.0) * 100.0))
+    # Mirror the source curve's visibility so a Run Fit on a hidden curve
+    # produces a hidden fit overlay. The preview entry tracks visibility on
+    # the app rather than on the entry dict; the synthetic single-curve
+    # source likewise represents the preview.
+    src_sig = source_entry.get("signature")
+    if src_sig == "__preview__" or (
+        isinstance(src_sig, tuple) and src_sig and src_sig[0] == "__single__"
+    ):
+        src_visible = bool(getattr(app, "data_fit_preview_visible", True))
+    else:
+        src_visible = bool(source_entry.get("visible", True))
     curves = getattr(app, "data_fit_curves", [])
     existing = None
     for c in curves:
@@ -5307,6 +5347,7 @@ def _upsert_fit_curve_entry(app, source_entry: dict, result) -> None:
             "alpha_pct": fit_alpha_pct,
             "skip_points": 1,
             "include_in_fit": False,
+            "visible": src_visible,
             "x": np.asarray([]),
             "y": np.asarray([]),
             "t": np.asarray([]),
@@ -5323,11 +5364,13 @@ def _upsert_fit_curve_entry(app, source_entry: dict, result) -> None:
         curves.append(existing)
     existing["color"] = fit_color_name
     existing["alpha_pct"] = fit_alpha_pct
+    existing["visible"] = src_visible
     existing["x"] = np.asarray(result.fit_x if result.fit_x is not None else [])
     existing["y"] = np.asarray(result.fit_y if result.fit_y is not None else [])
     existing["t"] = np.asarray([])
     existing["fit_result"] = result
     _refresh_curve_item(existing)
+    _apply_curve_visibility(existing)
 
 
 def _recompute_curve_from_source(app, entry: dict) -> None:
