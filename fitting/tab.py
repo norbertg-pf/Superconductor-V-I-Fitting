@@ -763,7 +763,7 @@ def _on_transform_inputs_changed(app) -> None:
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
     if ctx is not None:
-        _, _, x_arr, y_arr, _ = ctx
+        _, _, x_arr, y_arr, _, _ = ctx
         _update_fit_bands(app, x_arr, y_arr)
 
 
@@ -1735,15 +1735,51 @@ def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndar
     return x_out, y_out, t_out
 
 
+def _ensure_entry_origin_snapshot(entry: dict) -> None:
+    """Lazily snapshot the untrimmed x/y/t on first trim so subsequent trims
+    (with a different Step 1.5 amount) can be applied to the original data.
+    Without this snapshot a smaller trim amount cannot restore points that a
+    previous larger trim already removed in place.
+    """
+    if entry.get("x_orig") is None:
+        entry["x_orig"] = np.asarray(entry.get("x", []), dtype=float).copy()
+    if entry.get("y_orig") is None:
+        entry["y_orig"] = np.asarray(entry.get("y", []), dtype=float).copy()
+    if entry.get("t_orig") is None:
+        entry["t_orig"] = np.asarray(entry.get("t", []), dtype=float).copy()
+
+
+def _entry_untrimmed_xyt(entry: dict):
+    """Return (x, y, t) from the untrimmed snapshot (falling back to live x/y/t)."""
+    x_src = entry.get("x_orig")
+    y_src = entry.get("y_orig")
+    t_src = entry.get("t_orig")
+    if x_src is None:
+        x_src = entry.get("x", [])
+    if y_src is None:
+        y_src = entry.get("y", [])
+    if t_src is None:
+        t_src = entry.get("t", [])
+    return (
+        np.asarray(x_src, dtype=float),
+        np.asarray(y_src, dtype=float),
+        np.asarray(t_src, dtype=float),
+    )
+
+
 def _trim_active_curve_entry_in_place(app) -> bool:
-    """Trim the active stored curve entry in-place so the user sees removed points."""
+    """Trim the active stored curve entry in-place so the user sees removed points.
+
+    Always trims from the untrimmed snapshot (``x_orig``/``y_orig``/``t_orig``)
+    so that reducing the Step 1.5 trim amount restores previously removed
+    points instead of leaving them gone forever.
+    """
     active_key = _curve_profile_key_from_ui(app)
     for entry in getattr(app, "data_fit_curves", []):
         if str(entry.get("signature")) != str(active_key):
             continue
-        x = np.asarray(entry.get("x", []), dtype=float)
-        y = np.asarray(entry.get("y", []), dtype=float)
-        t = np.asarray(entry.get("t", []), dtype=float)
+        _ensure_entry_origin_snapshot(entry)
+        x, y, t = _entry_untrimmed_xyt(entry)
         if x.size == 0 or y.size == 0:
             return False
         x_t, y_t, t_t = _trim_xyz_with_step15(app, x, y, t if t.size else None)
@@ -2218,6 +2254,9 @@ def _add_replayed_source_curve(app, name: str, x: np.ndarray, y: np.ndarray,
         "x": x,
         "y": y,
         "t": t,
+        "x_orig": np.asarray(x, dtype=float).copy() if x is not None else np.asarray([]),
+        "y_orig": np.asarray(y, dtype=float).copy() if y is not None else np.asarray([]),
+        "t_orig": np.asarray(t, dtype=float).copy() if t is not None else np.asarray([]),
         "plot_item": item,
         "fit_result": None,
         "curve_style": {"draw_mode": "Auto", "line_width": 1.0, "point_size": 4},
@@ -2656,7 +2695,7 @@ def _on_fit_method_changed(app) -> None:
     _refresh_all_x_values(app)
     ctx = _data_ctx(app)
     if ctx is not None:
-        _, _, x_arr, y_arr, _ = ctx
+        _, _, x_arr, y_arr, _, _ = ctx
         _update_fit_bands(app, x_arr, y_arr)
     _update_band_states(app)
     _update_equation_label(app)
@@ -3147,7 +3186,14 @@ def _on_band_dragged(app, window: str) -> None:
     ctx = _data_ctx(app)
     if ctx is None:
         return
-    x_min, x_max, x, y, y_max = ctx
+    x_min, x_max, x, y, y_max, trim_low_bound = ctx
+    # Clamp the dragged window so the user cannot select X values that have
+    # been removed by the Step 1.5 trim.
+    if trim_low_bound is not None:
+        if lo < trim_low_bound:
+            lo = trim_low_bound
+        if hi < trim_low_bound:
+            hi = trim_low_bound
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         lo, hi = sorted((lo, hi))
         ref = getattr(app, "data_fit_power_ref_curve", None) or {}
@@ -3194,7 +3240,7 @@ def _on_band_dragged(app, window: str) -> None:
 
 
 def _data_ctx(app):
-    transformed = _apply_transforms(app)
+    transformed = _apply_transforms(app, apply_trim=True)
     x = transformed.get("x_original")
     y = transformed.get("y_original")
     x_trimmed = transformed.get("x")
@@ -3212,14 +3258,16 @@ def _data_ctx(app):
             y = ref_y[:n_ref]
     if x is None or x.size == 0:
         return None
+    # Low/High percentages reference the original (untrimmed) curve length so
+    # they keep a stable meaning when the Step 1.5 trim changes. The trim
+    # bound is returned separately so callers can refuse to set values inside
+    # the removed region.
     x_min = float(np.min(x))
     x_max = float(np.max(x))
-    if trim_low_bound is not None and x_min < trim_low_bound:
-        x_min = trim_low_bound
     if x_max <= x_min:
         return None
     y_max = float(np.max(y)) if (y is not None and y.size) else 0.0
-    return x_min, x_max, x, y, y_max
+    return x_min, x_max, x, y, y_max, trim_low_bound
 
 
 def _pct_to_x(pct: float, x_min: float, x_max: float) -> float:
@@ -3313,13 +3361,19 @@ def _refresh_x_from_pct(app, window: str, which: str) -> None:
     ctx = _data_ctx(app)
     if ctx is None:
         return
-    x_min, x_max, x, y, y_max = ctx
+    x_min, x_max, x, y, y_max, trim_low_bound = ctx
     pct_widget, x_widget, axis = app.data_fit_window_inputs[(window, which)]
     try:
         pct = float(pct_widget.text())
     except ValueError:
         return
     x_val = _vpct_to_x(pct, x, y, y_max, x_max) if axis == "Vmax" else _pct_to_x(pct, x_min, x_max)
+    # Reject values that fall inside the Step 1.5 trim window: clamp the X
+    # to the first remaining sample and rewrite the percentage to match.
+    if trim_low_bound is not None and x_val < trim_low_bound:
+        x_val = trim_low_bound
+        if axis != "Vmax":
+            _set_silently(pct_widget, f"{_x_to_pct(x_val, x_min, x_max):.4f}")
     _set_silently(x_widget, f"{x_val:.6g}")
 
 
@@ -3329,12 +3383,15 @@ def _refresh_pct_from_x(app, window: str, which: str) -> None:
     ctx = _data_ctx(app)
     if ctx is None:
         return
-    x_min, x_max, x, y, y_max = ctx
+    x_min, x_max, x, y, y_max, trim_low_bound = ctx
     pct_widget, x_widget, axis = app.data_fit_window_inputs[(window, which)]
     try:
         x_val = float(x_widget.text())
     except ValueError:
         return
+    if trim_low_bound is not None and x_val < trim_low_bound:
+        x_val = trim_low_bound
+        _set_silently(x_widget, f"{x_val:.6g}")
     pct = _x_to_vpct(x_val, x, y, y_max) if axis == "Vmax" else _x_to_pct(x_val, x_min, x_max)
     _set_silently(pct_widget, f"{pct:.4f}")
 
@@ -3356,7 +3413,7 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
             _refresh_pct_from_x(app, window, which)
         ctx = _data_ctx(app)
         if ctx is not None:
-            _, _, x_arr, y_arr, _ = ctx
+            _, _, x_arr, y_arr, _, _ = ctx
             _update_fit_bands(app, x_arr, y_arr)
         _update_band_states(app)
         _save_active_curve_profile(app)
@@ -3367,7 +3424,7 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
         _refresh_pct_from_x(app, window, which)
     ctx = _data_ctx(app)
     if ctx is not None:
-        _, _, x_arr, y_arr, _ = ctx
+        _, _, x_arr, y_arr, _, _ = ctx
         _update_fit_bands(app, x_arr, y_arr)
     _update_band_states(app)
     _save_active_curve_profile(app)
@@ -4155,10 +4212,17 @@ def run_fit(app):
         last_show_ic = False
         for entry in included:
             label = entry.get("label", "Curve")
-            ex = np.asarray(entry.get("x", []), dtype=float)
-            ey = np.asarray(entry.get("y", []), dtype=float)
-            et = np.asarray(entry.get("t", []), dtype=float)
-            ex, ey, et = _trim_xyz_with_step15(app, ex, ey, et)
+            # Trim from the untrimmed snapshot so this Run Fit honours the
+            # current Step 1.5 settings even if a previous run had clobbered
+            # the entry's live x/y/t with an older (more aggressive) trim.
+            if entry.get("signature") == "__preview__":
+                ex_full = np.asarray(entry.get("x", []), dtype=float)
+                ey_full = np.asarray(entry.get("y", []), dtype=float)
+                et_full = np.asarray(entry.get("t", []), dtype=float)
+            else:
+                _ensure_entry_origin_snapshot(entry)
+                ex_full, ey_full, et_full = _entry_untrimmed_xyt(entry)
+            ex, ey, et = _trim_xyz_with_step15(app, ex_full, ey_full, et_full)
             if ex.size == 0 or ey.size == 0 or et is None or et.size == 0:
                 lines.append(f"[{label}] FIT FAILED: No samples after Step 1.5 trim.")
                 continue
@@ -4833,9 +4897,10 @@ def _resolve_reference_curve_data(app):
             continue
         if str(entry.get("signature")) != str(active_key):
             continue
-        x = np.asarray(entry.get("x", []), dtype=float)
-        y = np.asarray(entry.get("y", []), dtype=float)
-        t = np.asarray(entry.get("t", []), dtype=float)
+        # Always pick the untrimmed snapshot so the helper builders re-apply
+        # the live Step 1.5 trim instead of an old (possibly heavier) one.
+        _ensure_entry_origin_snapshot(entry)
+        x, y, t = _entry_untrimmed_xyt(entry)
         n = int(min(x.size, y.size))
         if n <= 0:
             continue
@@ -5106,6 +5171,9 @@ def _add_plot_from_current(app) -> None:
             entry["x"] = transformed["x"]
             entry["y"] = transformed["y"]
             entry["t"] = transformed["time"]
+            entry["x_orig"] = np.asarray(transformed["x"], dtype=float).copy()
+            entry["y_orig"] = np.asarray(transformed["y"], dtype=float).copy()
+            entry["t_orig"] = np.asarray(transformed["time"], dtype=float).copy()
             entry["avg_window"] = _active_avg_window(app)
             entry["label"] = app.data_fit_y_cb.currentText()
             profiles = getattr(app, "data_fit_curve_profiles", {})
@@ -5130,6 +5198,7 @@ def _add_plot_from_current(app) -> None:
     )
     n_points = int(min(len(x), len(y)))
     adaptive_skip = 1
+    t_arr = transformed["time"]
     entry = {
         "signature": sig,
         "label": label,
@@ -5139,7 +5208,10 @@ def _add_plot_from_current(app) -> None:
         "include_in_fit": True,
         "x": x,
         "y": y,
-        "t": transformed["time"],
+        "t": t_arr,
+        "x_orig": np.asarray(x, dtype=float).copy(),
+        "y_orig": np.asarray(y, dtype=float).copy(),
+        "t_orig": np.asarray(t_arr, dtype=float).copy() if t_arr is not None else np.asarray([]),
         "plot_item": item,
         "fit_result": None,
         "curve_style": {"draw_mode": "Auto", "line_width": 1.0, "point_size": 4},
