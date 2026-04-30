@@ -4611,6 +4611,50 @@ def _button_bg_css(qcolor: QColor) -> str:
     return f"background: rgba({qcolor.red()}, {qcolor.green()}, {qcolor.blue()}, {qcolor.alpha()}); color:white;"
 
 
+def _sanitize_tdms_name(name: str, fallback: str) -> str:
+    text = str(name or "").strip()
+    if not text:
+        text = fallback
+    return "".join(c if (c.isalnum() or c in ("_", "-", ".")) else "_" for c in text)
+
+
+def _write_helper_curve_tdms(
+    app,
+    *,
+    curve_kind: str,
+    base_label: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    ys: Optional[np.ndarray] = None,
+) -> Optional[str]:
+    """Save helper-curve data into a dedicated TDMS next to the source file."""
+    controller = getattr(app, "data_fit_controller", None)
+    src_path = getattr(controller, "tdms_path", "") if controller is not None else ""
+    if not src_path:
+        return None
+    src = Path(src_path)
+    base_name = _sanitize_tdms_name(base_label, "curve")
+    suffix = _sanitize_tdms_name(curve_kind, "helper")
+    out_path = src.with_name(f"{src.stem}_{base_name}_{suffix}.tdms")
+    props = {
+        "curve_kind": curve_kind,
+        "base_label": str(base_label),
+        "source_tdms": str(src),
+        "created_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    objects = [GroupObject("HelperCurve", properties=props)]
+    objects.append(ChannelObject("HelperCurve", "Current", np.asarray(x, dtype=float)))
+    objects.append(ChannelObject("HelperCurve", "Voltage", np.asarray(y, dtype=float)))
+    if ys is not None:
+        objects.append(ChannelObject("HelperCurve", "Ys", np.asarray(ys, dtype=float)))
+    if np.asarray(t).size:
+        objects.append(ChannelObject("HelperCurve", "Time", np.asarray(t, dtype=float)))
+    with TdmsWriter(str(out_path)) as writer:
+        writer.write_segment(objects)
+    return str(out_path)
+
+
 def _add_corrected_curve_from_last_fit(app) -> None:
     """Add Y_corrected = Y - (V0 + R*I) using Step-1/2/3 values."""
     app.data_fit_show_trimmed_preview = True
@@ -4666,6 +4710,18 @@ def _add_corrected_curve_from_last_fit(app) -> None:
     existing["label"] = f"{base_label} corrected"
     _refresh_curve_item(existing)
     _refresh_curve_profile_selector(app)
+    try:
+        _write_helper_curve_tdms(
+            app,
+            curve_kind="corrected_curve",
+            base_label=base_label,
+            x=x,
+            y=y_corr,
+            t=t,
+            ys=y_corr,
+        )
+    except Exception:
+        traceback.print_exc()
 
 
 def _resolve_fit_parent_and_result(app):
@@ -4962,6 +5018,18 @@ def _add_smoothed_curve_from_current(app) -> None:
         existing["fit_result"] = result
         _refresh_curve_item(existing)
         _refresh_curve_profile_selector(app)
+        try:
+            _write_helper_curve_tdms(
+                app,
+                curve_kind="smoothed_corrected_curve",
+                base_label=base_label,
+                x=x,
+                y=y_sm,
+                t=t,
+                ys=y_sm,
+            )
+        except Exception:
+            traceback.print_exc()
         ok = True
     if not ok:
         QMessageBox.warning(
