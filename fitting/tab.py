@@ -3115,6 +3115,14 @@ def robust_view(app):
             x_arrays.append(np.asarray(x))
             y_arrays.append(np.asarray(y))
     for entry in getattr(app, "data_fit_curves", []):
+        # Hidden replayed curves (e.g. all-but-first source curves after a
+        # multi-channel auto-load) must not pull the Y range — the user only
+        # sees the visible curve, and a tap-distance-scaled visible curve can
+        # be orders of magnitude smaller than a hidden raw-V curve, which
+        # would otherwise squash it. Manual Add to plot leaves curves visible
+        # by default so the same logic naturally includes them.
+        if not bool(entry.get("visible", True)):
+            continue
         x = entry.get("x")
         y = entry.get("y")
         if x is None or y is None:
