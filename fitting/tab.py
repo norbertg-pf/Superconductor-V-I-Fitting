@@ -4700,11 +4700,16 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 
 def _add_corrected_curve_from_last_fit(app) -> None:
-    """Add Y_corrected = Y - (V0 + R*I) using Step-1/2/3 values."""
+    """Add Y_corrected = Y - (V0 + R*I) using freshly recomputed Step-1/2/3.
+
+    Always re-runs Step 1, 1.5, 2 and 3 from the current widget settings so
+    the corrected curve reflects the live thermal-offset, trim, di/dt and
+    baseline inputs even if a previous fit is cached on the entry.
+    """
     app.data_fit_show_trimmed_preview = True
     refresh_preview(app)
     _trim_active_curve_entry_in_place(app)
-    resolved = _resolve_or_compute_step123_reference(app)
+    resolved = _force_compute_step123_reference(app)
     if resolved is None:
         QMessageBox.warning(
             app,
@@ -4929,6 +4934,26 @@ def _resolve_or_compute_step123_reference(app):
     return result, entry, base_sig, base_label, x, y, t
 
 
+def _force_compute_step123_reference(app):
+    """Always recompute Step-1, 1.5, 2, 3 from current widget settings.
+
+    Used by the "Add corrected curve" / "Add smoothed and corrected curve"
+    buttons so they reflect the live Step 1/1.5/2/3 inputs instead of a
+    cached fit result. ``_resolve_reference_curve_data`` already applies the
+    Step 1.5 trim to the chosen source curve before we compute Step 1/2/3.
+    """
+    curve_data = _resolve_reference_curve_data(app)
+    if curve_data is None:
+        return None
+    entry, base_sig, base_label, x, y, t = curve_data
+    try:
+        settings = _settings_for_entry(app, entry) if entry is not None else _settings_from_inputs(app)
+        result = _compute_step123_result(t, x, y, settings)
+    except Exception:
+        return None
+    return result, entry, base_sig, base_label, x, y, t
+
+
 def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit: bool) -> bool:
     """Build corrected+smoothed Step-4 reference from latest successful fit."""
     resolved = _resolve_fit_parent_and_result(app)
@@ -4996,11 +5021,16 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 
 def _add_smoothed_curve_from_current(app) -> None:
-    """Create corrected+smoothed Step-4 reference curve and plot a copy."""
+    """Create corrected+smoothed Step-4 reference curve and plot a copy.
+
+    Always re-runs Step 1, 1.5, 2 and 3 from the current widget settings so
+    the reference curve reflects the live thermal-offset, trim, di/dt and
+    baseline inputs even if a previous fit is cached on the entry.
+    """
     app.data_fit_show_trimmed_preview = True
     refresh_preview(app)
     _trim_active_curve_entry_in_place(app)
-    resolved = _resolve_or_compute_step123_reference(app)
+    resolved = _force_compute_step123_reference(app)
     if resolved is None:
         ok = False
     else:
