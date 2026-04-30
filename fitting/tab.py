@@ -893,6 +893,10 @@ def _refresh_curve_profile_selector(app) -> None:
     idx = combo.findData(current_key)
     combo.setCurrentIndex(idx if idx >= 0 else 0)
     combo.blockSignals(False)
+    # Keep the widgets (including Ec1/Ec2 unit labels) synchronized with the
+    # currently selected profile even when the combo contents were rebuilt with
+    # signals blocked (for example right after auto-loading/plotted curves).
+    _on_curve_profile_changed(app)
 
 
 def _find_curve_for_profile_key(app, key: str) -> Optional[dict]:
