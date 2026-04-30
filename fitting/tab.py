@@ -5773,18 +5773,37 @@ def _open_plot_summary(app) -> None:
 
 def _fit_single_curve(app, entry: dict) -> None:
     try:
-        settings = _settings_from_inputs(app)
+        # Keep this helper aligned with the main Run Fit path so any host
+        # app (for example DAQ auto-fit hooks) gets the same preprocessing
+        # and per-curve settings behavior as the Run Fit button.
+        settings = _settings_for_entry(app, entry)
     except Exception as exc:
         QMessageBox.critical(app, "Data Fitting", f"Invalid input: {exc}")
         return
+    _ensure_entry_origin_snapshot(entry)
+    ex_full, ey_full, et_full = _entry_untrimmed_xyt(entry)
+    ex, ey, et = _trim_xyz_with_step15(app, ex_full, ey_full, et_full)
+    if ex.size == 0 or ey.size == 0 or et is None or et.size == 0:
+        _show_warning(app, "No samples after Step 1.5 trim.", severity="error")
+        return
     try:
-        result = run_full_fit(entry["t"], entry["x"], entry["y"], settings)
+        result = run_full_fit(et, ex, ey, settings)
     except Exception as exc:
         traceback.print_exc()
         QMessageBox.critical(app, "Data Fitting", f"Fit failed: {exc}")
         return
+    entry["t"] = et
+    entry["x"] = ex
+    entry["y"] = ey
+    if entry.get("plot_item") is not None:
+        _refresh_curve_item(entry)
     entry["fit_result"] = result
     if result.ok:
+        if getattr(result, "fit_method", "") == FIT_METHOD_LOG_LOG:
+            _set_silently(app.data_fit_power_low_x, f"{result.n_window_I[0]:.6g}")
+            _set_silently(app.data_fit_power_high_x, f"{result.n_window_I[1]:.6g}")
+            app.data_fit_power_window_manual = False
+            _save_active_curve_profile(app)
         _show_fit_overlays(app, result)
         app.data_fit_result_text.setPlainText(f"[{entry['label']}]\n" + _format_result(result))
         _post_fit_warnings(app, result, settings)
