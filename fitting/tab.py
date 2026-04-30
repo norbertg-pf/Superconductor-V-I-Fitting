@@ -391,10 +391,16 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         _set_silently(app.data_fit_power_low, str(low_val))
     if high_val is not None:
         _set_silently(app.data_fit_power_vfrac, str(high_val))
-    if "power_low_x" in profile:
-        _set_silently(app.data_fit_power_low_x, str(profile["power_low_x"]))
-    if "power_high_x" in profile:
-        _set_silently(app.data_fit_power_high_x, str(profile["power_high_x"]))
+    # Keep Low(X)/High(X) empty in IEC log-log mode until the user runs a fit
+    # in this session. Do not restore historical window currents from TDMS.
+    if method == FIT_METHOD_LOG_LOG:
+        _set_silently(app.data_fit_power_low_x, "-")
+        _set_silently(app.data_fit_power_high_x, "-")
+    else:
+        if "power_low_x" in profile:
+            _set_silently(app.data_fit_power_low_x, str(profile["power_low_x"]))
+        if "power_high_x" in profile:
+            _set_silently(app.data_fit_power_high_x, str(profile["power_high_x"]))
     if "zero_i_frac" in profile and getattr(app, "data_fit_zero_i_frac", None) is not None:
         _set_silently(app.data_fit_zero_i_frac, str(profile["zero_i_frac"]))
     if "subtract_vofs" in profile and getattr(app, "data_fit_subtract_vofs_cb", None) is not None:
@@ -774,6 +780,8 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
+    app.data_fit_power_low_x.setText("-")
+    app.data_fit_power_high_x.setText("-")
     # Block radio signals during reset so _on_fit_method_changed doesn't try
     # to snapshot the half-reset profile.
     app.data_fit_method_loglog_rb.blockSignals(True)
