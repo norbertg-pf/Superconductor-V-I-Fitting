@@ -2373,13 +2373,25 @@ def _replay_saved_fits_into_plot(app) -> None:
             float(meta.get("offset", 0.0) or 0.0),
         )
         t_arr = np.asarray(t_raw, dtype=float)
-        # Apply per-unit-length scaling iff the saved fit was in V/cm AND
-        # the channel has a recorded tap distance.
+        # Match what 'Add to plot' does: when the channel metadata carries a
+        # Voltage_Tab_Distance, ``_apply_voltage_tap_from_metadata`` auto-checks
+        # the use_length box and ``_apply_transforms`` divides Y by it. Replay
+        # the same per-unit-length scaling here so default-plotted curves are
+        # rendered on the same V/cm axis instead of leaving them unscaled.
         v_tap = meta.get("voltage_tap_cm")
-        if v_tap and float(v_tap) > 0 and _coerce_bool(_prop_lookup(props, "uses_sample_length")):
+        if v_tap and float(v_tap) > 0:
             y_arr = y_arr / float(v_tap)
         result = _fit_result_from_props(props)
         fit_x, fit_y = _build_fit_curve(result, x_arr)
+        # Older saved fits with ``uses_sample_length=False`` carry Ec/R in V
+        # rather than V/cm; convert the rebuilt overlay to V/cm so it lines up
+        # with the now-rescaled source curve.
+        if (
+            fit_y is not None
+            and v_tap and float(v_tap) > 0
+            and not _coerce_bool(_prop_lookup(props, "uses_sample_length"))
+        ):
+            fit_y = fit_y / float(v_tap)
         result.fit_x = fit_x
         result.fit_y = fit_y
         source_entry = _add_replayed_source_curve(
@@ -2400,20 +2412,16 @@ def _replay_saved_fits_into_plot(app) -> None:
             # the source channel — required for the channel combo flow.
             #
             # Storage units matter: ``_apply_transforms`` divides Y by the
-            # active sample length when the voltage-tap checkbox is on. The
-            # fit was already in V/cm when ``uses_sample_length`` is True,
-            # so storing it as-is would make the display pipeline divide
-            # by the tap distance a second time and flatten the transition
-            # off-screen. Multiply by the tap distance here so the cached
-            # values are in raw V, mirroring how the source channel is
-            # stored, and the standard transform reproduces the V/cm scale.
+            # active sample length when the voltage-tap checkbox is on. ``fit_y``
+            # is now always in V/cm whenever the channel carries a tap distance
+            # (we converted older V-unit fits above). Multiply by the tap
+            # distance here so the cached values are in raw V, mirroring how
+            # the source channel is stored, and the standard transform
+            # reproduces the V/cm scale.
             fitted_name = f"{name}{_FITTED_CHANNEL_SUFFIX}"
             sampled = _sample_fit_curve_at(x_arr, np.asarray(fit_x), np.asarray(fit_y))
             if sampled is not None and sampled.size:
-                if (
-                    v_tap and float(v_tap) > 0
-                    and _coerce_bool(_prop_lookup(props, "uses_sample_length"))
-                ):
+                if v_tap and float(v_tap) > 0:
                     sampled = sampled * float(v_tap)
                 controller.channel_cache[fitted_name] = sampled
                 controller.channel_metadata[fitted_name] = {
