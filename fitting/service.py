@@ -179,6 +179,10 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     else:
         span = 0.0
     target_sigma = max(0.005 * ec1_abs, 1e-4 * span)
+    # Also constrain peak-to-peak noise of the smoothed helper curve so that
+    # Step-4 crossings remain stable across very different sample rates
+    # (for example 10 S/s vs 10 kS/s datasets).
+    target_p2p = max(0.9 * ec1_abs, 1e-3 * span)
     if sigma_hf <= target_sigma:
         return arr
 
@@ -198,16 +202,43 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     poly = 2 if win >= 5 else 1
     sm = savgol_filter(arr, window_length=win, polyorder=poly, mode="interp")
 
-    # Optional second pass if still above target noise.
-    diffs_sm = np.diff(sm)
-    if diffs_sm.size >= 5:
-        mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
-        sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
-        if sigma_sm > target_sigma and win < max_win:
-            win2 = min(max_win, max(win + 2, int(np.ceil(win * (sigma_sm / target_sigma) ** 2))))
-            if win2 % 2 == 0:
-                win2 += 1
-            sm = savgol_filter(arr, window_length=win2, polyorder=poly, mode="interp")
+    # Iteratively increase smoothing until both:
+    #   1) high-frequency sigma is below target_sigma, and
+    #   2) residual peak-to-peak noise is below target_p2p (≈ Ec1).
+    # This keeps the curve shape while adapting to widely different sample
+    # rates and point densities.
+    max_iter = 6
+    for _ in range(max_iter):
+        diffs_sm = np.diff(sm)
+        if diffs_sm.size >= 5:
+            mad_sm = float(np.median(np.abs(diffs_sm - np.median(diffs_sm))))
+            sigma_sm = 1.4826 * mad_sm / np.sqrt(2.0)
+        else:
+            sigma_sm = 0.0
+
+        resid = arr - sm
+        finite_resid = resid[np.isfinite(resid)]
+        if finite_resid.size >= 8:
+            p2p_noise = float(np.percentile(finite_resid, 95.0) - np.percentile(finite_resid, 5.0))
+        elif finite_resid.size:
+            p2p_noise = float(np.max(finite_resid) - np.min(finite_resid))
+        else:
+            p2p_noise = 0.0
+
+        if sigma_sm <= target_sigma and p2p_noise <= target_p2p:
+            break
+        if win >= max_win:
+            break
+
+        grow_sigma = (sigma_sm / max(target_sigma, 1e-30)) ** 2
+        grow_p2p = (p2p_noise / max(target_p2p, 1e-30)) ** 1.5
+        grow = max(1.2, grow_sigma, grow_p2p)
+        win_next = int(np.ceil(win * min(grow, 2.0))) + 2
+        win = min(max_win, max(win + 2, win_next))
+        if win % 2 == 0:
+            win += 1
+        poly = 2 if win >= 5 else 1
+        sm = savgol_filter(arr, window_length=win, polyorder=poly, mode="interp")
 
     return sm
 
