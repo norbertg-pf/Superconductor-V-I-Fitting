@@ -893,6 +893,10 @@ def _refresh_curve_profile_selector(app) -> None:
     idx = combo.findData(current_key)
     combo.setCurrentIndex(idx if idx >= 0 else 0)
     combo.blockSignals(False)
+    # Keep the widgets (including Ec1/Ec2 unit labels) synchronized with the
+    # currently selected profile even when the combo contents were rebuilt with
+    # signals blocked (for example right after auto-loading/plotted curves).
+    _on_curve_profile_changed(app)
 
 
 def _find_curve_for_profile_key(app, key: str) -> Optional[dict]:
@@ -1751,11 +1755,23 @@ def _detect_quench_drop_index(x: np.ndarray) -> Optional[int]:
 
 def _settings_from_inputs(app) -> FitSettings:
     sample_length = None
-    if app.data_fit_use_length_cb.isChecked():
-        try:
-            sample_length = float(app.data_fit_length_input.text())
-        except ValueError:
-            sample_length = None
+    use_length = bool(app.data_fit_use_length_cb.isChecked())
+    try:
+        length_cm = float(app.data_fit_length_input.text())
+    except ValueError:
+        length_cm = None
+
+    # In log-log mode, treat Ec/Vc units from the ACTIVE curve settings
+    # (Curve settings → Active fitting settings selector), not from whatever
+    # Y-channel is currently selected in the Channels group.
+    if _active_fit_method(app) == FIT_METHOD_LOG_LOG:
+        key = _curve_profile_key_from_ui(app)
+        entry = _find_curve_for_profile_key(app, key)
+        if entry is not None:
+            use_length, length_cm = _entry_length_settings(app, entry)
+
+    if use_length and length_cm is not None and length_cm > 0:
+        sample_length = float(length_cm)
     if sample_length is not None:
         # Input is Ec in µV/cm → convert to V/cm for the service.
         ec_uv_per_cm = _float_from(app.data_fit_vc_input, 1.0)
