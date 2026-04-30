@@ -53,6 +53,11 @@ BASELINE_MODE_THEIL_SEN = "theil_sen"
 # Default to Huber: robust against outliers while remaining smooth/stable
 # for high-rate DAQ traces.
 DEFAULT_BASELINE_MODE = BASELINE_MODE_HUBER
+# Step-2 di/dt slope estimator mode identifiers.
+DIDT_MODE_OLS = BASELINE_MODE_OLS
+DIDT_MODE_HUBER = BASELINE_MODE_HUBER
+DIDT_MODE_THEIL_SEN = BASELINE_MODE_THEIL_SEN
+DEFAULT_DIDT_MODE = DIDT_MODE_HUBER
 
 
 @dataclass
@@ -79,6 +84,7 @@ class FitSettings:
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
     weight_mode: str = DEFAULT_WEIGHT_MODE
     baseline_mode: str = DEFAULT_BASELINE_MODE
+    didt_mode: str = DEFAULT_DIDT_MODE
 
 
 @dataclass
@@ -293,7 +299,8 @@ def estimate_thermal_offset(x: np.ndarray, y: np.ndarray,
 
 
 def estimate_di_dt(t: np.ndarray, x: np.ndarray, low_frac: float = DEFAULT_DIDT_LOW_FRAC,
-                   high_frac: float = DEFAULT_DIDT_HIGH_FRAC) -> float:
+                   high_frac: float = DEFAULT_DIDT_HIGH_FRAC,
+                   mode: str = DEFAULT_DIDT_MODE) -> float:
     t, x = _clean_arrays(t, x)
     if t.size < 2:
         return 0.0
@@ -306,8 +313,19 @@ def estimate_di_dt(t: np.ndarray, x: np.ndarray, low_frac: float = DEFAULT_DIDT_
     mask = (x >= lo) & (x <= hi)
     if np.count_nonzero(mask) < 2:
         return 0.0
-    slope, _ = np.polyfit(t[mask], x[mask], 1)
-    return float(slope)
+    tm = t[mask]
+    xm = x[mask]
+    fit_mode = str(mode or DEFAULT_DIDT_MODE).strip().lower()
+    if fit_mode == DIDT_MODE_OLS:
+        slope, _ = np.polyfit(tm, xm, 1)
+        return float(slope)
+    if fit_mode == DIDT_MODE_HUBER:
+        _, slope = _huber_line(tm, xm)
+        return float(slope)
+    if fit_mode == DIDT_MODE_THEIL_SEN:
+        _, slope = _theil_sen_line(tm, xm)
+        return float(slope)
+    raise ValueError(f"Unknown di/dt mode: {mode}")
 
 
 def _theil_sen_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
@@ -710,7 +728,11 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             V_ofs = 0.0
 
     # Step 2: di/dt on the linear-ramp window.
-    di_dt = estimate_di_dt(t, x, settings.didt_low_frac, settings.didt_high_frac)
+    di_dt_mode = str(getattr(settings, "didt_mode", DEFAULT_DIDT_MODE) or DEFAULT_DIDT_MODE)
+    try:
+        di_dt = estimate_di_dt(t, x, settings.didt_low_frac, settings.didt_high_frac, mode=di_dt_mode)
+    except ValueError as exc:
+        return FitResult(ok=False, message=f"di/dt slope fit failed: {exc}")
 
     # Step 3: linear baseline → V0 (= L·dI/dt in Y-units after Step 1) and R.
     lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
