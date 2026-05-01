@@ -3781,6 +3781,7 @@ _FIT_PROPERTY_KEYS = (
     "r_squared", "chi_squared", "di_dt_A_per_s", "criterion_value",
     "criterion_unit", "criterion_name", "Ec1", "Ec2",
     "n_window_I_lo_A", "n_window_I_hi_A", "n_points_used",
+    "linear_window_I_lo_A", "linear_window_I_hi_A",
     "V_0_V", "V0_inductive", "inductance_L_H", "R_Ohm",
     "ramp_inductive_ratio", "ramp_too_fast", "insufficient_n_points",
     "thermal_offset_applied", "uses_sample_length",
@@ -3802,6 +3803,7 @@ def _fit_result_properties(result) -> dict:
     is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
     ok = bool(getattr(result, "ok", False))
     n_window = getattr(result, "n_window_I", (0.0, 0.0)) or (0.0, 0.0)
+    linear_window = getattr(result, "linear_fit_window", (0.0, 0.0)) or (0.0, 0.0)
     # Convert R (Ω/cm) and V_ofs (V/cm) back to total-tape units (Ω, V) when the
     # fit was run against a sample-length-normalised curve, so the metadata
     # always carries Ω and V regardless of the per-cm plotting choice.
@@ -3839,6 +3841,11 @@ def _fit_result_properties(result) -> dict:
         "n_window_I_lo_A": float(n_window[0]),
         "n_window_I_hi_A": float(n_window[1]),
         "n_points_used": int(getattr(result, "n_points_used", 0)),
+        # Linear baseline window (tape current, A) — saved so a reloader can
+        # restore the Step-3 window display. Without these, the formatted
+        # result text shows "linear window = [0, 0]" after re-loading a fit.
+        "linear_window_I_lo_A": float(linear_window[0]),
+        "linear_window_I_hi_A": float(linear_window[1]),
         # Baseline decomposition: V_total = V_0 + L·dI/dt + R·I + Vc·(I/Ic)^n.
         # R and V_0 are stored in tape-total units (Ω, V) so the meaning is
         # the same whether or not the curve was per-unit-length normalised.
@@ -3938,6 +3945,10 @@ def _fit_result_from_props(props: dict):
         _coerce_float(_prop_lookup(props, "n_window_I_lo_A"), 0.0),
         _coerce_float(_prop_lookup(props, "n_window_I_hi_A"), 0.0),
     )
+    linear_window = (
+        _coerce_float(_prop_lookup(props, "linear_window_I_lo_A"), 0.0),
+        _coerce_float(_prop_lookup(props, "linear_window_I_hi_A"), 0.0),
+    )
     status = str(_prop_lookup(props, "fit_status", "status", default="ok")).lower()
     ok = status == "ok"
     # R_Ohm and V_0_V are saved in tape-total units (Ω, V). When the fit was
@@ -3961,7 +3972,7 @@ def _fit_result_from_props(props: dict):
         n_value=_coerce_float(_prop_lookup(props, "n_value")),
         criterion=_coerce_float(_prop_lookup(props, "criterion_value")),
         chi_sqr=_coerce_float(_prop_lookup(props, "chi_squared")),
-        linear_fit_window=(0.0, 0.0),
+        linear_fit_window=linear_window,
         power_fit_window=n_window,
         uses_sample_length=uses_length,
         fit_method=method,
