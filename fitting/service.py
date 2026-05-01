@@ -40,20 +40,20 @@ FIT_METHOD_LOG_LOG = "log_log"          # linear fit of log10(E_sc) vs log10(I),
 FIT_METHOD_NONLINEAR = "nonlinear"       # coupled non-linear V = V0 + R*I + Vc*(I/Ic)^n
 DEFAULT_FIT_METHOD = FIT_METHOD_LOG_LOG
 
-# Point-weighting modes for Step-4 fitting.
+# Point-weighting modes for Step-5 fitting.
 WEIGHT_MODE_EQUAL = "equal"
 WEIGHT_MODE_WEIGHTED = "weighted"
 WEIGHT_MODE_ROBUST = "robust"
 DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
 
-# Step-3 baseline fitting mode identifiers.
+# Step-4 baseline fitting mode identifiers.
 BASELINE_MODE_OLS = "ols"
 BASELINE_MODE_HUBER = "huber"
 BASELINE_MODE_THEIL_SEN = "theil_sen"
 # Default to Huber: robust against outliers while remaining smooth/stable
 # for high-rate DAQ traces.
 DEFAULT_BASELINE_MODE = BASELINE_MODE_HUBER
-# Step-2 di/dt slope estimator mode identifiers.
+# Step-3 di/dt slope estimator mode identifiers.
 DIDT_MODE_OLS = BASELINE_MODE_OLS
 DIDT_MODE_HUBER = BASELINE_MODE_HUBER
 DIDT_MODE_THEIL_SEN = BASELINE_MODE_THEIL_SEN
@@ -155,7 +155,7 @@ def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
 
 
 def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray:
-    """Adaptive smoothing shared by Step-4 UI and IEC log-log fit windowing.
+    """Adaptive smoothing shared by Step-5 UI and IEC log-log fit windowing.
 
     Goal: suppress high-frequency noise so Ec1/Ec2 crossing detection is stable.
     """
@@ -169,7 +169,7 @@ def adaptive_smooth_for_ec_window(y: np.ndarray, ec1: float, ec2: float) -> np.n
     sigma_hf = 1.4826 * mad / np.sqrt(2.0)
 
     ec1_abs = max(abs(float(ec1)), 1e-30)
-    # Keep this target aligned with the Step-4 UI guidance curve behavior.
+    # Keep this target aligned with the Step-5 UI guidance curve behavior.
     #
     # In IEC log-log mode, Ec1 can be very small (for example when using
     # µV/cm units). If we only scale by Ec1, target_sigma becomes so tiny that
@@ -560,7 +560,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
                                    float, float, float]:
     """IEC 61788 decade n-value: linear fit of log10(E_sc) vs log10(I).
 
-    E_sc = y - V0 - R*x is the baseline-subtracted signal. To keep Step-4
+    E_sc = y - V0 - R*x is the baseline-subtracted signal. To keep Step-5
     Low(X)/High(X), the plotted helper curve, and the actual log-log fit
     fully aligned, point selection for the fit is based on that same
     corrected+smoothed curve.
@@ -574,7 +574,7 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
       3) Ignore the first 50 % of current span (ramp-start guard).
       4) Keep points where E_sc_smooth is inside [Ec1, Ec2].
       5) Fit log10(E_sc_smooth) vs log10(I).
-      6) Report I-window from the same threshold crossings used by Step-4 UI:
+      6) Report I-window from the same threshold crossings used by Step-5 UI:
          first I where E_sc_smooth >= Ec1 and first I where E_sc_smooth >= Ec2.
 
     Returns (Ic_at_Ec2, n, chi_sqr, n_points, (I_lo, I_hi),
@@ -694,14 +694,14 @@ def _ramp_ratio(V0: float, criterion: float) -> float:
 
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                  settings: Optional[FitSettings] = None) -> FitResult:
-    """Step 1 V_ofs, Step 2 di/dt, Step 3 baseline → V0, R, L, Step 4 Ic/n.
+    """Step 1 V_ofs, Step 3 di/dt, Step 4 baseline → V0, R, L, Step 5 Ic/n.
 
     Step 1 (optional): estimate V_ofs from the I = 0 segment and subtract
     it from y so the downstream baseline fit isolates the inductive term
     (V0 = L·dI/dt) cleanly from the thermal offset.
-    Step 2 estimates dI/dt from the linear ramp.
-    Step 3 fits y - V_ofs = V0 + R·I on the low-current baseline window.
-    Step 4 fits Ic and n; default is the IEC 61788 log-log decade method
+    Step 3 estimates dI/dt from the linear ramp.
+    Step 4 fits y - V_ofs = V0 + R·I on the low-current baseline window.
+    Step 5 fits Ic and n; default is the IEC 61788 log-log decade method
     (``settings.fit_method == FIT_METHOD_LOG_LOG``). The legacy coupled
     non-linear fit of V = V0 + R·I + Vc·(I/Ic)^n remains available as
     ``FIT_METHOD_NONLINEAR``.
@@ -732,14 +732,14 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         else:
             V_ofs = 0.0
 
-    # Step 2: di/dt on the linear-ramp window.
+    # Step 3: di/dt on the linear-ramp window.
     di_dt_mode = str(getattr(settings, "didt_mode", DEFAULT_DIDT_MODE) or DEFAULT_DIDT_MODE)
     try:
         di_dt = estimate_di_dt(t, x, settings.didt_low_frac, settings.didt_high_frac, mode=di_dt_mode)
     except ValueError as exc:
         return FitResult(ok=False, message=f"di/dt slope fit failed: {exc}")
 
-    # Step 3: linear baseline → V0 (= L·dI/dt in Y-units after Step 1) and R.
+    # Step 4: linear baseline → V0 (= L·dI/dt in Y-units after Step 1) and R.
     lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
     lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
     baseline_mode = str(getattr(settings, "baseline_mode", DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE)
