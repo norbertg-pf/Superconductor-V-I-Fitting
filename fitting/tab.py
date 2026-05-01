@@ -240,7 +240,7 @@ def _set_silently(widget: QLineEdit, text: str) -> None:
 def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
     """Snapshot the Active-fitting widgets into a per-curve profile dict.
 
-    The Step-4 power_low / power_vfrac widgets reuse the same QLineEdits for
+    The Step-5 power_low / power_vfrac widgets reuse the same QLineEdits for
     both fit methods, but the values mean very different things (Ec1/Ec2 in
     µV/cm for log-log; fractions of Imax/Vmax for non-linear). We keep
     independent slots — ``loglog_low/high`` and ``nonlinear_low/high`` — so
@@ -301,7 +301,7 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_show_power", None) is not None
             else False
         ),
-        # Step-4 I-window fields (Low/High X) are persisted per curve so
+        # Step-5 I-window fields (Low/High X) are persisted per curve so
         # the Active fitting settings selector can restore the latest
         # recalculated window for each plotted curve.
         "power_low_x": app.data_fit_power_low_x.text(),
@@ -327,7 +327,7 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             else "1"
         ),
     }
-    # Method-specific Step-4 slots: active widget values go into the active
+    # Method-specific Step-5 slots: active widget values go into the active
     # method's slot; the inactive method's slot is preserved from the prior
     # profile, falling back to the IEC/non-linear defaults.
     default_loglog_low = f"{DEFAULT_EC1_V_PER_CM * 1.0e6:g}"
@@ -1204,7 +1204,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_subtract_vofs_cb.setChecked(True)
     app.data_fit_subtract_vofs_cb.setToolTip(
         "Step 1: median of Y on the quiescent I = 0 segment is used as the "
-        "thermal offset V_ofs and subtracted before Step 2 (dI/dt) and Step 3 "
+        "thermal offset V_ofs and subtracted before Step 3 (dI/dt) and Step 4 "
         "(baseline fit V0, R). This separates V_ofs, L·dI/dt and R·I in the "
         "result."
     )
@@ -1218,7 +1218,7 @@ def setup_data_fitting_tab_layout(app):
     offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
     left.addWidget(offset_group)
 
-    trim_group = QGroupBox("Step 1.5: Trim noisy start and quench tail")
+    trim_group = QGroupBox("Step 2: Trim noisy start and quench tail")
     trim_layout = QGridLayout(trim_group)
     trim_layout.addWidget(QLabel("Trim start by smaller of:"), 0, 0, 1, 2)
     trim_layout.addWidget(QLabel("Current (A):"), 1, 0)
@@ -1233,7 +1233,7 @@ def setup_data_fitting_tab_layout(app):
     trim_layout.addWidget(app.data_fit_trim_quench_cb, 2, 0, 1, 4)
     left.addWidget(trim_group)
 
-    didt_group = QGroupBox("Step 2: di/dt window (fraction of Imax)")
+    didt_group = QGroupBox("Step 3: di/dt window (fraction of Imax)")
     didt_layout = QGridLayout(didt_group)
     app.data_fit_didt_low = _percent_edit(DEFAULT_DIDT_LOW_FRAC)
     app.data_fit_didt_high = _percent_edit(DEFAULT_DIDT_HIGH_FRAC)
@@ -1250,7 +1250,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_didt_mode_cb.setCurrentIndex(max(0, idx_default_didt))
     app.data_fit_didt_mode_cb.setMaximumWidth(145)
     app.data_fit_didt_mode_cb.setToolTip(
-        "Step-2 di/dt slope estimator.\n"
+        "Step-3 di/dt slope estimator.\n"
         "OLS: standard least-squares (legacy behavior).\n"
         "Huber robust: reduces outlier influence.\n"
         "Theil-Sen robust: median-slope fit, very stable on noisy ramps."
@@ -1270,7 +1270,7 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(didt_group)
 
-    linear_group = QGroupBox("Step 3: Linear baseline window (fraction of Imax)")
+    linear_group = QGroupBox("Step 4: Linear baseline window (fraction of Imax)")
     linear_layout = QGridLayout(linear_group)
     app.data_fit_linear_low = _percent_edit(DEFAULT_LINEAR_LOW_FRAC)
     app.data_fit_linear_high = _percent_edit(DEFAULT_LINEAR_HIGH_FRAC)
@@ -1288,7 +1288,7 @@ def setup_data_fitting_tab_layout(app):
     # Keep compact so it does not collide with Low(X)/High(X) widgets.
     app.data_fit_baseline_mode_cb.setMaximumWidth(145)
     app.data_fit_baseline_mode_cb.setToolTip(
-        "Step-3 baseline estimator.\n"
+        "Step-4 baseline estimator.\n"
         "OLS: standard least-squares (legacy behavior).\n"
         "Huber robust: reduces outlier influence.\n"
         "Theil-Sen robust: median-slope fit, very stable on noisy ramps."
@@ -1308,7 +1308,7 @@ def setup_data_fitting_tab_layout(app):
     )
     left.addWidget(linear_group)
 
-    power_group = QGroupBox("Step 4: Ic and n-value")
+    power_group = QGroupBox("Step 5: Ic and n-value")
     power_layout = QGridLayout(power_group)
 
     # --- method selector (row 0) ---
@@ -1327,7 +1327,7 @@ def setup_data_fitting_tab_layout(app):
     )
     app.data_fit_method_nonlinear_rb.setToolTip(
         "Legacy coupled non-linear fit. Uses the full voltage model with\n"
-        "V0, R frozen from Step 3 and Ic, n as free parameters. Not IEC\n"
+        "V0, R frozen from Step 4 and Ic, n as free parameters. Not IEC\n"
         "standardised — kept for backwards compatibility and cross-checks."
     )
     app.data_fit_method_group.addButton(app.data_fit_method_loglog_rb, 0)
@@ -1345,7 +1345,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_weight_mode_cb.setCurrentIndex(0)
     app.data_fit_weight_mode_cb.setMaximumWidth(145)
     app.data_fit_weight_mode_cb.setToolTip(
-        "Step-4 point weighting mode.\n"
+        "Step-5 point weighting mode.\n"
         "Equal: all points same weight (legacy behavior).\n"
         "Weighted: auto-estimate per-point noise and weight by 1/sigma².\n"
         "Robust: weighted + Huber reweighting to suppress outliers."
@@ -1367,13 +1367,13 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_add_corrected_btn = QPushButton("Add corrected curve")
     app.data_fit_add_corrected_btn.setToolTip(
         "Add the baseline-corrected curve from the last successful fit:\n"
-        "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 4 window."
+        "Y_corrected = Y - (V0 + R·I). Useful for checking the log-log Step 5 window."
     )
     app.data_fit_add_smoothed_btn = QPushButton("Add smoothed and corrected curve")
     app.data_fit_add_smoothed_btn.setToolTip(
-        "Build a Step-4 guide curve from the last successful fit:\n"
+        "Build a Step-5 guide curve from the last successful fit:\n"
         "first baseline-corrected (Y - (V0 + R·I)), then Ec-aware smoothed.\n"
-        "The Show/edit Step-4 window uses this corrected+smoothed curve,\n"
+        "The Show/edit Step-5 window uses this corrected+smoothed curve,\n"
         "even if it is hidden from the graph."
     )
     power_layout.addWidget(app.data_fit_add_smoothed_btn, 6, 0, 1, 2)
@@ -1731,7 +1731,7 @@ def _apply_transforms(app, *, apply_trim: bool = False):
 
 
 def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndarray] = None):
-    """Apply Step 1.5 mask to arrays and return trimmed copies."""
+    """Apply Step 2 mask to arrays and return trimmed copies."""
     x_arr = np.asarray(x, dtype=float)
     y_arr = np.asarray(y, dtype=float)
     t_arr = np.asarray(t, dtype=float) if t is not None else None
@@ -1753,7 +1753,7 @@ def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndar
 
 def _ensure_entry_origin_snapshot(entry: dict) -> None:
     """Lazily snapshot the untrimmed x/y/t on first trim so subsequent trims
-    (with a different Step 1.5 amount) can be applied to the original data.
+    (with a different Step 2 amount) can be applied to the original data.
     Without this snapshot a smaller trim amount cannot restore points that a
     previous larger trim already removed in place.
     """
@@ -1787,7 +1787,7 @@ def _trim_active_curve_entry_in_place(app) -> bool:
     """Trim the active stored curve entry in-place so the user sees removed points.
 
     Always trims from the untrimmed snapshot (``x_orig``/``y_orig``/``t_orig``)
-    so that reducing the Step 1.5 trim amount restores previously removed
+    so that reducing the Step 2 trim amount restores previously removed
     points instead of leaving them gone forever.
     """
     active_key = _curve_profile_key_from_ui(app)
@@ -1873,7 +1873,7 @@ def _settings_from_inputs(app) -> FitSettings:
         criterion_value = vc_mv * 1.0e-3
 
     method = _active_fit_method(app)
-    # Ec1/Ec2 share the Step 4 Low/High editors when log-log is active.
+    # Ec1/Ec2 share the Step 5 Low/High editors when log-log is active.
     # Absolute units: V/cm when Y has been divided by L_v, V otherwise.
     to_si = 1.0e-6 if sample_length is not None else 1.0e-3
     ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
@@ -2587,7 +2587,7 @@ def _update_equation_label(app):
     if method == FIT_METHOD_LOG_LOG:
         if has_length:
             eq = (
-                'Step 4 (IEC 61788, log E vs log I):<br>'
+                'Step 5 (IEC 61788, log E vs log I):<br>'
                 '<span style="font-size: 14pt;">'
                 '<b>log</b> E<sub>sc</sub> = <b>log</b> E<sub>c2</sub> + '
                 '<b>n · log</b> (I / I<sub>c</sub>)'
@@ -2598,7 +2598,7 @@ def _update_equation_label(app):
             )
         else:
             eq = (
-                'Step 4 (IEC 61788, log V vs log I):<br>'
+                'Step 5 (IEC 61788, log V vs log I):<br>'
                 '<span style="font-size: 14pt;">'
                 '<b>log</b> V<sub>sc</sub> = <b>log</b> V<sub>c2</sub> + '
                 '<b>n · log</b> (I / I<sub>c</sub>)'
@@ -2704,7 +2704,7 @@ def _active_fit_method(app) -> str:
 
 
 def _update_method_mode_ui(app) -> None:
-    """Relabel Step 4 editors and gray out widgets irrelevant to the IEC mode.
+    """Relabel Step 5 editors and gray out widgets irrelevant to the IEC mode.
 
     Log-log (IEC) mode: Low/High become Ec1/Ec2 in µV/cm; the Ic iteration
     knobs (max iterations, Ic stop tol, chi-sqr tol, Vc) are disabled — the
@@ -2738,7 +2738,7 @@ def _update_method_mode_ui(app) -> None:
     # IEC default (Ec2) and report Ic at any criterion value of their choice.
     app.data_fit_vc_input.setEnabled(True)
     app.data_fit_vc_label.setEnabled(True)
-    # The X-value editors in Step 4 map a percentage to a current, which is
+    # The X-value editors in Step 5 map a percentage to a current, which is
     # meaningless when the editors hold Ec1/Ec2. Disable them in log-log mode.
     for widget in (
         app.data_fit_power_low_x,
@@ -2748,14 +2748,14 @@ def _update_method_mode_ui(app) -> None:
     ):
         if widget is not None:
             widget.setEnabled(not is_loglog)
-    # In log-log mode the Show checkbox controls the Step 4 shaded region and
+    # In log-log mode the Show checkbox controls the Step 5 shaded region and
     # dragging it updates Ec1/Ec2 directly.
     app.data_fit_show_power.setEnabled(True)
     _save_active_curve_profile(app)
 
 
 def _on_fit_method_changed(app) -> None:
-    """Switch Step-4 editors to the mode-specific values for the active curve.
+    """Switch Step-5 editors to the mode-specific values for the active curve.
 
     Each curve's profile remembers per-method Ec1/Ec2 (log-log) and
     Imax/Vmax fractions (non-linear) so toggling between methods restores
@@ -3257,9 +3257,9 @@ def _update_band_states(app) -> None:
 
 
 def _on_show_power_toggled(app, checked: bool) -> None:
-    """When Step-4 Show/Edit is enabled, ensure corrected+smoothed reference exists.
+    """When Step-5 Show/Edit is enabled, ensure corrected+smoothed reference exists.
 
-    Toggling Show/edit must NOT initiate a full Step-4 fit; it only refreshes
+    Toggling Show/edit must NOT initiate a full Step-5 fit; it only refreshes
     the Low(X)/High(X) window from the existing fit reference (if any).
     Toggling must also not change the user's current zoom — refresh_preview
     re-applies the robust auto-range, so we snapshot/restore the view here.
@@ -3295,7 +3295,7 @@ def _on_band_dragged(app, window: str) -> None:
         return
     x_min, x_max, x, y, y_max, trim_low_bound = ctx
     # Clamp the dragged window so the user cannot select X values that have
-    # been removed by the Step 1.5 trim.
+    # been removed by the Step 2 trim.
     if trim_low_bound is not None:
         if lo < trim_low_bound:
             lo = trim_low_bound
@@ -3366,7 +3366,7 @@ def _data_ctx(app):
     if x is None or x.size == 0:
         return None
     # Low/High percentages reference the original (untrimmed) curve length so
-    # they keep a stable meaning when the Step 1.5 trim changes. The trim
+    # they keep a stable meaning when the Step 2 trim changes. The trim
     # bound is returned separately so callers can refuse to set values inside
     # the removed region.
     x_min = float(np.min(x))
@@ -3402,14 +3402,14 @@ def _x_to_vpct(x_val: float, x: np.ndarray, y: np.ndarray, y_max: float) -> floa
 
 
 def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
-    """Update Step-4 low/high X from Ec1/Ec2 using corrected+smoothed reference.
+    """Update Step-5 low/high X from Ec1/Ec2 using corrected+smoothed reference.
 
     Mapping used by the UI in log-log mode:
       0) Call ``_ensure_step4_reference_curve(...)``. That helper applies
          baseline correction ``y - (V0 + R·I)`` and adaptive smoothing, then
          stores the result in ``app.data_fit_power_ref_curve``.
       1) Convert Ec1/Ec2 from displayed units (µV/cm or µV) to SI (V/cm or V).
-      2) On the Step-4 reference trace ``(x_arr, y_arr)``, find High(X)
+      2) On the Step-5 reference trace ``(x_arr, y_arr)``, find High(X)
          at the first ``y_arr >= Ec2`` after the guard region.
       3) Starting from High(X), walk backwards toward lower current until
          ``y_arr >= Ec1`` -> Low(X).
@@ -3422,7 +3422,7 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
     if not ok:
         return False
     ref = getattr(app, "data_fit_power_ref_curve", None) or {}
-    # ``ref`` is the corrected+smoothed Step-4 reference from
+    # ``ref`` is the corrected+smoothed Step-5 reference from
     # ``_ensure_step4_reference_curve``.
     x_arr = np.asarray(ref.get("x", []), dtype=float)
     y_arr = np.asarray(ref.get("y", []), dtype=float)
@@ -3461,7 +3461,7 @@ def _update_loglog_power_x_from_ec(app, *, auto_run_fit: bool = True) -> bool:
 
 
 def _refresh_x_from_pct(app, window: str, which: str) -> None:
-    # In log-log mode the Step 4 editors hold Ec1/Ec2 (µV/cm), not a
+    # In log-log mode the Step 5 editors hold Ec1/Ec2 (µV/cm), not a
     # percentage of Imax — no meaningful X mapping until a fit has run.
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         return
@@ -3475,7 +3475,7 @@ def _refresh_x_from_pct(app, window: str, which: str) -> None:
     except ValueError:
         return
     x_val = _vpct_to_x(pct, x, y, y_max, x_max) if axis == "Vmax" else _pct_to_x(pct, x_min, x_max)
-    # Reject values that fall inside the Step 1.5 trim window: clamp the X
+    # Reject values that fall inside the Step 2 trim window: clamp the X
     # to the first remaining sample and rewrite the percentage to match.
     if trim_low_bound is not None and x_val < trim_low_bound:
         x_val = trim_low_bound
@@ -3514,7 +3514,7 @@ def _handle_window_edit(app, window: str, which: str, source: str) -> None:
     if window == "power" and _active_fit_method(app) == FIT_METHOD_LOG_LOG:
         if source == "pct":
             # Ec1/Ec2 edits should refresh the Low(X)/High(X) windows but
-            # must NOT trigger a full Step-4 fit on their own.
+            # must NOT trigger a full Step-5 fit on their own.
             _update_loglog_power_x_from_ec(app, auto_run_fit=False)
         else:
             _refresh_pct_from_x(app, window, which)
@@ -4286,7 +4286,7 @@ def run_fit(app):
             app.data_fit_curve_profiles = profiles
 
     def _apply_step4_window_from_reference(result_obj) -> None:
-        """For log-log fits, recompute Step-4 window from the same
+        """For log-log fits, recompute Step-5 window from the same
         corrected+smoothed reference used by the Add/Show helper curve."""
         if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
             return
@@ -4347,7 +4347,7 @@ def run_fit(app):
         for entry in included:
             label = entry.get("label", "Curve")
             # Trim from the untrimmed snapshot so this Run Fit honours the
-            # current Step 1.5 settings even if a previous run had clobbered
+            # current Step 2 settings even if a previous run had clobbered
             # the entry's live x/y/t with an older (more aggressive) trim.
             if entry.get("signature") == "__preview__":
                 ex_full = np.asarray(entry.get("x", []), dtype=float)
@@ -4358,7 +4358,7 @@ def run_fit(app):
                 ex_full, ey_full, et_full = _entry_untrimmed_xyt(entry)
             ex, ey, et = _trim_xyz_with_step15(app, ex_full, ey_full, et_full)
             if ex.size == 0 or ey.size == 0 or et is None or et.size == 0:
-                lines.append(f"[{label}] FIT FAILED: No samples after Step 1.5 trim.")
+                lines.append(f"[{label}] FIT FAILED: No samples after Step 2 trim.")
                 continue
             fit_entry = dict(entry)
             fit_entry["x"] = ex
@@ -4573,7 +4573,7 @@ def run_fit(app):
 def _hide_fit_overlays(app) -> None:
     app.data_fit_ic_line.setVisible(False)
     app.data_fit_criterion_line.setVisible(False)
-    # Ec1/Ec2 lines stay driven by _update_fit_bands (they reflect the Step 4
+    # Ec1/Ec2 lines stay driven by _update_fit_bands (they reflect the Step 5
     # editors, not a fit result), so we don't force them off here.
     app.data_fit_resid_plot.setVisible(False)
     app.data_fit_resid_curve.setData([], [])
@@ -4686,7 +4686,7 @@ def _post_fit_warnings(app, result, settings) -> None:
             f"Fit reached the iteration cap ({settings.max_iterations}) without "
             f"meeting the Ic tolerance ({settings.ic_tolerance * 100:.3g}%)."
         )
-    # IEC-specific point-count check (Step 4, log-log method).
+    # IEC-specific point-count check (Step 5, log-log method).
     if is_loglog and getattr(result, "insufficient_n_points", False):
         warnings.append(
             f"Only {result.n_points_used} samples fall inside the IEC n-value "
@@ -4924,9 +4924,9 @@ def _button_bg_css(qcolor: QColor) -> str:
 
 
 def _add_corrected_curve_from_last_fit(app) -> None:
-    """Add Y_corrected = Y - (V0 + R*I) using freshly recomputed Step-1/2/3.
+    """Add Y_corrected = Y - (V0 + R*I) using freshly recomputed Step-1/3/4.
 
-    Always re-runs Step 1, 1.5, 2 and 3 from the current widget settings so
+    Always re-runs Step 1, 2, 3 and 4 from the current widget settings so
     the corrected curve reflects the live thermal-offset, trim, di/dt and
     baseline inputs even if a previous fit is cached on the entry.
     """
@@ -4938,7 +4938,7 @@ def _add_corrected_curve_from_last_fit(app) -> None:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Could not build corrected curve from Step-1/2/3 values.",
+            "Could not build corrected curve from Step-1/3/4 values.",
         )
         return
     result, _parent_entry, base_sig, base_label, x, y, t = resolved
@@ -5038,9 +5038,9 @@ def _resolve_fit_parent_and_result(app):
 
 
 def _ensure_fit_for_reference(app, *, force_recompute: bool = False) -> bool:
-    """Ensure Step-3/Step-4 fit values exist.
+    """Ensure Step-4/Step-5 fit values exist.
 
-    When ``force_recompute`` is True, always re-run the fit so Step-1/2/3 are
+    When ``force_recompute`` is True, always re-run the fit so Step-1/3/4 are
     refreshed from the current data/settings before building helper curves.
     """
     if not force_recompute and _resolve_fit_parent_and_result(app) is not None:
@@ -5058,7 +5058,7 @@ def _resolve_reference_curve_data(app):
         if str(entry.get("signature")) != str(active_key):
             continue
         # Always pick the untrimmed snapshot so the helper builders re-apply
-        # the live Step 1.5 trim instead of an old (possibly heavier) one.
+        # the live Step 2 trim instead of an old (possibly heavier) one.
         _ensure_entry_origin_snapshot(entry)
         x, y, t = _entry_untrimmed_xyt(entry)
         n = int(min(x.size, y.size))
@@ -5094,7 +5094,7 @@ def _resolve_reference_curve_data(app):
 
 
 def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, settings: FitSettings):
-    """Compute Step-1/2/3 only, without running Step-4 fit."""
+    """Compute Step-1/3/4 only, without running Step-5 fit."""
     t_arr = np.asarray(t, dtype=float).ravel()
     x_arr = np.asarray(x, dtype=float).ravel()
     y_arr = np.asarray(y, dtype=float).ravel()
@@ -5133,7 +5133,7 @@ def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, setting
     uses_length = settings.sample_length_cm is not None and settings.sample_length_cm > 0
     return SimpleNamespace(
         ok=True,
-        message="Step-1/2/3 succeeded.",
+        message="Step-1/3/4 succeeded.",
         V0=float(V0),
         R=float(R),
         V_ofs=float(V_ofs),
@@ -5143,7 +5143,7 @@ def _compute_step123_result(t: np.ndarray, x: np.ndarray, y: np.ndarray, setting
 
 
 def _resolve_or_compute_step123_reference(app):
-    """Resolve helper-curve source and compute Step-1/2/3 if needed."""
+    """Resolve helper-curve source and compute Step-1/3/4 if needed."""
     fit_resolved = _resolve_fit_parent_and_result(app)
     if fit_resolved is not None:
         return fit_resolved
@@ -5160,12 +5160,12 @@ def _resolve_or_compute_step123_reference(app):
 
 
 def _force_compute_step123_reference(app):
-    """Always recompute Step-1, 1.5, 2, 3 from current widget settings.
+    """Always recompute Step-1, 2, 3, 4 from current widget settings.
 
     Used by the "Add corrected curve" / "Add smoothed and corrected curve"
-    buttons so they reflect the live Step 1/1.5/2/3 inputs instead of a
+    buttons so they reflect the live Step 1/2/3/4 inputs instead of a
     cached fit result. ``_resolve_reference_curve_data`` already applies the
-    Step 1.5 trim to the chosen source curve before we compute Step 1/2/3.
+    Step 2 trim to the chosen source curve before we compute Step 1/3/4.
     """
     curve_data = _resolve_reference_curve_data(app)
     if curve_data is None:
@@ -5180,12 +5180,12 @@ def _force_compute_step123_reference(app):
 
 
 def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit: bool) -> bool:
-    """Build corrected+smoothed Step-4 reference from latest successful fit.
+    """Build corrected+smoothed Step-5 reference from latest successful fit.
 
     When no cached fit exists and ``auto_run_fit`` is False (e.g. an Ec1/Ec2
     edit that should refresh Low(X)/High(X) without launching a full fit),
     fall back to ``_force_compute_step123_reference`` so the reference is
-    built from the live Step-1/2/3 widget settings. Without this fallback,
+    built from the live Step-1/3/4 widget settings. Without this fallback,
     Ec1/Ec2 edits silently no-op until the user has clicked "Add smoothed
     and corrected curve" — the bug reported alongside this change.
     """
@@ -5256,9 +5256,9 @@ def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit:
 
 
 def _add_smoothed_curve_from_current(app) -> None:
-    """Create corrected+smoothed Step-4 reference curve and plot a copy.
+    """Create corrected+smoothed Step-5 reference curve and plot a copy.
 
-    Always re-runs Step 1, 1.5, 2 and 3 from the current widget settings so
+    Always re-runs Step 1, 2, 3 and 4 from the current widget settings so
     the reference curve reflects the live thermal-offset, trim, di/dt and
     baseline inputs even if a previous fit is cached on the entry.
     """
@@ -5320,7 +5320,7 @@ def _add_smoothed_curve_from_current(app) -> None:
         QMessageBox.warning(
             app,
             "Data Fitting",
-            "Could not build smoothed+corrected curve from Step-1/2/3 values.",
+            "Could not build smoothed+corrected curve from Step-1/3/4 values.",
         )
 
 
