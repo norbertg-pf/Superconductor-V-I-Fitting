@@ -85,6 +85,15 @@ class FitSettings:
     weight_mode: str = DEFAULT_WEIGHT_MODE
     baseline_mode: str = DEFAULT_BASELINE_MODE
     didt_mode: str = DEFAULT_DIDT_MODE
+    # Optional reference range used to interpret didt/linear/power
+    # ``*_low_frac`` and ``*_high_frac`` as fractions of the *untrimmed*
+    # current sweep instead of the trimmed array's extents. The Data Fitting
+    # tab anchors percentages to the untrimmed range so the displayed
+    # Low(X)/High(X) editors stay stable when the Step 2 trim changes; this
+    # field lets the fitter use the same anchor so the actual fit window
+    # matches what the user sees on screen.
+    pct_x_min: Optional[float] = None
+    pct_x_max: Optional[float] = None
 
 
 @dataclass
@@ -149,7 +158,7 @@ def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
         lo = float(np.min(arr))
         hi = float(np.max(arr))
     if hi <= lo:
-        hi = lo + 1.0
+        lo = lo + 1.0
     pad = (hi - lo) * margin
     return lo - pad, hi + pad
 
@@ -305,7 +314,9 @@ def estimate_thermal_offset(x: np.ndarray, y: np.ndarray,
 
 def estimate_di_dt(t: np.ndarray, x: np.ndarray, low_frac: float = DEFAULT_DIDT_LOW_FRAC,
                    high_frac: float = DEFAULT_DIDT_HIGH_FRAC,
-                   mode: str = DEFAULT_DIDT_MODE) -> float:
+                   mode: str = DEFAULT_DIDT_MODE,
+                   x_lo: Optional[float] = None,
+                   x_hi: Optional[float] = None) -> float:
     t, x = _clean_arrays(t, x)
     if t.size < 2:
         return 0.0
@@ -313,8 +324,12 @@ def estimate_di_dt(t: np.ndarray, x: np.ndarray, low_frac: float = DEFAULT_DIDT_
     x_max = float(np.max(x))
     if x_max <= x_min:
         return 0.0
-    lo = x_min + low_frac * (x_max - x_min)
-    hi = x_min + high_frac * (x_max - x_min)
+    if x_lo is not None and x_hi is not None:
+        lo = float(x_lo)
+        hi = float(x_hi)
+    else:
+        lo = x_min + low_frac * (x_max - x_min)
+        hi = x_min + high_frac * (x_max - x_min)
     mask = (x >= lo) & (x <= hi)
     if np.count_nonzero(mask) < 2:
         return 0.0
@@ -716,6 +731,17 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     if x_max <= x_min:
         return FitResult(ok=False, message="Current range is empty or degenerate.")
 
+    # Anchor the *_low_frac/*_high_frac editors to the untrimmed sweep when
+    # the caller supplied an override (Data Fitting tab + auto-fit do this).
+    # Falling back to the input array's extents preserves the legacy contract
+    # for unit tests and standalone callers that pass fractions of the data
+    # they hand in.
+    pct_x_min = float(settings.pct_x_min) if settings.pct_x_min is not None else x_min
+    pct_x_max = float(settings.pct_x_max) if settings.pct_x_max is not None else x_max
+    if pct_x_max <= pct_x_min:
+        pct_x_min, pct_x_max = x_min, x_max
+    pct_span = pct_x_max - pct_x_min
+
     Vc = float(settings.criterion_voltage)
     uses_length = settings.sample_length_cm is not None and settings.sample_length_cm > 0
 
@@ -734,14 +760,19 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
 
     # Step 3: di/dt on the linear-ramp window.
     di_dt_mode = str(getattr(settings, "didt_mode", DEFAULT_DIDT_MODE) or DEFAULT_DIDT_MODE)
+    didt_lo = pct_x_min + settings.didt_low_frac * pct_span
+    didt_hi = pct_x_min + settings.didt_high_frac * pct_span
     try:
-        di_dt = estimate_di_dt(t, x, settings.didt_low_frac, settings.didt_high_frac, mode=di_dt_mode)
+        di_dt = estimate_di_dt(
+            t, x, settings.didt_low_frac, settings.didt_high_frac,
+            mode=di_dt_mode, x_lo=didt_lo, x_hi=didt_hi,
+        )
     except ValueError as exc:
         return FitResult(ok=False, message=f"di/dt slope fit failed: {exc}")
 
     # Step 4: linear baseline → V0 (= L·dI/dt in Y-units after Step 1) and R.
-    lin_lo = x_min + settings.linear_low_frac * (x_max - x_min)
-    lin_hi = x_min + settings.linear_high_frac * (x_max - x_min)
+    lin_lo = pct_x_min + settings.linear_low_frac * pct_span
+    lin_hi = pct_x_min + settings.linear_high_frac * pct_span
     baseline_mode = str(getattr(settings, "baseline_mode", DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE)
     try:
         V0, R = fit_linear_baseline(x, y, lin_lo, lin_hi, mode=baseline_mode)
@@ -824,7 +855,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     y_threshold = settings.power_v_frac * y_max
     above = np.where(y >= y_threshold)[0]
     power_hi = float(x[above[0]]) if above.size else x_max
-    power_lo = x_min + settings.power_low_frac * (x_max - x_min)
+    power_lo = pct_x_min + settings.power_low_frac * pct_span
 
     Ic = float("nan")
     n_value = float("nan")
