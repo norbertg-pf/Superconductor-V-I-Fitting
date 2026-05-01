@@ -1192,9 +1192,9 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_subtract_vofs_cb.setChecked(True)
     app.data_fit_subtract_vofs_cb.setToolTip(
         "Step 1: median of Y on the quiescent I = 0 segment is used as the "
-        "thermal offset V_ofs and subtracted before Step 2 (dI/dt) and Step 3 "
-        "(baseline fit V0, R). This separates V_ofs, L·dI/dt and R·I in the "
-        "result."
+        "thermal offset V_0 (saved as 'V_0_V' in metadata) and subtracted "
+        "before Step 2 (dI/dt) and Step 3 (baseline fit V0_inductive, R). "
+        "This separates V_0, L·dI/dt and R·I in the result."
     )
     offset_layout.addWidget(app.data_fit_subtract_vofs_cb, 1, 0, 1, 4)
     offset_layout.addWidget(QLabel("Zero-I threshold (% of Imax):"), 2, 0)
@@ -3637,10 +3637,10 @@ def _format_result(result) -> str:
     lines.append(f"baseline mode = {baseline_label}")
     lines.append(f"di/dt         = {_format_engineering(result.di_dt, 'A/s', 2)}")
     # Split the constant baseline into its three physical contributions:
-    # V_ofs (thermal) + L·dI/dt (inductive) + R·I (resistive).
+    # V_0 (thermal) + L·dI/dt (inductive) + R·I (resistive).
     vofs = getattr(result, "V_ofs", 0.0)
     vofs_note = "" if getattr(result, "thermal_offset_applied", False) else "  (not subtracted — no I = 0 segment)"
-    lines.append(f"V_ofs         = {_format_engineering(vofs, v_unit, 2)}{vofs_note}")
+    lines.append(f"V_0           = {_format_engineering(vofs, v_unit, 2)}{vofs_note}")
     lines.append(f"L·di/dt       = {_format_engineering(result.V0, v_unit, 2)}  (= V0 from baseline fit)")
     lines.append(f"L             = {_format_engineering(result.inductance_L, 'H', 2)}  (= L·dI/dt / di_dt)")
     lines.append(f"{r_name:<13} = {_format_engineering(result.R, r_unit, 2)}")
@@ -6102,8 +6102,8 @@ def _build_fit_diagram_pixmap():
     legend_y = py + 6
     legend_items = [
         (QColor("#1c2733"), Qt.SolidLine, "V(I) total"),
-        (QColor("#a85a00"), Qt.DashLine,  "V_ofs"),
-        (QColor("#0a4a8c"), Qt.DashLine,  "V_ofs + R·I"),
+        (QColor("#a85a00"), Qt.DashLine,  "V_0"),
+        (QColor("#0a4a8c"), Qt.DashLine,  "V_0 + R·I"),
         (QColor("#cc2244"), Qt.DashLine,  "I_c / V_c"),
     ]
     painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
@@ -6121,7 +6121,7 @@ def _build_fit_diagram_pixmap():
     painter.drawText(QPointF(legend_x, note_y), "Model")
     painter.setFont(QFont("Consolas", 10, QFont.Bold))
     painter.setPen(QColor("#1c2733"))
-    eq_lines = ["V = V_ofs", "   + L · dI/dt",
+    eq_lines = ["V = V_0", "   + L · dI/dt",
                 "   + R · I", "   + V_c·(I/I_c)ⁿ"]
     for k, ln in enumerate(eq_lines):
         painter.drawText(QPointF(legend_x, note_y + 20 + k * 16), ln)
@@ -6284,7 +6284,7 @@ def _build_loglog_diagram_pixmap():
     painter.translate(28, py + ph / 2)
     painter.rotate(-90)
     painter.drawText(QRectF(-180, -10, 360, 20),
-                     Qt.AlignHCenter, "log₁₀ ( V − V_ofs − R · I )")
+                     Qt.AlignHCenter, "log₁₀ ( V − V_0 − R · I )")
     painter.restore()
 
     # Decade-window label inside the band.
@@ -6319,7 +6319,7 @@ def _build_loglog_diagram_pixmap():
     painter.setFont(QFont("Consolas", 10, QFont.Bold))
     painter.setPen(QColor("#1c2733"))
     eq_lines = [
-        "V′ = V − V_ofs − R·I",
+        "V′ = V − V_0 − R·I",
         "log V′ = n·log I + b",
         "I_c : V′(I_c) = E_c2",
     ]
@@ -6416,7 +6416,7 @@ def _open_help_dialog(app) -> None:
         <td>
           <ul>
             <li>Subtracts the linear baseline first
-              (<code>V′ = V − V<sub>ofs</sub> − R·I</code>).</li>
+              (<code>V′ = V − V<sub>0</sub> − R·I</code>).</li>
             <li>Fits <code>log V′</code> vs <code>log I</code> with a
               straight line on the IEC <b>decade window</b>
               <code>[E<sub>c1</sub>, E<sub>c2</sub>]</code>.</li>
@@ -6427,7 +6427,7 @@ def _open_help_dialog(app) -> None:
         <td>
           <ul>
             <li>Fits the full model
-              <code>V = V<sub>ofs</sub> + L·dI/dt + R·I + V<sub>c</sub>·(I/I<sub>c</sub>)<sup>n</sup></code>
+              <code>V = V<sub>0</sub> + L·dI/dt + R·I + V<sub>c</sub>·(I/I<sub>c</sub>)<sup>n</sup></code>
               directly to the raw V&ndash;I data.</li>
             <li>Solves for all parameters simultaneously inside an outer
               self&#8209;consistency loop on
@@ -6461,7 +6461,7 @@ def _open_help_dialog(app) -> None:
         <td>
           <ul>
             <li>Sensitive to errors in the pre&#8209;subtracted baseline
-              <code>(V<sub>ofs</sub>, R)</code>.</li>
+              <code>(V<sub>0</sub>, R)</code>.</li>
             <li>Only the data inside the decade window is used.</li>
             <li>Needs ≥ a few dozen samples between
               <code>E<sub>c1</sub></code> and <code>E<sub>c2</sub></code>.</li>
@@ -6486,7 +6486,7 @@ def _open_help_dialog(app) -> None:
 
     <h2>The model</h2>
     <p>Without a sample length the fitted relation is:</p>
-    <p style="font-size:13pt;"><code>V(I, dI/dt) = V<sub>ofs</sub> + L · dI/dt + R · I + V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
+    <p style="font-size:13pt;"><code>V(I, dI/dt) = V<sub>0</sub> + L · dI/dt + R · I + V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
     <p>If a sample length <span class="mono">Lₛ</span> is provided, voltages are
     converted to electric field and the equivalent equation is fit:</p>
     <p style="font-size:13pt;"><code>E(I, dI/dt) = (L / L<sub>s</sub>) · dI/dt + ρ · I + E<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
@@ -6496,7 +6496,7 @@ def _open_help_dialog(app) -> None:
       <li><b>dI/dt window</b> &mdash; a slope is extracted from the rising part of the
         current to estimate the inductive offset <code>L · dI/dt</code>.</li>
       <li><b>Linear baseline</b> &mdash; in a low&#8209;current window the residual
-        voltage is fit to <code>V<sub>ofs</sub> + R · I</code> (or ρ · I).</li>
+        voltage is fit to <code>V<sub>0</sub> + R · I</code> (or ρ · I).</li>
       <li><b>Power&#8209;law fit</b> &mdash; in the high&#8209;current window the
         residual is fit to <code>V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code>
         to extract <span class="mono">Iₒ</span> and <span class="mono">n</span>.</li>
@@ -6535,10 +6535,10 @@ def _open_help_dialog(app) -> None:
     <h2>Procedure</h2>
     <ol>
       <li><b>Linear baseline</b> in the low&#8209;current window
-        <code>V<sub>ofs</sub> + R·I</code> (or ρ&middot;I) is fit on points
+        <code>V<sub>0</sub> + R·I</code> (or ρ&middot;I) is fit on points
         well below <span class="mono">I<sub>c</sub></span>.</li>
       <li>The baseline is subtracted from the raw signal:
-        <code>V′(I) = V − V<sub>ofs</sub> − R·I</code>.</li>
+        <code>V′(I) = V − V<sub>0</sub> − R·I</code>.</li>
       <li>Inside the <b>IEC decade window</b>
         <code>[E<sub>c1</sub>, E<sub>c2</sub>]</code> a straight line is fit to
         <code>log<sub>10</sub> V′</code> vs <code>log<sub>10</sub> I</code>
@@ -6694,7 +6694,7 @@ def _open_help_dialog(app) -> None:
           <span class="mono">I<sub>c</sub></span> criterion.</td>
         <td>1&nbsp;µV/cm (or 1&nbsp;mV without L<sub>s</sub>)</td></tr>
       <tr><td><code>Linear low / high</code></td>
-        <td>Window for fitting <code>V<sub>ofs</sub> + R·I</code> &mdash;
+        <td>Window for fitting <code>V<sub>0</sub> + R·I</code> &mdash;
           the baseline that is subtracted before the log fit.</td>
         <td>5&nbsp;%&ndash;30&nbsp;% of I<sub>max</sub></td></tr>
       <tr><td><code>dI/dt low / high</code></td>
@@ -6846,7 +6846,7 @@ def _open_help_dialog(app) -> None:
     </table>
 
     <h2>Baseline decomposition</h2>
-    <p><code>V<sub>total</sub> = V<sub>ofs</sub> + L · dI/dt + R · I +
+    <p><code>V<sub>total</sub> = V<sub>0</sub> + L · dI/dt + R · I +
        V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
     <table>
       <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
@@ -6882,11 +6882,21 @@ def _open_help_dialog(app) -> None:
         <td>Set if the power&#8209;law window has too few samples
           (&lt;&nbsp;50 per IEC 61788).</td></tr>
       <tr><td><code>thermal_offset_applied</code></td><td>True/False</td>
-        <td>Set if a non&#8209;zero <code>V<sub>ofs</sub></code> was
-          subtracted.</td></tr>
+        <td>Set if a non&#8209;zero <code>V<sub>0</sub></code>
+          (<code>V_0_V</code>) was subtracted.</td></tr>
       <tr><td><code>uses_sample_length</code></td><td>True/False</td>
         <td>True for E&#8209;field fits (with L<sub>s</sub>), False for
-          V&#8209;based fits.</td></tr>
+          V&#8209;based fits. Even when True, <code>R_Ohm</code> and
+          <code>V_0_V</code> are still reported in tape&#8209;total
+          Ω&nbsp;and&nbsp;V using <code>sample_length_cm</code>.</td></tr>
+      <tr><td><code>weighting_mode</code></td><td>str</td>
+        <td>Per&#8209;point weighting used by the fit
+          (<code>equal</code>, <code>weighted</code>,
+          <code>robust</code>).</td></tr>
+      <tr><td><code>baseline_mode</code></td><td>str</td>
+        <td>Step&#8209;3 baseline estimator
+          (<code>ols</code>, <code>huber</code>,
+          <code>theil_sen</code>).</td></tr>
     </table>
 
     <h2>Recommended boundaries for a good fit</h2>
@@ -6920,12 +6930,14 @@ def _open_help_dialog(app) -> None:
         (<code>ramp_inductive_ratio</code>)</td>
         <td>&lt;&nbsp;0.01</td><td>0.01&nbsp;–&nbsp;0.1</td>
         <td>&gt;&nbsp;0.1 → <code>ramp_too_fast</code></td></tr>
-      <tr><td><b>Resistive baseline R</b><br>before the transition</td>
+      <tr><td><b>Resistive baseline R</b><br>(<code>R_Ohm</code>) before the
+        transition</td>
         <td>≲&nbsp;1&nbsp;µΩ (clean joint)</td>
         <td>1&nbsp;–&nbsp;100&nbsp;µΩ</td>
         <td>&gt;&nbsp;1&nbsp;mΩ (joint or contact problem)</td></tr>
-      <tr><td><b>V<sub>ofs</sub></b> (thermal offset)</td>
-        <td>|V<sub>ofs</sub>| &lt; 0.1·V<sub>c</sub></td>
+      <tr><td><b>V<sub>0</sub></b> (thermal offset,
+        <code>V_0_V</code>)</td>
+        <td>|V<sub>0</sub>| &lt; 0.1·V<sub>c</sub></td>
         <td>0.1·V<sub>c</sub> – 0.5·V<sub>c</sub></td>
         <td>&gt;&nbsp;0.5·V<sub>c</sub> → recheck zero&#8209;I window</td></tr>
       <tr><td><b>I<sub>c</sub>&nbsp;/&nbsp;I<sub>max</sub></b></td>
