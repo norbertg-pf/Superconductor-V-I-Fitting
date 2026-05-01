@@ -2238,7 +2238,9 @@ def _y_signature_from_meta(name: str, meta: dict) -> tuple:
 
 
 def _add_replayed_source_curve(app, name: str, x: np.ndarray, y: np.ndarray,
-                               t: np.ndarray, meta: dict, *, visible: bool):
+                               t: np.ndarray, meta: dict, *, visible: bool,
+                               x_name: str = "",
+                               x_meta: Optional[dict] = None):
     """Add a source curve (the raw V-I data) that was loaded from TDMS."""
     color = _next_pastel_color(app)
     label = name
@@ -2247,6 +2249,7 @@ def _add_replayed_source_curve(app, name: str, x: np.ndarray, y: np.ndarray,
         symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color), name=label,
     )
     sig = ("__replayed__", name)
+    x_meta = x_meta or {}
     entry = {
         "signature": sig,
         "label": label,
@@ -2269,12 +2272,12 @@ def _add_replayed_source_curve(app, name: str, x: np.ndarray, y: np.ndarray,
         "show_ic": False,
         "source": {
             "time_sig": "Time",
-            "x_sig": "",
+            "x_sig": x_name or "",
             "y_sig": name,
             "t_scale": 1.0,
             "t_offset": 0.0,
-            "x_scale": 1.0,
-            "x_offset": 0.0,
+            "x_scale": float(x_meta.get("scale", 1.0) or 1.0),
+            "x_offset": float(x_meta.get("offset", 0.0) or 0.0),
             "y_scale": float(meta.get("scale", 1.0) or 1.0),
             "y_offset": float(meta.get("offset", 0.0) or 0.0),
             "use_length": bool(meta.get("voltage_tap_cm")),
@@ -2346,10 +2349,14 @@ def _replay_saved_fits_into_plot(app) -> None:
         app.data_fit_raw_curve.setData([], [])
 
     summary_blocks: list[str] = []
+    ok_results: list[tuple[str, object]] = []
     plotted = 0
     failed = 0
     first = True
     new_fitted_channels: list[str] = []
+    last_ok = None
+    last_show_criterion = True
+    last_show_ic = False
     for name, props in saved.items():
         if not name:
             continue
@@ -2366,10 +2373,11 @@ def _replay_saved_fits_into_plot(app) -> None:
         if y_raw is None or x_raw is None or t_raw is None:
             failed += 1
             continue
+        x_meta = controller.get_metadata(x_name) if x_name else {}
         x_arr = controller.apply_transform(
             x_raw,
-            float(controller.get_metadata(x_name).get("scale", 1.0) or 1.0),
-            float(controller.get_metadata(x_name).get("offset", 0.0) or 0.0),
+            float(x_meta.get("scale", 1.0) or 1.0),
+            float(x_meta.get("offset", 0.0) or 0.0),
         )
         y_arr = controller.apply_transform(
             y_raw,
@@ -2400,6 +2408,7 @@ def _replay_saved_fits_into_plot(app) -> None:
         result.fit_y = fit_y
         source_entry = _add_replayed_source_curve(
             app, name, x_arr, y_arr, t_arr, meta, visible=first,
+            x_name=x_name, x_meta=x_meta,
         )
         if result.ok and fit_x is not None and fit_y is not None:
             _upsert_fit_curve_entry(app, source_entry, result)
@@ -2410,6 +2419,10 @@ def _replay_saved_fits_into_plot(app) -> None:
                 ):
                     c["visible"] = bool(first)
                     _apply_curve_visibility(c)
+            ok_results.append((name, result))
+            last_ok = result
+            last_show_criterion = bool(source_entry.get("show_criterion", False))
+            last_show_ic = bool(source_entry.get("show_ic", False))
             # Register the reconstructed fit curve as a regular channel so
             # the user can pick it from the Y-axis combo. Sample the smooth
             # fit_y at the source X positions so the array length matches
@@ -2457,10 +2470,18 @@ def _replay_saved_fits_into_plot(app) -> None:
             + ".\n\n"
         )
         app.data_fit_result_text.setPlainText(intro + "\n\n".join(summary_blocks))
+    # Mirror the manual Run Fit path so the parameter-table overlay (Ic, n, R,
+    # …) appears in the upper-left corner after an auto-fit replay too.
+    if last_ok is not None and ok_results:
+        _show_fit_overlays(
+            app, last_ok, table_entries=ok_results,
+            show_criterion=last_show_criterion, show_ic=last_show_ic,
+        )
     try:
         robust_view(app)
     except Exception:
         traceback.print_exc()
+    _reposition_param_table(app)
 
 
 def _guess_current_channel(controller, *, exclude: str) -> str:
@@ -5433,6 +5454,13 @@ def _recompute_curve_from_source(app, entry: dict) -> None:
     entry["t"] = t
     entry["x"] = x
     entry["y"] = y
+    # Keep the untrimmed snapshot in sync with the new averaging so Run Fit's
+    # ``_entry_untrimmed_xyt`` picks up the same data the user sees on the
+    # plot — without this, changing avg in Plot Summary updates the rendered
+    # curve but Run Fit silently re-fits the stale (pre-avg) snapshot.
+    entry["x_orig"] = np.asarray(x, dtype=float).copy() if x is not None else np.asarray([])
+    entry["y_orig"] = np.asarray(y, dtype=float).copy() if y is not None else np.asarray([])
+    entry["t_orig"] = np.asarray(t, dtype=float).copy() if t is not None else np.asarray([])
 
 
 def _open_curve_settings_dialog(app, entry: dict, parent) -> None:
