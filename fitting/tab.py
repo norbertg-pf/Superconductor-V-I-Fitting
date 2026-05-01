@@ -808,9 +808,9 @@ def _reset_data_fitting_defaults(app) -> None:
     if getattr(app, "data_fit_zero_i_frac", None) is not None:
         app.data_fit_zero_i_frac.setText(f"{DEFAULT_ZERO_I_FRAC * 100:.2f}")
     if getattr(app, "data_fit_trim_start_abs", None) is not None:
-        app.data_fit_trim_start_abs.setText("10")
+        app.data_fit_trim_start_abs.setText("30")
     if getattr(app, "data_fit_trim_start_pct", None) is not None:
-        app.data_fit_trim_start_pct.setText("5.00")
+        app.data_fit_trim_start_pct.setText("10.00")
     if getattr(app, "data_fit_trim_quench_cb", None) is not None:
         app.data_fit_trim_quench_cb.setChecked(True)
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
@@ -875,6 +875,8 @@ def _reset_data_fitting_defaults(app) -> None:
         app.data_fit_save_separate_cb.setChecked(False)
     if hasattr(app, "data_fit_same_group_cb"):
         app.data_fit_same_group_cb.setChecked(True)
+    if hasattr(app, "data_fit_resample_100sps_cb"):
+        app.data_fit_resample_100sps_cb.setChecked(True)
     _refresh_save_settings_enabled(app)
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(False)
@@ -1052,6 +1054,16 @@ def setup_data_fitting_tab_layout(app):
         "Unchecked (default): write fit metadata into the source TDMS itself "
         "(the layout depends on 'Use the same group/channel for fit metadata' below)."
     )
+    app.data_fit_resample_100sps_cb = QCheckBox(
+        "Resample everything to 100 S/s"
+    )
+    app.data_fit_resample_100sps_cb.setChecked(True)
+    app.data_fit_resample_100sps_cb.setToolTip(
+        "Checked (default): when data arrives from a TDMS file, a current\n"
+        "measurement, or any other source, the Plot summary 'Avg' value is\n"
+        "automatically set so the effective sample rate is ~100 S/s.\n"
+        "Unchecked: leave Avg at its previous value (no automatic resample)."
+    )
     app.data_fit_same_group_cb = QCheckBox(
         "Use the same group/channel for fit metadata"
     )
@@ -1210,11 +1222,11 @@ def setup_data_fitting_tab_layout(app):
     trim_layout = QGridLayout(trim_group)
     trim_layout.addWidget(QLabel("Trim start by smaller of:"), 0, 0, 1, 2)
     trim_layout.addWidget(QLabel("Current (A):"), 1, 0)
-    app.data_fit_trim_start_abs = QLineEdit("10")
+    app.data_fit_trim_start_abs = QLineEdit("30")
     app.data_fit_trim_start_abs.setMaximumWidth(80)
     trim_layout.addWidget(app.data_fit_trim_start_abs, 1, 1)
     trim_layout.addWidget(QLabel("Current (% of Imax):"), 1, 2)
-    app.data_fit_trim_start_pct = _percent_edit(0.05)
+    app.data_fit_trim_start_pct = _percent_edit(0.10)
     trim_layout.addWidget(app.data_fit_trim_start_pct, 1, 3)
     app.data_fit_trim_quench_cb = QCheckBox("Auto-trim quench drop and cut 2% before drop")
     app.data_fit_trim_quench_cb.setChecked(True)
@@ -2143,6 +2155,7 @@ def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
     app.data_fit_plot_dirty = True
     _populate_channel_combos(app)
     load_metadata_from_tdms(app)
+    _apply_resample_to_100sps(app)
     _refresh_curve_profile_selector(app)
     refresh_preview(app)
     if auto_plot_fits:
@@ -2477,6 +2490,25 @@ def _replay_saved_fits_into_plot(app) -> None:
             app, last_ok, table_entries=ok_results,
             show_criterion=last_show_criterion, show_ic=last_show_ic,
         )
+    # When the fit was triggered from the DAQ-U Configuration tab, the
+    # Low(X)/High(X) textboxes are not touched by the post-acquisition
+    # auto-fit worker. Push the saved n_window_I onto them here so the
+    # widgets reflect the IEC fit window after the replay completes.
+    if (
+        last_ok is not None
+        and getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG
+    ):
+        n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
+        try:
+            lo_w = float(n_window[0])
+            hi_w = float(n_window[1])
+        except (TypeError, ValueError, IndexError):
+            lo_w = hi_w = 0.0
+        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+            _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+            _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
+            app.data_fit_power_window_manual = False
+            _save_active_curve_profile(app)
     try:
         robust_view(app)
     except Exception:
@@ -2597,6 +2629,41 @@ def _format_rate(rate_hz: float) -> str:
     if rate_hz >= 1.0e3:
         return f"{rate_hz / 1.0e3:.3g} kHz"
     return f"{rate_hz:.3g} Hz"
+
+
+def _apply_resample_to_100sps(app) -> None:
+    """When the Resample checkbox is on, set Avg so effective rate ~ 100 S/s.
+
+    Computes the original sample rate from the loaded time channel and writes
+    ``data_fit_avg_input`` to ``round(orig_rate / 100)`` (clamped to >= 1).
+    Applied after any data load (TDMS file, current measurement, refresh) so
+    every data source converges on the same 100 S/s effective rate.
+    """
+    cb = getattr(app, "data_fit_resample_100sps_cb", None)
+    avg_widget = getattr(app, "data_fit_avg_input", None)
+    if cb is None or avg_widget is None:
+        return
+    try:
+        if not cb.isChecked():
+            return
+    except RuntimeError:
+        return
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    t_raw = getattr(controller, "time_array", None)
+    if t_raw is None or np.asarray(t_raw).size < 2:
+        return
+    t_arr = np.asarray(t_raw, dtype=float)
+    dt = float(np.mean(np.diff(t_arr)))
+    if not np.isfinite(dt) or dt <= 0:
+        return
+    fs_orig = 1.0 / dt
+    if fs_orig <= 100.0:
+        avg_widget.setText("1")
+        return
+    avg = max(1, int(round(fs_orig / 100.0)))
+    avg_widget.setText(str(avg))
 
 
 def _update_avg_rate_label(app):
@@ -4722,6 +4789,11 @@ def _open_settings_dialog(app) -> None:
     save_layout.addWidget(app.data_fit_same_group_cb)
     root.addWidget(save_group)
 
+    resample_group = QGroupBox("Resampling")
+    resample_layout = QVBoxLayout(resample_group)
+    resample_layout.addWidget(app.data_fit_resample_100sps_cb)
+    root.addWidget(resample_group)
+
     # Re-evaluate dependency rules every time the dialog opens, in case the
     # user has changed checkbox state via a preset since the last open.
     _refresh_save_settings_enabled(app)
@@ -5108,11 +5180,21 @@ def _force_compute_step123_reference(app):
 
 
 def _ensure_step4_reference_curve(app, *, create_plot_entry: bool, auto_run_fit: bool) -> bool:
-    """Build corrected+smoothed Step-4 reference from latest successful fit."""
+    """Build corrected+smoothed Step-4 reference from latest successful fit.
+
+    When no cached fit exists and ``auto_run_fit`` is False (e.g. an Ec1/Ec2
+    edit that should refresh Low(X)/High(X) without launching a full fit),
+    fall back to ``_force_compute_step123_reference`` so the reference is
+    built from the live Step-1/2/3 widget settings. Without this fallback,
+    Ec1/Ec2 edits silently no-op until the user has clicked "Add smoothed
+    and corrected curve" — the bug reported alongside this change.
+    """
     resolved = _resolve_fit_parent_and_result(app)
     if resolved is None and auto_run_fit:
         _ensure_fit_for_reference(app)
         resolved = _resolve_fit_parent_and_result(app)
+    if resolved is None:
+        resolved = _force_compute_step123_reference(app)
     if resolved is None:
         return False
 
