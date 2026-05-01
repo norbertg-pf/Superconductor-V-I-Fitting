@@ -641,6 +641,8 @@ class DataFittingController:
         if settings.sample_length_cm and settings.sample_length_cm > 0:
             y = y / float(settings.sample_length_cm)
         result = run_full_fit(t, x, y, settings)
+        if result is not None:
+            result.avg_window = int(avg_window or 1)
         self.last_result = result
         return result, result.message
 
@@ -3691,12 +3693,14 @@ _FIT_PROPERTY_KEYS = (
     "r_squared", "chi_squared", "di_dt_A_per_s", "criterion_value",
     "criterion_unit", "criterion_name", "Ec1", "Ec2",
     "n_window_I_lo_A", "n_window_I_hi_A", "n_points_used",
-    "V_ofs", "V0_inductive", "inductance_L_H", "R_or_rho", "R_unit",
+    "V_0_V", "V0_inductive", "inductance_L_H", "R_Ohm",
     "ramp_inductive_ratio", "ramp_too_fast", "insufficient_n_points",
     "thermal_offset_applied", "uses_sample_length",
     "fit_method",
     "weighting_mode",
     "baseline_mode",
+    "sample_length_cm",
+    "N_averaging",
 )
 
 
@@ -3710,6 +3714,14 @@ def _fit_result_properties(result) -> dict:
     is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
     ok = bool(getattr(result, "ok", False))
     n_window = getattr(result, "n_window_I", (0.0, 0.0)) or (0.0, 0.0)
+    # Convert R (Ω/cm) and V_ofs (V/cm) back to total-tape units (Ω, V) when the
+    # fit was run against a sample-length-normalised curve, so the metadata
+    # always carries Ω and V regardless of the per-cm plotting choice.
+    uses_length = bool(getattr(result, "uses_sample_length", False))
+    length_cm = getattr(result, "sample_length_cm", None)
+    length_factor = float(length_cm) if uses_length and length_cm and length_cm > 0 else 1.0
+    R_Ohm = float(getattr(result, "R", 0.0)) * length_factor
+    V_0_V = float(getattr(result, "V_ofs", 0.0)) * length_factor
     props = {
         "method": "IEC 61788 log-log (decade n-value)" if is_loglog else "Non-linear V-I",
         "method_compliant": "IEC 61788-3" if is_loglog else "legacy",
@@ -3739,12 +3751,13 @@ def _fit_result_properties(result) -> dict:
         "n_window_I_lo_A": float(n_window[0]),
         "n_window_I_hi_A": float(n_window[1]),
         "n_points_used": int(getattr(result, "n_points_used", 0)),
-        # Baseline decomposition: V_total = V_ofs + L·dI/dt + R·I + Vc·(I/Ic)^n.
-        "V_ofs": float(getattr(result, "V_ofs", 0.0)),
+        # Baseline decomposition: V_total = V_0 + L·dI/dt + R·I + Vc·(I/Ic)^n.
+        # R and V_0 are stored in tape-total units (Ω, V) so the meaning is
+        # the same whether or not the curve was per-unit-length normalised.
+        "V_0_V": V_0_V,
         "V0_inductive": float(getattr(result, "V0", 0.0)),
         "inductance_L_H": float(getattr(result, "inductance_L", 0.0)),
-        "R_or_rho": float(getattr(result, "R", 0.0)),
-        "R_unit": "Ω/cm" if getattr(result, "uses_sample_length", False) else "Ω",
+        "R_Ohm": R_Ohm,
         # Diagnostic flags the user asked to propagate to channel metadata.
         "ramp_inductive_ratio": float(getattr(result, "ramp_inductive_ratio", 0.0)),
         "ramp_too_fast": bool(getattr(result, "ramp_too_fast", False)),
@@ -3753,6 +3766,11 @@ def _fit_result_properties(result) -> dict:
         "uses_sample_length": bool(getattr(result, "uses_sample_length", False)),
         "weighting_mode": str(getattr(result, "weighting_mode", WEIGHT_MODE_EQUAL)),
         "baseline_mode": str(getattr(result, "baseline_mode", DEFAULT_BASELINE_MODE)),
+        # Saved so a re-loader can convert R_Ohm / V_0_V back to per-unit-length
+        # when re-plotting against a sample-length-normalised curve.
+        "sample_length_cm": float(length_cm) if uses_length and length_cm and length_cm > 0 else 0.0,
+        # Block-average factor used in the plot summary (1 = no averaging).
+        "N_averaging": int(getattr(result, "avg_window", 1) or 1),
     }
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
@@ -3834,14 +3852,23 @@ def _fit_result_from_props(props: dict):
     )
     status = str(_prop_lookup(props, "fit_status", "status", default="ok")).lower()
     ok = status == "ok"
+    # R_Ohm and V_0_V are saved in tape-total units (Ω, V). When the fit was
+    # per-unit-length, divide by the saved sample length so the rebuilt
+    # FitResult fields keep the V/cm / Ω/cm convention used by the plotting
+    # code (V0 + R·I in the same units as the displayed Y axis).
+    sample_length_cm_raw = _coerce_float(_prop_lookup(props, "sample_length_cm"), 0.0)
+    sample_length_cm = sample_length_cm_raw if sample_length_cm_raw > 0 else None
+    length_div = float(sample_length_cm) if (uses_length and sample_length_cm) else 1.0
+    R_Ohm = _coerce_float(_prop_lookup(props, "R_Ohm"))
+    V_0_V = _coerce_float(_prop_lookup(props, "V_0_V"))
     return FitResult(
         ok=ok,
         message=str(_prop_lookup(props, "fit_message", "message") or ""),
         di_dt=_coerce_float(_prop_lookup(props, "di_dt_A_per_s")),
         inductance_L=_coerce_float(_prop_lookup(props, "inductance_L_H")),
-        V_ofs=_coerce_float(_prop_lookup(props, "V_ofs")),
+        V_ofs=V_0_V / length_div,
         V0=_coerce_float(_prop_lookup(props, "V0_inductive")),
-        R=_coerce_float(_prop_lookup(props, "R_or_rho")),
+        R=R_Ohm / length_div,
         Ic=_coerce_float(_prop_lookup(props, "Ic_A")),
         n_value=_coerce_float(_prop_lookup(props, "n_value")),
         criterion=_coerce_float(_prop_lookup(props, "criterion_value")),
@@ -3863,6 +3890,8 @@ def _fit_result_from_props(props: dict):
         thermal_offset_applied=_coerce_bool(_prop_lookup(props, "thermal_offset_applied")),
         weighting_mode=str(_prop_lookup(props, "weighting_mode", default=WEIGHT_MODE_EQUAL) or WEIGHT_MODE_EQUAL),
         baseline_mode=str(_prop_lookup(props, "baseline_mode", default=DEFAULT_BASELINE_MODE) or DEFAULT_BASELINE_MODE),
+        sample_length_cm=sample_length_cm,
+        avg_window=int(_coerce_float(_prop_lookup(props, "N_averaging"), 1) or 1),
     )
 
 
@@ -4273,6 +4302,7 @@ def run_fit(app):
                 # request to record an attempt even on total failure.
                 from .service import FitResult
                 result = FitResult(ok=False, message=f"Fit raised: {exc}")
+            result.avg_window = int(fit_entry.get("avg_window", 1) or 1)
             entry["fit_result"] = result
             all_results.append((label, result))
             if result.ok:
@@ -5783,6 +5813,7 @@ def _fit_single_curve(app, entry: dict) -> None:
         traceback.print_exc()
         QMessageBox.critical(app, "Data Fitting", f"Fit failed: {exc}")
         return
+    result.avg_window = int(entry.get("avg_window", 1) or 1)
     entry["fit_result"] = result
     if result.ok:
         _show_fit_overlays(app, result)
@@ -6819,19 +6850,23 @@ def _open_help_dialog(app) -> None:
        V<sub>c</sub> · (I / I<sub>c</sub>)<sup>n</sup></code></p>
     <table>
       <tr><th>Property</th><th>Unit</th><th>Description</th></tr>
-      <tr><td><code>V_ofs</code></td><td>V</td>
-        <td>Thermal/instrumental offset (median of the I&nbsp;≈&nbsp;0
-          segment).</td></tr>
+      <tr><td><code>V_0_V</code></td><td>V</td>
+        <td>Thermal/instrumental offset around 0&nbsp;A (median of the
+          I&nbsp;≈&nbsp;0 segment, always tape&#8209;total volts).</td></tr>
       <tr><td><code>V0_inductive</code></td><td>V</td>
         <td>Inductive voltage at the dI/dt&nbsp;window center
           (<code>L · dI/dt</code>).</td></tr>
       <tr><td><code>inductance_L_H</code></td><td>H</td>
         <td>Effective lead/sample inductance.</td></tr>
-      <tr><td><code>R_or_rho</code></td><td>Ω or Ω/cm</td>
-        <td>Resistive baseline; unit follows <code>R_unit</code>.</td></tr>
-      <tr><td><code>R_unit</code></td><td>str</td>
-        <td><code>Ω/cm</code> for E&#8209;field fits, <code>Ω</code>
-          otherwise.</td></tr>
+      <tr><td><code>R_Ohm</code></td><td>Ω</td>
+        <td>Resistive baseline, always in ohms based on the tape
+          distance.</td></tr>
+      <tr><td><code>sample_length_cm</code></td><td>cm</td>
+        <td>Tape distance used to convert per&#8209;cm fits back to
+          tape&#8209;total units; 0 when no sample length was set.</td></tr>
+      <tr><td><code>N_averaging</code></td><td>int</td>
+        <td>Block&#8209;average factor used in the plot summary
+          (1&nbsp;=&nbsp;no averaging).</td></tr>
     </table>
 
     <h2>Diagnostic flags</h2>

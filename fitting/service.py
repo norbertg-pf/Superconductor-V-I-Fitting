@@ -127,6 +127,11 @@ class FitResult:
     thermal_offset_applied: bool = False
     weighting_mode: str = DEFAULT_WEIGHT_MODE
     baseline_mode: str = DEFAULT_BASELINE_MODE
+    # Captured at fit time so the metadata writer can convert R (Ω/cm) and
+    # V_ofs (V/cm) back to total-tape units (Ω, V) for the saved properties.
+    sample_length_cm: Optional[float] = None
+    # Block-average factor applied upstream of the fit (1 = no averaging).
+    avg_window: int = 1
 
 
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
@@ -812,6 +817,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             thermal_offset_applied=thermal_applied,
             weighting_mode=weight_mode,
             baseline_mode=baseline_mode,
+            sample_length_cm=settings.sample_length_cm if uses_length else None,
         )
 
     y_max = float(np.max(y))
@@ -894,4 +900,5 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         thermal_offset_applied=thermal_applied,
         weighting_mode=weight_mode,
         baseline_mode=baseline_mode,
+        sample_length_cm=settings.sample_length_cm if uses_length else None,
     )

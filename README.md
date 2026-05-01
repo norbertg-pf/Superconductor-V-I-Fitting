@@ -184,14 +184,16 @@ round-trips through LabVIEW, OriginLab and Python.
 | `n_window_I_lo_A`, `n_window_I_hi_A` | A | Current bounds of the n-value window actually used. |
 | `n_points_used` | — | Samples that entered the power-law fit. |
 
-**Baseline decomposition** — `V_total = V_ofs + L·dI/dt + R·I + V_c·(I/I_c)ⁿ`
+**Baseline decomposition** — `V_total = V_0 + L·dI/dt + R·I + V_c·(I/I_c)ⁿ`
 
 | Property | Unit | Description |
 |---|---|---|
-| `V_ofs` | V | Thermal/instrumental offset. |
+| `V_0_V` | V | Thermal/instrumental offset around 0 A (always tape-total volts). |
 | `V0_inductive` | V | Inductive voltage at the dI/dt-window center. |
 | `inductance_L_H` | H | Effective lead/sample inductance. |
-| `R_or_rho` | Ω or Ω/cm | Resistive baseline; unit follows `R_unit`. |
+| `R_Ohm` | Ω | Resistive baseline (always tape-total ohms based on tape distance). |
+| `sample_length_cm` | cm | Tape distance used to convert the per-cm fit back to tape-total units; 0 when no length was set. |
+| `N_averaging` | — | Block-average factor used in the plot summary (1 = no averaging). |
 
 **Diagnostic flags**
 
