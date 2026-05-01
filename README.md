@@ -72,11 +72,11 @@ dialog, presets, multi-curve management, and a per-fit TDMS side-car report.
 The fitted relation is the IEC 61788 power-law model with an inductive term
 and a resistive baseline:
 
-- Without sample length: **`V = V_ofs + L·dI/dt + R·I + V_c·(I/I_c)ⁿ`**
+- Without sample length: **`V = V_0 + L·dI/dt + R·I + V_c·(I/I_c)ⁿ`**
 - With sample length `L_s`: **`E = (L/L_s)·dI/dt + ρ·I + E_c·(I/I_c)ⁿ`**
 
 Three additive parts are extracted: an **offset / inductive** term
-(`V_ofs + L·dI/dt`), a **linear baseline** (`R·I` or `ρ·I`) below `I_c`, and
+(`V_0 + L·dI/dt`), a **linear baseline** (`R·I` or `ρ·I`) below `I_c`, and
 the **power-law transition** `V_c·(I/I_c)ⁿ` on the baseline-subtracted
 residual.
 
@@ -86,7 +86,7 @@ residual.
 
 | | **Log–log linear** (default — IEC 61788) | **Non-linear (Levenberg–Marquardt)** |
 |---|---|---|
-| **What it does** | Subtracts the linear baseline first (`V′ = V − V_ofs − R·I`), then fits `log V′` vs `log I` with a straight line on the IEC decade window `[E_c1, E_c2]`. Slope = `n`; `I_c` at `V′ = E_c2`. | Fits the full coupled model directly to the raw V–I data inside an outer self-consistency loop on `I_c`. |
+| **What it does** | Subtracts the linear baseline first (`V′ = V − V_0 − R·I`), then fits `log V′` vs `log I` with a straight line on the IEC decade window `[E_c1, E_c2]`. Slope = `n`; `I_c` at `V′ = E_c2`. | Fits the full coupled model directly to the raw V–I data inside an outer self-consistency loop on `I_c`. |
 | **Pros** | IEC reference method → reproducible across labs. Closed-form regression, very fast. Robust against multiplicative noise on V. | Returns proper σ on every parameter. Handles inductive / baseline coupling natively. Uses the entire ramp. |
 | **Cons** | Sensitive to errors in the pre-subtracted baseline. Only data inside the decade is used. Needs a few dozen samples between `E_c1` and `E_c2`. | Slower; can fail to converge with poor windows or seeds. No standardized acceptance criterion. |
 
@@ -106,7 +106,7 @@ decade window `[E_c1, E_c2]`; blue points fall inside the monotonic
 transition segment and enter the fit, grey points sit on the noise floor
 or outside the window and are excluded.
 
-The procedure is: fit `V_ofs + R·I` on points well below `I_c`, subtract
+The procedure is: fit `V_0 + R·I` on points well below `I_c`, subtract
 it to get `V′(I)`, then on the **decade window** `[E_c1, E_c2]` fit
 `log₁₀ V′` vs `log₁₀ I` with `numpy.polyfit` (closed form, no iteration).
 The slope is **`n`**; **`I_c`** is the current at which `V′ = E_c2`.
@@ -202,8 +202,9 @@ round-trips through LabVIEW, OriginLab and Python.
 | `ramp_inductive_ratio` | float | Inductive voltage / criterion voltage. |
 | `ramp_too_fast` | True/False | Set if the inductive term dominates — lower dI/dt. |
 | `insufficient_n_points` | True/False | Set if the power-law window has too few samples. |
-| `thermal_offset_applied` | True/False | Set if a non-zero `V_ofs` was subtracted. |
-| `uses_sample_length` | True/False | True for E-field fits (with `L_s`), False otherwise. |
+| `thermal_offset_applied` | True/False | Set if a non-zero `V_0_V` was subtracted. |
+| `uses_sample_length` | True/False | True for E-field fits (with `L_s`), False otherwise. `R_Ohm` and `V_0_V` are still in tape-total Ω/V either way. |
+| `weighting_mode` | string | Per-point weighting used by the fit (`equal`, `weighted`, `robust`). |
 | `baseline_mode` | string | Step-3 baseline estimator used (`ols`, `huber`, `theil_sen`). |
 
 > Booleans are stored as the strings `"True"` / `"False"` for round-trip
