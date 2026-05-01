@@ -82,9 +82,29 @@ _LAZY_TAB = {
 }
 
 
+def _ensure_tab_patches_applied() -> None:
+    """Apply the ``_pct_anchor_patch`` wrappers to ``tab`` exactly once.
+
+    Anchors Step 3/4/5 fit windows to the untrimmed sweep and persists
+    ``linear_fit_window`` in TDMS metadata. Wrapping is done lazily so
+    headless ``service`` imports don't pull in Qt or pyqtgraph.
+    """
+    try:
+        from . import _pct_anchor_patch
+    except Exception:
+        return
+    try:
+        _pct_anchor_patch.apply_patches()
+    except Exception:
+        # Patch failures must not break tab import — fall back to the
+        # original (unpatched) behaviour rather than crashing the app.
+        pass
+
+
 def __getattr__(name):
     if name in _LAZY_TAB:
         from . import tab as _tab
+        _ensure_tab_patches_applied()
         return getattr(_tab, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
