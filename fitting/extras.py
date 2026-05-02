@@ -1093,6 +1093,13 @@ class FitPreset:
     # written into the loaded TDMS as fit metadata. When False, fits run
     # silently and the user must press the Save metadata button to persist.
     autosave_fit_metadata: bool = True
+    # Auto-adjust Ec1/Ec2 controls (Fit config dialog). Caps are stored in
+    # µV/cm so the JSON preset is human-readable; the service converts to V/cm
+    # at runtime based on whether sample-length normalisation is active.
+    auto_ec_adjust: bool = False
+    auto_ec1_max_uv_per_cm: float = 0.3
+    auto_ec2_max_uv_per_cm: float = 1.5
+    auto_ec_target_r2: float = 0.995
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:

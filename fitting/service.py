@@ -28,6 +28,17 @@ DEFAULT_EC1_V_PER_CM = 1.0e-7   # 0.1 uV/cm, lower end of IEC decade n-value win
 DEFAULT_EC2_V_PER_CM = 1.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
 DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 
+# Auto-adjust Ec1/Ec2 defaults. When enabled, the IEC decade window is allowed
+# to slide upward (both ends scaled by the same factor k ≥ 1) to escape a
+# drifting baseline that contaminates the lower end of the n-value window.
+# The user-supplied caps below define how far each end is allowed to move; the
+# IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
+DEFAULT_AUTO_EC_TARGET_R2 = 0.995
+DEFAULT_AUTO_EC1_MAX_V_PER_CM = 3.0e-7   # 0.3 µV/cm = 3× the IEC default Ec1
+DEFAULT_AUTO_EC2_MAX_V_PER_CM = 1.5e-6   # 1.5 µV/cm = 1.5× the IEC default Ec2
+AUTO_EC_MAX_ITERATIONS = 8
+AUTO_EC_REL_TOL = 0.05  # stop bisection when (k_hi/k_lo - 1) ≤ 5 %
+
 # Fraction of Imax below which samples are considered part of the quiescent
 # "I = 0" segment used to estimate the thermal offset V_ofs (Step 1).
 DEFAULT_ZERO_I_FRAC = 0.02      # 2 %
@@ -79,6 +90,15 @@ class FitSettings:
     fit_method: str = DEFAULT_FIT_METHOD
     ec1: float = DEFAULT_EC1_V_PER_CM
     ec2: float = DEFAULT_EC2_V_PER_CM
+    # Auto-adjust the IEC decade window when R² of the log-log fit falls below
+    # ``auto_ec_target_r2``. Both ends are scaled by the same factor so the
+    # decade ratio Ec2/Ec1 = 10 (per IEC 61788) is preserved; the upward range
+    # is capped by ``auto_ec1_max`` and ``auto_ec2_max``. None disables the cap
+    # for that end (effectively forbids auto-adjust on that side).
+    auto_ec_adjust: bool = False
+    auto_ec1_max: Optional[float] = None
+    auto_ec2_max: Optional[float] = None
+    auto_ec_target_r2: float = DEFAULT_AUTO_EC_TARGET_R2
     # Step 1 — thermal offset subtraction.
     subtract_thermal_offset: bool = True
     zero_i_frac: float = DEFAULT_ZERO_I_FRAC
@@ -120,6 +140,15 @@ class FitResult:
     fit_method: str = DEFAULT_FIT_METHOD
     ec1: float = 0.0
     ec2: float = 0.0
+    # Populated when the auto-adjust feature shifted the decade window. The
+    # ``ec1``/``ec2`` fields above always reflect the values *actually used*
+    # for the fit; ``ec1_initial``/``ec2_initial`` keep the user's original
+    # entry so the report is honest about what was changed.
+    ec1_auto_adjusted: bool = False
+    ec1_initial: float = 0.0
+    ec2_initial: float = 0.0
+    auto_ec_iterations: int = 0
+    auto_ec_target_r2: float = 0.0
     n_window_I: tuple[float, float] = (0.0, 0.0)
     n_points_used: int = 0
     # Parameter uncertainties (standard errors) and goodness of fit.
@@ -707,6 +736,113 @@ def _ramp_ratio(V0: float, criterion: float) -> float:
     return float(abs(V0) / abs(criterion))
 
 
+def auto_adjust_loglog_window(
+    x: np.ndarray, y: np.ndarray, *,
+    V0: float, R: float,
+    ec1: float, ec2: float,
+    criterion_E: float,
+    point_sigma: Optional[np.ndarray],
+    weight_mode: str,
+    ec1_max: Optional[float],
+    ec2_max: Optional[float],
+    target_r2: float,
+    max_iterations: int = AUTO_EC_MAX_ITERATIONS,
+    rel_tol: float = AUTO_EC_REL_TOL,
+) -> tuple[tuple, float, int, bool]:
+    """Slide the IEC decade window upward until R² ≥ ``target_r2``.
+
+    Both Ec1 and Ec2 are multiplied by the same factor ``k`` so the decade
+    ratio Ec2/Ec1 stays fixed at the value the caller passed in (typically 10,
+    per IEC 61788). ``k`` is bounded above by the smaller of
+    ``ec1_max/ec1`` and ``ec2_max/ec2``; either bound being ``None`` is
+    treated as no cap from that side.
+
+    Strategy: a coarse log-spaced probe on ``k`` to bracket the smallest k
+    that meets the target, then geometric bisection to refine. Total fit
+    evaluations are bounded by ``max_iterations + 6``; each evaluation is a
+    cheap polyfit, so the whole thing finishes in well under a second on
+    real data.
+
+    Returns ``(loglog_result, k, n_evals, target_met)`` where
+    ``loglog_result`` is the eight-tuple returned by
+    :func:`fit_n_value_log_log` and ``k`` is the multiplicative factor that
+    was applied to the input ``ec1``/``ec2``. When the target is unreachable
+    within the allowed range, the best-R² candidate is returned with
+    ``target_met=False`` so the caller can surface a warning.
+    """
+
+    def _eval(k: float):
+        return fit_n_value_log_log(
+            x, y, V0=V0, R=R,
+            Ec1=k * ec1, Ec2=k * ec2,
+            criterion_E=criterion_E,
+            point_sigma=point_sigma,
+            weight_mode=weight_mode,
+        )
+
+    n_evals = 0
+    base = _eval(1.0)
+    n_evals += 1
+    if base[7] >= target_r2:
+        return base, 1.0, n_evals, True
+
+    k_caps: list[float] = []
+    if ec1 > 0 and ec1_max is not None and ec1_max > ec1:
+        k_caps.append(float(ec1_max) / float(ec1))
+    if ec2 > 0 and ec2_max is not None and ec2_max > ec2:
+        k_caps.append(float(ec2_max) / float(ec2))
+    if not k_caps:
+        return base, 1.0, n_evals, False
+    k_max = min(k_caps)
+    if k_max <= 1.0 + 1.0e-9:
+        return base, 1.0, n_evals, False
+
+    # Coarse log-spaced probe (5 candidates between 1 and k_max, exclusive of 1
+    # since base already covers it).
+    probe_count = 5
+    probes = list(np.geomspace(1.0, k_max, probe_count + 1))[1:]
+    samples: list[tuple[float, tuple]] = [(1.0, base)]
+    for k in probes:
+        try:
+            r = _eval(float(k))
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            # Window outran the data; everything above this k is also infeasible.
+            break
+        n_evals += 1
+        samples.append((float(k), r))
+
+    hits = [(k, r) for k, r in samples if r[7] >= target_r2]
+    if not hits:
+        # Target never met; return the best R² we observed.
+        best = max(samples, key=lambda kr: kr[1][7])
+        return best[1], best[0], n_evals, False
+
+    # Smallest k that hit the target → upper bracket. Largest k below it that
+    # missed the target → lower bracket. (Lower bracket may be 1.0.)
+    k_hi, hi_result = hits[0]
+    below = [(k, r) for k, r in samples if k < k_hi]
+    k_lo = below[-1][0] if below else 1.0
+
+    # Geometric bisection refines until the relative width of the bracket is
+    # below ``rel_tol`` or we hit the iteration cap.
+    iters = 0
+    while iters < max_iterations and (k_hi / max(k_lo, 1e-12) - 1.0) > rel_tol:
+        k_mid = float(np.sqrt(k_lo * k_hi))
+        try:
+            mid = _eval(k_mid)
+            n_evals += 1
+            if mid[7] >= target_r2:
+                k_hi, hi_result = k_mid, mid
+            else:
+                k_lo = k_mid
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            # Infeasible mid-window → must be too high; shrink the upper end.
+            k_hi = k_mid
+        iters += 1
+
+    return hi_result, k_hi, n_evals, True
+
+
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                  settings: Optional[FitSettings] = None) -> FitResult:
     """Step 1 V_ofs, Step 3 di/dt, Step 4 baseline → V0, R, L, Step 5 Ic/n.
@@ -795,16 +931,45 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         # fall back to Ec2 (the legacy default) when criterion_voltage is
         # not set or non-positive.
         crit_for_ic = Vc if (Vc is not None and Vc > 0) else settings.ec2
-        try:
+        ec1_used = float(settings.ec1)
+        ec2_used = float(settings.ec2)
+        ec1_initial = ec1_used
+        ec2_initial = ec2_used
+        auto_iters = 0
+        auto_target_met = True
+        auto_adjusted = False
+        if getattr(settings, "auto_ec_adjust", False):
+            try:
+                (auto_result, k_used, auto_iters, auto_target_met) = (
+                    auto_adjust_loglog_window(
+                        x, y, V0=V0, R=R,
+                        ec1=ec1_initial, ec2=ec2_initial,
+                        criterion_E=crit_for_ic,
+                        point_sigma=point_sigma,
+                        weight_mode=weight_mode,
+                        ec1_max=settings.auto_ec1_max,
+                        ec2_max=settings.auto_ec2_max,
+                        target_r2=settings.auto_ec_target_r2,
+                    )
+                )
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+                return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
             (Ic, n_value, chi_sqr, n_pts, n_window,
-             sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
-                x, y, V0=V0, R=R, Ec1=settings.ec1, Ec2=settings.ec2,
-                criterion_E=crit_for_ic,
-                point_sigma=point_sigma,
-                weight_mode=weight_mode,
-            )
-        except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
-            return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
+             sigma_Ic, sigma_n, r_squared) = auto_result
+            ec1_used = ec1_initial * float(k_used)
+            ec2_used = ec2_initial * float(k_used)
+            auto_adjusted = abs(float(k_used) - 1.0) > 1e-9
+        else:
+            try:
+                (Ic, n_value, chi_sqr, n_pts, n_window,
+                 sigma_Ic, sigma_n, r_squared) = fit_n_value_log_log(
+                    x, y, V0=V0, R=R, Ec1=ec1_used, Ec2=ec2_used,
+                    criterion_E=crit_for_ic,
+                    point_sigma=point_sigma,
+                    weight_mode=weight_mode,
+                )
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+                return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
         # Rebuild a smooth model curve for plotting using the user's criterion.
         fit_x = np.linspace(max(x_min, 1e-12), x_max, 400)
         fit_y = V0 + R * fit_x + crit_for_ic * np.power(
@@ -815,9 +980,21 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         if thermal_applied:
             fit_y = fit_y + V_ofs
         ratio = _ramp_ratio(V0, crit_for_ic)
+        if auto_adjusted and not auto_target_met:
+            message = (
+                f"IEC 61788 log-log fit succeeded; auto-Ec reached its limit "
+                f"without hitting target R² = {settings.auto_ec_target_r2:.4g}."
+            )
+        elif auto_adjusted:
+            message = (
+                f"IEC 61788 log-log fit succeeded with auto-adjusted decade "
+                f"window (R² target = {settings.auto_ec_target_r2:.4g})."
+            )
+        else:
+            message = "IEC 61788 log-log n-value fit succeeded."
         return FitResult(
             ok=True,
-            message="IEC 61788 log-log n-value fit succeeded.",
+            message=message,
             di_dt=di_dt,
             inductance_L=inductance_L,
             V_ofs=V_ofs,
@@ -835,8 +1012,13 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
             fit_x=fit_x,
             fit_y=fit_y,
             fit_method=FIT_METHOD_LOG_LOG,
-            ec1=settings.ec1,
-            ec2=settings.ec2,
+            ec1=ec1_used,
+            ec2=ec2_used,
+            ec1_auto_adjusted=auto_adjusted,
+            ec1_initial=ec1_initial,
+            ec2_initial=ec2_initial,
+            auto_ec_iterations=auto_iters,
+            auto_ec_target_r2=float(settings.auto_ec_target_r2),
             n_window_I=n_window,
             n_points_used=n_pts,
             sigma_Ic=sigma_Ic,

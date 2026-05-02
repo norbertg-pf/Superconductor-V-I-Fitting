@@ -52,6 +52,9 @@ from .service import (
     DEFAULT_BASELINE_MODE,
     DEFAULT_DIDT_HIGH_FRAC,
     DEFAULT_DIDT_LOW_FRAC,
+    DEFAULT_AUTO_EC_TARGET_R2,
+    DEFAULT_AUTO_EC1_MAX_V_PER_CM,
+    DEFAULT_AUTO_EC2_MAX_V_PER_CM,
     DEFAULT_EC_V_PER_CM,
     DEFAULT_EC1_V_PER_CM,
     DEFAULT_EC2_V_PER_CM,
@@ -261,6 +264,26 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
         "ic_tol": app.data_fit_ic_tol.text(),
         "chi_tol": app.data_fit_chi_tol.text(),
         "vc": app.data_fit_vc_input.text(),
+        "auto_ec_adjust": (
+            app.data_fit_auto_ec_cb.isChecked()
+            if getattr(app, "data_fit_auto_ec_cb", None) is not None
+            else False
+        ),
+        "auto_ec1_max": (
+            app.data_fit_auto_ec1_max.text()
+            if getattr(app, "data_fit_auto_ec1_max", None) is not None
+            else ""
+        ),
+        "auto_ec2_max": (
+            app.data_fit_auto_ec2_max.text()
+            if getattr(app, "data_fit_auto_ec2_max", None) is not None
+            else ""
+        ),
+        "auto_target_r2": (
+            app.data_fit_auto_target_r2.text()
+            if getattr(app, "data_fit_auto_target_r2", None) is not None
+            else ""
+        ),
         "weight_mode": (
             app.data_fit_weight_mode_cb.currentData()
             if getattr(app, "data_fit_weight_mode_cb", None) is not None
@@ -373,9 +396,20 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         (app.data_fit_ic_tol, "ic_tol"),
         (app.data_fit_chi_tol, "chi_tol"),
         (app.data_fit_vc_input, "vc"),
+        (getattr(app, "data_fit_auto_ec1_max", None), "auto_ec1_max"),
+        (getattr(app, "data_fit_auto_ec2_max", None), "auto_ec2_max"),
+        (getattr(app, "data_fit_auto_target_r2", None), "auto_target_r2"),
     ):
-        if key in profile:
+        if widget is not None and key in profile and profile[key] not in ("", None):
             _set_silently(widget, str(profile[key]))
+    if "auto_ec_adjust" in profile and getattr(app, "data_fit_auto_ec_cb", None) is not None:
+        cb = app.data_fit_auto_ec_cb
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(bool(profile["auto_ec_adjust"]))
+        finally:
+            cb.blockSignals(False)
+        _refresh_auto_ec_enabled(app)
     if "weight_mode" in profile and getattr(app, "data_fit_weight_mode_cb", None) is not None:
         idx = app.data_fit_weight_mode_cb.findData(profile["weight_mode"])
         if idx < 0:
@@ -741,6 +775,25 @@ def _connect_data_fitting_actions(app):
 
 
 
+def _refresh_auto_ec_enabled(app) -> None:
+    """Grey the Ec1 max / Ec2 max / target R² inputs when auto-adjust is off."""
+    cb = getattr(app, "data_fit_auto_ec_cb", None)
+    if cb is None:
+        return
+    enabled = bool(cb.isChecked())
+    for attr in (
+        "data_fit_auto_ec1_max",
+        "data_fit_auto_ec2_max",
+        "data_fit_auto_target_r2",
+        "data_fit_auto_ec1_max_label",
+        "data_fit_auto_ec2_max_label",
+        "data_fit_auto_target_r2_label",
+    ):
+        widget = getattr(app, attr, None)
+        if widget is not None:
+            widget.setEnabled(enabled)
+
+
 def _open_fit_config_dialog(app) -> None:
     dialog = QDialog(app)
     dialog.setWindowTitle("Fit config")
@@ -817,6 +870,15 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_didt_high.setText(f"{DEFAULT_DIDT_HIGH_FRAC * 100:.2f}")
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
+    if getattr(app, "data_fit_auto_ec_cb", None) is not None:
+        app.data_fit_auto_ec_cb.setChecked(False)
+    if getattr(app, "data_fit_auto_ec1_max", None) is not None:
+        app.data_fit_auto_ec1_max.setText(f"{DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6:g}")
+    if getattr(app, "data_fit_auto_ec2_max", None) is not None:
+        app.data_fit_auto_ec2_max.setText(f"{DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6:g}")
+    if getattr(app, "data_fit_auto_target_r2", None) is not None:
+        app.data_fit_auto_target_r2.setText(f"{DEFAULT_AUTO_EC_TARGET_R2:g}")
+    _refresh_auto_ec_enabled(app)
     # Block radio signals during reset so _on_fit_method_changed doesn't try
     # to snapshot the half-reset profile.
     app.data_fit_method_loglog_rb.blockSignals(True)
@@ -1442,6 +1504,52 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_chi_tol, 0, 3)
     iter_layout.addWidget(app.data_fit_vc_label, 1, 2)
     iter_layout.addWidget(app.data_fit_vc_input, 1, 3)
+
+    # Auto-adjust Ec1/Ec2 controls. The IEC decade window slides upward (both
+    # ends scaled by the same factor so the Ec2/Ec1 = 10 ratio is preserved)
+    # whenever the log-log R² is below the target. Useful when baseline drift
+    # contaminates the lower end of the n-value window.
+    app.data_fit_auto_ec_cb = QCheckBox("Auto-adjust Ec1/Ec2 to target R²")
+    app.data_fit_auto_ec_cb.setChecked(False)
+    app.data_fit_auto_ec_cb.setToolTip(
+        "When the log-log fit's R² is below the target, slide the IEC\n"
+        "decade window [Ec1, Ec2] upward to escape baseline drift. Both\n"
+        "ends move by the same factor so the IEC 61788 decade ratio is\n"
+        "preserved; the search is bounded by the Ec1/Ec2 maxima below."
+    )
+    app.data_fit_auto_ec1_max = QLineEdit(f"{DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6:g}")
+    app.data_fit_auto_ec1_max.setMaximumWidth(80)
+    app.data_fit_auto_ec1_max.setToolTip(
+        "Upper bound for Ec1 during auto-adjust (µV/cm). The search will\n"
+        "not raise Ec1 above this value."
+    )
+    app.data_fit_auto_ec2_max = QLineEdit(f"{DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6:g}")
+    app.data_fit_auto_ec2_max.setMaximumWidth(80)
+    app.data_fit_auto_ec2_max.setToolTip(
+        "Upper bound for Ec2 during auto-adjust (µV/cm). Ec2 is the IEC\n"
+        "criterion; keep this close to 1 µV/cm to stay within the standard."
+    )
+    app.data_fit_auto_target_r2 = QLineEdit(f"{DEFAULT_AUTO_EC_TARGET_R2:g}")
+    app.data_fit_auto_target_r2.setMaximumWidth(80)
+    app.data_fit_auto_target_r2.setToolTip(
+        "Target R² for the log-log fit. The smallest decade-window shift\n"
+        "that achieves this R² is selected. Typical values: 0.99–0.999."
+    )
+    app.data_fit_auto_ec1_max_label = QLabel("Ec1 max (µV/cm)")
+    app.data_fit_auto_ec2_max_label = QLabel("Ec2 max (µV/cm)")
+    app.data_fit_auto_target_r2_label = QLabel("Target R²")
+    iter_layout.addWidget(app.data_fit_auto_ec_cb, 2, 0, 1, 4)
+    iter_layout.addWidget(app.data_fit_auto_ec1_max_label, 3, 0)
+    iter_layout.addWidget(app.data_fit_auto_ec1_max, 3, 1)
+    iter_layout.addWidget(app.data_fit_auto_ec2_max_label, 3, 2)
+    iter_layout.addWidget(app.data_fit_auto_ec2_max, 3, 3)
+    iter_layout.addWidget(app.data_fit_auto_target_r2_label, 4, 0)
+    iter_layout.addWidget(app.data_fit_auto_target_r2, 4, 1)
+    app.data_fit_auto_ec_cb.toggled.connect(
+        lambda _checked, a=app: _refresh_auto_ec_enabled(a)
+    )
+    _refresh_auto_ec_enabled(app)
+
     iter_group.setVisible(False)
     app.data_fit_iter_group = iter_group
 
@@ -1881,6 +1989,23 @@ def _settings_from_inputs(app) -> FitSettings:
     # In log-log mode the user-entered Ec/Vc is the criterion at which Ic is
     # reported. Ec1/Ec2 only define the fit window for the n-value slope.
 
+    auto_ec_adjust = bool(
+        getattr(app, "data_fit_auto_ec_cb", None) is not None
+        and app.data_fit_auto_ec_cb.isChecked()
+    )
+    auto_ec1_max = _float_from(
+        getattr(app, "data_fit_auto_ec1_max", None),
+        DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6,
+    ) * to_si
+    auto_ec2_max = _float_from(
+        getattr(app, "data_fit_auto_ec2_max", None),
+        DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6,
+    ) * to_si
+    auto_target_r2 = _float_from(
+        getattr(app, "data_fit_auto_target_r2", None),
+        DEFAULT_AUTO_EC_TARGET_R2,
+    )
+
     settings = FitSettings(
         didt_low_frac=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
         didt_high_frac=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
@@ -1896,6 +2021,10 @@ def _settings_from_inputs(app) -> FitSettings:
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        auto_ec_adjust=auto_ec_adjust,
+        auto_ec1_max=auto_ec1_max,
+        auto_ec2_max=auto_ec2_max,
+        auto_ec_target_r2=auto_target_r2,
         subtract_thermal_offset=bool(
             getattr(app, "data_fit_subtract_vofs_cb", None) is None
             or app.data_fit_subtract_vofs_cb.isChecked()
@@ -2016,6 +2145,22 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
             as_fraction=True,
         )
 
+    if method == FIT_METHOD_LOG_LOG:
+        to_si_caps = 1.0e-6 if sample_length is not None else 1.0e-3
+        auto_ec1_max = _profile_text_float(
+            profile, "auto_ec1_max", DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6,
+        ) * to_si_caps
+        auto_ec2_max = _profile_text_float(
+            profile, "auto_ec2_max", DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6,
+        ) * to_si_caps
+    else:
+        auto_ec1_max = DEFAULT_AUTO_EC1_MAX_V_PER_CM
+        auto_ec2_max = DEFAULT_AUTO_EC2_MAX_V_PER_CM
+    auto_target_r2 = _profile_text_float(
+        profile, "auto_target_r2", DEFAULT_AUTO_EC_TARGET_R2,
+    )
+    auto_ec_adjust = bool(profile.get("auto_ec_adjust", False))
+
     return FitSettings(
         didt_low_frac=_profile_text_float(profile, "didt_low", DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
         didt_high_frac=_profile_text_float(profile, "didt_high", DEFAULT_DIDT_HIGH_FRAC * 100, as_fraction=True),
@@ -2031,6 +2176,10 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         fit_method=method,
         ec1=ec1,
         ec2=ec2,
+        auto_ec_adjust=auto_ec_adjust,
+        auto_ec1_max=auto_ec1_max,
+        auto_ec2_max=auto_ec2_max,
+        auto_ec_target_r2=auto_target_r2,
         subtract_thermal_offset=bool(profile.get("subtract_vofs", True)),
         zero_i_frac=_profile_text_float(profile, "zero_i_frac", DEFAULT_ZERO_I_FRAC * 100, as_fraction=True),
         weight_mode=weight_mode,
@@ -3754,10 +3903,19 @@ def _format_result(result) -> str:
         + ("  (ramp too fast!)" if getattr(result, "ramp_too_fast", False) else "")
     )
     if is_loglog:
-        lines.append(
+        auto_adjusted = bool(getattr(result, "ec1_auto_adjusted", False))
+        ec_line = (
             f"n window      = [Ec1={_format_engineering(result.ec1, v_unit, 2)}, "
             f"Ec2={_format_engineering(result.ec2, v_unit, 2)}]"
         )
+        if auto_adjusted:
+            ec_line += (
+                f"  (auto-adjusted from "
+                f"[{_format_engineering(getattr(result, 'ec1_initial', 0.0), v_unit, 2)}, "
+                f"{_format_engineering(getattr(result, 'ec2_initial', 0.0), v_unit, 2)}], "
+                f"target R²={getattr(result, 'auto_ec_target_r2', 0.0):.4g})"
+            )
+        lines.append(ec_line)
         lines.append(
             f"I window      = [{result.n_window_I[0]:.4g}, {result.n_window_I[1]:.4g}] A, "
             f"N={result.n_points_used}"
@@ -3838,6 +3996,15 @@ def _fit_result_properties(result) -> dict:
         # IEC decade window (0 for non-linear fits).
         "Ec1": float(getattr(result, "ec1", 0.0)),
         "Ec2": float(getattr(result, "ec2", 0.0)),
+        # Auto-Ec metadata: when the decade window was automatically shifted
+        # to escape baseline drift, ``Ec1_initial``/``Ec2_initial`` record the
+        # values the user originally entered and ``ec1_auto_adjusted`` flags
+        # that the fit is reporting against a shifted window.
+        "Ec1_initial": float(getattr(result, "ec1_initial", 0.0)),
+        "Ec2_initial": float(getattr(result, "ec2_initial", 0.0)),
+        "ec1_auto_adjusted": bool(getattr(result, "ec1_auto_adjusted", False)),
+        "auto_ec_iterations": int(getattr(result, "auto_ec_iterations", 0)),
+        "auto_ec_target_r2": float(getattr(result, "auto_ec_target_r2", 0.0)),
         "n_window_I_lo_A": float(n_window[0]),
         "n_window_I_hi_A": float(n_window[1]),
         "n_points_used": int(getattr(result, "n_points_used", 0)),
@@ -3870,7 +4037,8 @@ def _fit_result_properties(result) -> dict:
     # Booleans round-trip more reliably as strings in TDMS consumers (LabVIEW,
     # Origin) — keep human-readable "True"/"False" instead of raw bool.
     for k in ("ramp_too_fast", "insufficient_n_points",
-              "thermal_offset_applied", "uses_sample_length"):
+              "thermal_offset_applied", "uses_sample_length",
+              "ec1_auto_adjusted"):
         props[k] = "True" if props[k] else "False"
     return props
 
@@ -3978,6 +4146,11 @@ def _fit_result_from_props(props: dict):
         fit_method=method,
         ec1=_coerce_float(_prop_lookup(props, "Ec1")),
         ec2=_coerce_float(_prop_lookup(props, "Ec2")),
+        ec1_initial=_coerce_float(_prop_lookup(props, "Ec1_initial")),
+        ec2_initial=_coerce_float(_prop_lookup(props, "Ec2_initial")),
+        ec1_auto_adjusted=_coerce_bool(_prop_lookup(props, "ec1_auto_adjusted")),
+        auto_ec_iterations=int(_coerce_float(_prop_lookup(props, "auto_ec_iterations"), 0)),
+        auto_ec_target_r2=_coerce_float(_prop_lookup(props, "auto_ec_target_r2")),
         n_window_I=n_window,
         n_points_used=int(_coerce_float(_prop_lookup(props, "n_points_used"), 0)),
         sigma_Ic=_coerce_float(_prop_lookup(props, "sigma_Ic_A")),
@@ -5987,6 +6160,22 @@ def _settings_to_preset(app) -> FitPreset:
         save_fit_in_same_group=same_group,
         auto_load_after_acquisition=auto_load,
         autosave_fit_metadata=autosave,
+        auto_ec_adjust=bool(
+            getattr(app, "data_fit_auto_ec_cb", None) is not None
+            and app.data_fit_auto_ec_cb.isChecked()
+        ),
+        auto_ec1_max_uv_per_cm=_float_from(
+            getattr(app, "data_fit_auto_ec1_max", None),
+            DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6,
+        ),
+        auto_ec2_max_uv_per_cm=_float_from(
+            getattr(app, "data_fit_auto_ec2_max", None),
+            DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6,
+        ),
+        auto_ec_target_r2=_float_from(
+            getattr(app, "data_fit_auto_target_r2", None),
+            DEFAULT_AUTO_EC_TARGET_R2,
+        ),
     )
 
 
@@ -6031,6 +6220,29 @@ def _apply_preset(app, preset: FitPreset) -> None:
         app.data_fit_autosave_cb.setChecked(
             bool(getattr(preset, "autosave_fit_metadata", True))
         )
+    if getattr(app, "data_fit_auto_ec_cb", None) is not None:
+        cb = app.data_fit_auto_ec_cb
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(bool(getattr(preset, "auto_ec_adjust", False)))
+        finally:
+            cb.blockSignals(False)
+    if getattr(app, "data_fit_auto_ec1_max", None) is not None:
+        _set_silently(
+            app.data_fit_auto_ec1_max,
+            f"{getattr(preset, 'auto_ec1_max_uv_per_cm', DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6):g}",
+        )
+    if getattr(app, "data_fit_auto_ec2_max", None) is not None:
+        _set_silently(
+            app.data_fit_auto_ec2_max,
+            f"{getattr(preset, 'auto_ec2_max_uv_per_cm', DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6):g}",
+        )
+    if getattr(app, "data_fit_auto_target_r2", None) is not None:
+        _set_silently(
+            app.data_fit_auto_target_r2,
+            f"{getattr(preset, 'auto_ec_target_r2', DEFAULT_AUTO_EC_TARGET_R2):g}",
+        )
+    _refresh_auto_ec_enabled(app)
     # The four save-settings checkboxes drive each other's enabled state;
     # re-evaluate after every preset apply so the UI reflects the new values.
     _refresh_save_settings_enabled(app)
