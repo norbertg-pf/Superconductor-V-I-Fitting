@@ -554,6 +554,11 @@ class DataFittingController:
         # FitResults group inside the TDMS or fit_* properties attached to the
         # source channel itself. Used to redraw fitted curves on file load.
         self.saved_fit_results: dict[str, dict] = {}
+        # True only when the loaded TDMS root carries DAQU_Data_Fitting=True,
+        # i.e. the recording came from a DAQUniversal acquisition where at
+        # least one channel had the per-channel "Data Fitting" checkbox set.
+        # Gates the automatic resample-to-100 S/s on load.
+        self.daqu_data_fitting_source: bool = False
 
     # --- data source -----------------------------------------------------
     def load_recording(self, path: str) -> tuple[bool, str]:
@@ -562,11 +567,16 @@ class DataFittingController:
         self.channel_names = []
         self.time_array = None
         self.saved_fit_results = {}
+        self.daqu_data_fitting_source = False
         if not path or not os.path.exists(path):
             return False, "No recording found. Click 'Load File…' to choose a TDMS."
         try:
             with TdmsFile.read(path) as tdms_file:
                 self.time_array = _read_time_channel(tdms_file)
+                root_props = getattr(tdms_file, "properties", {}) or {}
+                self.daqu_data_fitting_source = bool(
+                    root_props.get("DAQU_Data_Fitting", False)
+                )
                 names: list[str] = []
                 for group in tdms_file.groups():
                     is_fit_results_group = (group.name == "FitResults")
@@ -777,6 +787,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_controller.channel_cache = {}
     app.data_fit_controller.channel_names = []
     app.data_fit_controller.channel_metadata = {}
+    app.data_fit_controller.daqu_data_fitting_source = False
     app.data_fit_path_label.setText("No file loaded.")
     app.data_fit_path_label.setStyleSheet("color: gray;")
     for cb in (app.data_fit_time_cb, app.data_fit_x_cb, app.data_fit_y_cb):
@@ -1055,14 +1066,19 @@ def setup_data_fitting_tab_layout(app):
         "(the layout depends on 'Use the same group/channel for fit metadata' below)."
     )
     app.data_fit_resample_100sps_cb = QCheckBox(
-        "Resample everything to 100 S/s"
+        "Resample DAQ-U Data Fitting recordings to 100 S/s"
     )
     app.data_fit_resample_100sps_cb.setChecked(True)
     app.data_fit_resample_100sps_cb.setToolTip(
-        "Checked (default): when data arrives from a TDMS file, a current\n"
-        "measurement, or any other source, the Plot summary 'Avg' value is\n"
-        "automatically set so the effective sample rate is ~100 S/s.\n"
-        "Unchecked: leave Avg at its previous value (no automatic resample)."
+        "Checked (default): when a TDMS recording from a DAQ-U Data Fitting\n"
+        "measurement is loaded (any AI channel had 'Data Fitting' checked in the\n"
+        "DAQUniversal Configuration tab) and the original sample rate is above\n"
+        "100 S/s, the Plot summary 'Avg' value is automatically set so the\n"
+        "effective sample rate is ~100 S/s — that resampled curve is what the\n"
+        "fit then runs on.\n"
+        "Unchecked: leave Avg at its previous value (no automatic resample).\n"
+        "Manual TDMS loads without the DAQ-U Data Fitting marker are never\n"
+        "auto-resampled — set Avg yourself if you need it."
     )
     app.data_fit_same_group_cb = QCheckBox(
         "Use the same group/channel for fit metadata"
@@ -2632,12 +2648,18 @@ def _format_rate(rate_hz: float) -> str:
 
 
 def _apply_resample_to_100sps(app) -> None:
-    """When the Resample checkbox is on, set Avg so effective rate ~ 100 S/s.
+    """When the Resample checkbox is on AND the recording came from a DAQ-U
+    Data Fitting measurement, set Avg so effective rate ~ 100 S/s.
 
     Computes the original sample rate from the loaded time channel and writes
     ``data_fit_avg_input`` to ``round(orig_rate / 100)`` (clamped to >= 1).
-    Applied after any data load (TDMS file, current measurement, refresh) so
-    every data source converges on the same 100 S/s effective rate.
+
+    The auto-resample is gated on ``DataFittingController.daqu_data_fitting_source``,
+    which is True only when the loaded TDMS root carries ``DAQU_Data_Fitting=True``
+    (DAQUniversal sets that property when at least one AI channel had the
+    per-channel "Data Fitting" checkbox enabled in the Configuration tab).
+    Manual TDMS loads from disk and any other source keep whatever Avg the
+    user has already set.
     """
     cb = getattr(app, "data_fit_resample_100sps_cb", None)
     avg_widget = getattr(app, "data_fit_avg_input", None)
@@ -2650,6 +2672,8 @@ def _apply_resample_to_100sps(app) -> None:
         return
     controller = getattr(app, "data_fit_controller", None)
     if controller is None:
+        return
+    if not getattr(controller, "daqu_data_fitting_source", False):
         return
     t_raw = getattr(controller, "time_array", None)
     if t_raw is None or np.asarray(t_raw).size < 2:
