@@ -2331,19 +2331,18 @@ def _sample_fit_curve_at(x_source: np.ndarray, fit_x: np.ndarray,
 
 
 def _replay_saved_fits_into_plot(app) -> None:
-    """Replay every saved fit overlay we found in the just-loaded TDMS.
+    """Plot the source curves for every saved fit and re-run the fit fresh.
 
-    For each labelled entry in ``controller.saved_fit_results``:
-    1. If a matching source channel exists, plot it as a replayed source
-       curve (so the fit has something to overlay).
-    2. Reconstruct a ``FitResult`` from the saved properties and call
-       ``_upsert_fit_curve_entry`` to attach the model curve.
-    3. Register the reconstructed fit curve in the controller's channel
-       cache as ``"<name> - fitted"`` so it appears in the Y-axis combo
-       and can be selected like any other channel.
-    The full per-channel ``_format_result`` block is shown in the result
-    panel so users see the same parameter detail they would after running
-    the fit fresh — Ic ± σ, n ± σ, R, V_ofs, R², chi², ramp ratio, …
+    For each labelled entry in ``controller.saved_fit_results`` we pull the
+    matching source channel onto the plot via ``_add_replayed_source_curve``
+    and then delegate to ``run_fit(app, skip_autosave=True)`` so the
+    displayed numbers come from the live fitter, not from whatever was
+    serialised at acquisition time. Replaying the saved props verbatim
+    produced numbers that drifted from a fresh Run Fit (different code
+    versions, different smoothing) and surfaced stale failure messages
+    when the original fit had failed even though the data could now be
+    fitted successfully.
+
     Only the first source curve is shown by default — the rest are added
     hidden so the plot stays uncluttered. The user can toggle visibility
     from the Plot summary dialog.
@@ -2361,20 +2360,18 @@ def _replay_saved_fits_into_plot(app) -> None:
         app.data_fit_preview_visible = False
         app.data_fit_raw_curve.setData([], [])
 
-    summary_blocks: list[str] = []
-    ok_results: list[tuple[str, object]] = []
-    plotted = 0
-    failed = 0
+    # First pass: add a source curve for every saved-fit label so the plot
+    # has data to fit against. We deliberately do NOT reconstruct the fit
+    # parameters from the saved props here — those numbers can be stale
+    # (computed by an older version of the fitter, or with a different
+    # smoothing pipeline) and would not match what pressing Run Fit
+    # produces. Instead the second pass below re-runs the fit fresh.
     first = True
-    new_fitted_channels: list[str] = []
-    last_ok = None
-    last_show_criterion = True
-    last_show_ic = False
+    added_any = False
     for name, props in saved.items():
         if not name:
             continue
         meta = controller.get_metadata(name)
-        x_raw = controller.get_channel("")  # placeholder, set below
         # X (current) defaults to the recording's first non-time channel
         # whose name contains "current"/"I"; otherwise the first numeric
         # channel that's not the Y itself. Falls back to ``time_array`` if
@@ -2384,7 +2381,6 @@ def _replay_saved_fits_into_plot(app) -> None:
         y_raw = controller.get_channel(name)
         t_raw = controller.time_array
         if y_raw is None or x_raw is None or t_raw is None:
-            failed += 1
             continue
         x_meta = controller.get_metadata(x_name) if x_name else {}
         x_arr = controller.apply_transform(
@@ -2406,111 +2402,24 @@ def _replay_saved_fits_into_plot(app) -> None:
         v_tap = meta.get("voltage_tap_cm")
         if v_tap and float(v_tap) > 0:
             y_arr = y_arr / float(v_tap)
-        result = _fit_result_from_props(props)
-        fit_x, fit_y = _build_fit_curve(result, x_arr)
-        # Older saved fits with ``uses_sample_length=False`` carry Ec/R in V
-        # rather than V/cm; convert the rebuilt overlay to V/cm so it lines up
-        # with the now-rescaled source curve.
-        if (
-            fit_y is not None
-            and v_tap and float(v_tap) > 0
-            and not _coerce_bool(_prop_lookup(props, "uses_sample_length"))
-        ):
-            fit_y = fit_y / float(v_tap)
-        result.fit_x = fit_x
-        result.fit_y = fit_y
-        source_entry = _add_replayed_source_curve(
+        _add_replayed_source_curve(
             app, name, x_arr, y_arr, t_arr, meta, visible=first,
             x_name=x_name, x_meta=x_meta,
         )
-        if result.ok and fit_x is not None and fit_y is not None:
-            _upsert_fit_curve_entry(app, source_entry, result)
-            for c in app.data_fit_curves:
-                if (
-                    c.get("is_fit_result")
-                    and c.get("fit_parent_signature") == source_entry.get("signature")
-                ):
-                    c["visible"] = bool(first)
-                    _apply_curve_visibility(c)
-            ok_results.append((name, result))
-            last_ok = result
-            last_show_criterion = bool(source_entry.get("show_criterion", False))
-            last_show_ic = bool(source_entry.get("show_ic", False))
-            # Register the reconstructed fit curve as a regular channel so
-            # the user can pick it from the Y-axis combo. Sample the smooth
-            # fit_y at the source X positions so the array length matches
-            # the source channel — required for the channel combo flow.
-            #
-            # Storage units matter: ``_apply_transforms`` divides Y by the
-            # active sample length when the voltage-tap checkbox is on. ``fit_y``
-            # is now always in V/cm whenever the channel carries a tap distance
-            # (we converted older V-unit fits above). Multiply by the tap
-            # distance here so the cached values are in raw V, mirroring how
-            # the source channel is stored, and the standard transform
-            # reproduces the V/cm scale.
-            fitted_name = f"{name}{_FITTED_CHANNEL_SUFFIX}"
-            sampled = _sample_fit_curve_at(x_arr, np.asarray(fit_x), np.asarray(fit_y))
-            if sampled is not None and sampled.size:
-                if v_tap and float(v_tap) > 0:
-                    sampled = sampled * float(v_tap)
-                controller.channel_cache[fitted_name] = sampled
-                controller.channel_metadata[fitted_name] = {
-                    "scale": 1.0,
-                    "offset": 0.0,
-                    "voltage_tap_cm": meta.get("voltage_tap_cm"),
-                }
-                if fitted_name not in controller.channel_names:
-                    controller.channel_names.append(fitted_name)
-                    new_fitted_channels.append(fitted_name)
-            plotted += 1
-            first = False
-            summary_blocks.append(f"[{name}] saved fit replayed:\n" + _format_result(result))
-        else:
-            failed += 1
-            msg = _prop_lookup(props, "fit_message", "message") or "no parameters available"
-            summary_blocks.append(f"[{name}] saved fit FAILED: {msg}")
-            if first:
-                first = False
+        added_any = True
+        first = False
 
-    # Refresh the channel combos so the new fitted entries are selectable.
-    if new_fitted_channels:
-        _populate_channel_combos(app)
     _refresh_curve_profile_selector(app)
-    if summary_blocks:
-        intro = (
-            f"Replayed {plotted} saved fit{'s' if plotted != 1 else ''}"
-            + (f", {failed} failed" if failed else "")
-            + ".\n\n"
-        )
-        app.data_fit_result_text.setPlainText(intro + "\n\n".join(summary_blocks))
-    # Mirror the manual Run Fit path so the parameter-table overlay (Ic, n, R,
-    # …) appears in the upper-left corner after an auto-fit replay too.
-    if last_ok is not None and ok_results:
-        _show_fit_overlays(
-            app, last_ok, table_entries=ok_results,
-            show_criterion=last_show_criterion, show_ic=last_show_ic,
-        )
-    # When the fit was triggered from the DAQ-U Configuration tab, the
-    # Low(X)/High(X) textboxes are not touched by the post-acquisition
-    # auto-fit worker. Push the saved n_window_I onto them here so the
-    # widgets reflect the IEC fit window after the replay completes.
-    if (
-        last_ok is not None
-        and getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG
-    ):
-        n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
-        try:
-            lo_w = float(n_window[0])
-            hi_w = float(n_window[1])
-        except (TypeError, ValueError, IndexError):
-            lo_w = hi_w = 0.0
-        if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
-            _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
-            _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
-            app.data_fit_power_window_manual = False
-            _save_active_curve_profile(app)
+    if not added_any:
+        return
+
+    # Re-run the fit fresh through the same code path as the manual Run
+    # Fit button so auto-fit numbers exactly match what the user gets
+    # pressing Run Fit afterwards. ``skip_autosave=True`` keeps this from
+    # silently rewriting the source TDMS — we're only refreshing the
+    # display, not persisting a new fit attempt.
     try:
-        robust_view(app)
+        run_fit(app, skip_autosave=True)
     except Exception:
         traceback.print_exc()
     _reposition_param_table(app)
@@ -4230,7 +4139,13 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     return str(report_path)
 
 
-def run_fit(app):
+def run_fit(app, *, skip_autosave: bool = False):
+    """Run the full fit pipeline against every included curve.
+
+    ``skip_autosave`` lets the auto-load replay path re-use this function
+    without silently rewriting the source TDMS — the caller is just
+    refreshing the on-screen numbers, not persisting a new fit attempt.
+    """
     controller = app.data_fit_controller
     app.data_fit_power_window_manual = False
     app.data_fit_show_trimmed_preview = True
@@ -4470,8 +4385,10 @@ def run_fit(app):
         # Persist every attempt — including failed ones — so users can see a
         # paper trail in the TDMS even when the fit didn't converge. The
         # writer respects the Autosave toggle in Settings; a no-op return
-        # here is normal when autosave is off.
-        report_path = _write_fit_report_tdms(app, all_results)
+        # here is normal when autosave is off. Auto-load replay passes
+        # ``skip_autosave=True`` to refresh the displayed numbers without
+        # touching the file on disk.
+        report_path = None if skip_autosave else _write_fit_report_tdms(app, all_results)
         if report_path:
             current = app.data_fit_result_text.toPlainText()
             app.data_fit_result_text.setPlainText(
@@ -4515,8 +4432,10 @@ def run_fit(app):
             controller.last_result = result
             # Even a totally failed fit leaves a record in the TDMS so the
             # user can tell, when re-opening the file later, that an attempt
-            # was made and what error it produced.
-            failed_path = _write_fit_report_tdms(
+            # was made and what error it produced. Skip when called from the
+            # auto-load replay path so a fresh-but-failed re-fit doesn't
+            # overwrite the user's saved record.
+            failed_path = None if skip_autosave else _write_fit_report_tdms(
                 app, [(label, result)]
             )
             if failed_path:
@@ -4567,7 +4486,7 @@ def run_fit(app):
     label = app.data_fit_y_cb.currentText() or "Curve"
     controller.last_fit_results = [(label, result)]
     controller.last_result = result
-    report_path = _write_fit_report_tdms(
+    report_path = None if skip_autosave else _write_fit_report_tdms(
         app, [(label, result)]
     )
     if report_path:
