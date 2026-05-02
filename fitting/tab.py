@@ -2160,6 +2160,17 @@ def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
     refresh_preview(app)
     if auto_plot_fits:
         _replay_saved_fits_into_plot(app)
+        # If the recording had no saved fit metadata to replay, run a
+        # fresh fit on the preview so the user still sees auto-fit
+        # results on load. Skip autosave so just opening a file never
+        # silently mutates it on disk.
+        controller = getattr(app, "data_fit_controller", None)
+        had_saved = bool(getattr(controller, "saved_fit_results", {}) if controller is not None else False)
+        if not had_saved and getattr(app, "data_fit_preview_visible", True):
+            try:
+                run_fit(app, skip_autosave=True)
+            except Exception:
+                traceback.print_exc()
 
 
 def _safe_checkbox_checked(app, attr_name: str, *, default: bool) -> bool:
