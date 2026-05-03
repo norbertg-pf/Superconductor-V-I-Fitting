@@ -26,6 +26,7 @@ headless scripts: ``from src.fitting.service import run_full_fit``.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from .service import (
@@ -111,6 +112,80 @@ def __getattr__(name):
         _ensure_tab_patches_applied()
         return getattr(_tab, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# ----------------------------------------------------------------------------
+# Reliable patch activation for ``fitting.tab``
+# ----------------------------------------------------------------------------
+#
+# ``__getattr__`` above only fires for ``fitting.<name>`` lookups. Both the
+# standalone window and DAQUniversal's tab shim import names directly with
+# ``from fitting.tab import …``, which Python resolves as a submodule lookup
+# and bypasses ``__getattr__``. Without the hook below, ``_ensure_tab_patches_applied``
+# would never fire in those flows and the runtime fixes (Step 2 trim editors,
+# 0-d array guards, …) would silently no-op.
+#
+# A ``sys.meta_path`` finder watches for the ``fitting.tab`` import. It lets
+# the normal import machinery resolve the spec and load the module, then
+# applies the patches once execution finishes. The finder is idempotent and
+# avoids re-entering itself by skipping its own entry on the path lookup.
+
+_TAB_MODULE_NAME = f"{__name__}.tab"
+
+
+class _TabPatchFinder:
+    """``sys.meta_path`` finder that applies patches after ``fitting.tab`` loads."""
+
+    _resolving = False
+
+    def find_spec(self, fullname, path, target=None):  # noqa: D401 - stdlib API
+        if fullname != _TAB_MODULE_NAME:
+            return None
+        if _TabPatchFinder._resolving:
+            # Avoid recursing into ourselves while delegating to the next
+            # finder; the original loader handles its own work.
+            return None
+        _TabPatchFinder._resolving = True
+        try:
+            for finder in list(sys.meta_path):
+                if isinstance(finder, _TabPatchFinder):
+                    continue
+                try:
+                    spec = finder.find_spec(fullname, path, target)
+                except Exception:
+                    spec = None
+                if spec is None or spec.loader is None:
+                    continue
+                spec.loader = _TabPatchLoader(spec.loader)
+                return spec
+        finally:
+            _TabPatchFinder._resolving = False
+        return None
+
+
+class _TabPatchLoader:
+    """Wrap ``fitting.tab``'s loader so patches run once execution finishes."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def create_module(self, spec):
+        creator = getattr(self._wrapped, "create_module", None)
+        if creator is None:
+            return None
+        return creator(spec)
+
+    def exec_module(self, module):
+        self._wrapped.exec_module(module)
+        try:
+            _ensure_tab_patches_applied()
+        except Exception:
+            # Never let a patch failure abort tab import.
+            pass
+
+
+if not any(isinstance(f, _TabPatchFinder) for f in sys.meta_path):
+    sys.meta_path.insert(0, _TabPatchFinder())
 
 
 __all__ = [

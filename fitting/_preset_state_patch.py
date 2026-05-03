@@ -26,12 +26,21 @@ What it patches
    method-mode UI are restored exactly as before, then writes the new
    widgets from the preset. Old preset JSON files without the new keys
    keep working because every read uses ``getattr(preset, key, default)``.
+3. ``_resolve_reference_curve_data`` — fixes an ``IndexError`` that fires
+   when the user toggles a Show/edit band before any data is loaded.
+   ``_apply_transforms`` returns ``None`` for unselected channels and
+   ``np.asarray(None, dtype=float)`` produces a 0-d array of size 1, which
+   the original function then tried to slice with ``x[:n]``. We coerce to a
+   1-D float array (empty when the source is ``None``/0-d) before the size
+   check so empty inputs return ``None`` cleanly.
 
 Idempotent: ``apply_patches`` checks an internal flag so wrapping happens
 at most once per process.
 """
 
 from __future__ import annotations
+
+import numpy as np
 
 
 _PATCHED = False
@@ -227,6 +236,111 @@ def _tab_module():
     return _tab
 
 
+def _to_clean_1d_array(value) -> np.ndarray:
+    """Return a 1-D float array, treating ``None`` and 0-d inputs as empty.
+
+    ``np.asarray(None, dtype=float)`` produces a 0-d ``array(nan)`` with
+    ``size == 1``; the caller's ``size <= 0`` guard then misses it and
+    ``arr[:n]`` raises ``IndexError: too many indices for array``. Coercing
+    here keeps the rest of the code path on its happy path.
+    """
+    if value is None:
+        return np.empty(0, dtype=float)
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        return np.empty(0, dtype=float)
+    return arr
+
+
+def _patch_resolve_reference_curve_data(tab) -> None:
+    """Patch ``_resolve_reference_curve_data`` to handle empty/0-d inputs.
+
+    The original function calls ``np.asarray(transformed.get("x", []), …)``
+    on the preview branch. When no channel is selected, ``transformed["x"]``
+    is ``None`` and the resulting 0-d array crashes the subsequent slice.
+    We re-implement the same logic but route every array through
+    :func:`_to_clean_1d_array` first.
+    """
+    original = getattr(tab, "_resolve_reference_curve_data", None)
+    if original is None:
+        return
+
+    # Pull the helpers we need by name from tab so we don't duplicate them.
+    curve_profile_key_from_ui = getattr(tab, "_curve_profile_key_from_ui", None)
+    ensure_entry_origin_snapshot = getattr(tab, "_ensure_entry_origin_snapshot", None)
+    entry_untrimmed_xyt = getattr(tab, "_entry_untrimmed_xyt", None)
+    trim_xyz_with_step15 = getattr(tab, "_trim_xyz_with_step15", None)
+    apply_transforms = getattr(tab, "_apply_transforms", None)
+    if any(
+        helper is None
+        for helper in (
+            curve_profile_key_from_ui,
+            ensure_entry_origin_snapshot,
+            entry_untrimmed_xyt,
+            trim_xyz_with_step15,
+            apply_transforms,
+        )
+    ):
+        # tab.py is shaped differently than expected; leave the original in
+        # place rather than installing a patch that could mask real errors.
+        return
+
+    def _resolve_reference_curve_data_patched(app):
+        active_key = curve_profile_key_from_ui(app)
+        for entry in getattr(app, "data_fit_curves", []):
+            if bool(entry.get("is_fit_result", False)):
+                continue
+            if str(entry.get("signature")) != str(active_key):
+                continue
+            ensure_entry_origin_snapshot(entry)
+            x, y, t = entry_untrimmed_xyt(entry)
+            x = _to_clean_1d_array(x)
+            y = _to_clean_1d_array(y)
+            t = _to_clean_1d_array(t)
+            n = int(min(x.size, y.size))
+            if n <= 0:
+                continue
+            x_t, y_t, t_t = trim_xyz_with_step15(
+                app,
+                x[:n],
+                y[:n],
+                t[:n] if t.size else np.empty(0, dtype=float),
+            )
+            if x_t.size <= 0 or y_t.size <= 0:
+                continue
+            return (
+                entry,
+                entry.get("signature", entry.get("label", "curve")),
+                entry.get("label", "Curve"),
+                x_t,
+                y_t,
+                (t_t if t_t is not None else np.empty(0, dtype=float)),
+            )
+
+        transformed = apply_transforms(app, apply_trim=True)
+        x = _to_clean_1d_array(transformed.get("x") if transformed else None)
+        y = _to_clean_1d_array(transformed.get("y") if transformed else None)
+        t = _to_clean_1d_array(transformed.get("time") if transformed else None)
+        n = int(min(x.size, y.size))
+        if n <= 0:
+            return None
+        y_label = ""
+        try:
+            y_label = app.data_fit_y_cb.currentText()
+        except (AttributeError, RuntimeError):
+            y_label = ""
+        return (
+            None,
+            ("__preview__", y_label),
+            y_label or "Preview",
+            x[:n],
+            y[:n],
+            (t[:n] if t.size else np.empty(0, dtype=float)),
+        )
+
+    tab._resolve_reference_curve_data = _resolve_reference_curve_data_patched
+
+
 def apply_patches() -> None:
     global _PATCHED
     if _PATCHED:
@@ -255,4 +369,5 @@ def apply_patches() -> None:
 
     tab._settings_to_preset = _settings_to_preset_patched
     tab._apply_preset = _apply_preset_patched
+    _patch_resolve_reference_curve_data(tab)
     _PATCHED = True
