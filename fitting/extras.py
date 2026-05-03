@@ -1100,6 +1100,35 @@ class FitPreset:
     auto_ec1_max_uv_per_cm: float = 1.0
     auto_ec2_max_uv_per_cm: float = 2.0
     auto_ec_target_r2: float = 0.995
+    # Channels group scale/offset inputs (displayed = raw * scale - offset).
+    time_scale: float = 1.0
+    time_offset: float = 0.0
+    x_scale: float = 1.0
+    x_offset: float = 0.0
+    y_scale: float = 1.0
+    y_offset: float = 0.0
+    # Step 1 — thermal offset subtraction.
+    subtract_vofs: bool = True
+    zero_i_frac_pct: float = 2.0
+    # Step 2 — trim noisy start and quench tail.
+    trim_start_abs: float = 30.0
+    trim_start_pct: float = 10.0
+    trim_quench: bool = True
+    # Step 3 — di/dt window editors and slope estimator.
+    show_didt: bool = False
+    didt_mode: str = "huber"
+    didt_low_x: str = ""
+    didt_high_x: str = ""
+    # Step 4 — linear baseline window editors and estimator mode.
+    show_linear: bool = False
+    baseline_mode: str = "huber"
+    linear_low_x: str = ""
+    linear_high_x: str = ""
+    # Step 5 — Ic / n-value window editors and weighting mode.
+    show_power: bool = False
+    weight_mode: str = "equal"
+    power_low_x: str = ""
+    power_high_x: str = ""
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:
