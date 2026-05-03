@@ -4291,13 +4291,11 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
     if not autosave_on and not force:
         return None
     src = Path(src_path)
-    save_separate = bool(
-        getattr(app, "data_fit_save_separate_cb", None) is not None
-        and app.data_fit_save_separate_cb.isChecked()
+    save_separate = _safe_checkbox_checked(
+        app, "data_fit_save_separate_cb", default=False,
     )
-    same_group = bool(
-        getattr(app, "data_fit_same_group_cb", None) is None
-        or app.data_fit_same_group_cb.isChecked()
+    same_group = _safe_checkbox_checked(
+        app, "data_fit_same_group_cb", default=True,
     )
     report_path = src.with_name(f"{src.stem}_fit_report.tdms") if save_separate else src
 
@@ -4966,16 +4964,26 @@ def _open_settings_dialog(app) -> None:
 
     root = QVBoxLayout(dialog)
 
+    # ``setVisible(True)`` is required because the close handler hides each
+    # checkbox before reparenting it back to ``app``. Without re-showing it
+    # here, the explicit-hidden flag set on close persists across reparenting
+    # and ``addWidget`` alone leaves the dialog visually empty on the second
+    # and subsequent opens. Mirror of the show/hide pair in
+    # ``_open_fit_config_dialog``.
     load_group = QGroupBox("Loading")
     load_layout = QVBoxLayout(load_group)
     load_layout.addWidget(app.data_fit_auto_load_cb)
+    app.data_fit_auto_load_cb.setVisible(True)
     root.addWidget(load_group)
 
     save_group = QGroupBox("Saving fit metadata")
     save_layout = QVBoxLayout(save_group)
     save_layout.addWidget(app.data_fit_autosave_cb)
+    app.data_fit_autosave_cb.setVisible(True)
     save_layout.addWidget(app.data_fit_save_separate_cb)
+    app.data_fit_save_separate_cb.setVisible(True)
     save_layout.addWidget(app.data_fit_same_group_cb)
+    app.data_fit_same_group_cb.setVisible(True)
     root.addWidget(save_group)
 
     # Re-evaluate dependency rules every time the dialog opens, in case the
@@ -6146,19 +6154,17 @@ def _fit_single_curve(app, entry: dict) -> None:
 
 
 def _settings_to_preset(app) -> FitPreset:
-    save_separate = bool(
-        getattr(app, "data_fit_save_separate_cb", None) is not None
-        and app.data_fit_save_separate_cb.isChecked()
+    save_separate = _safe_checkbox_checked(
+        app, "data_fit_save_separate_cb", default=False,
     )
-    same_group = bool(
-        getattr(app, "data_fit_same_group_cb", None) is None
-        or app.data_fit_same_group_cb.isChecked()
+    same_group = _safe_checkbox_checked(
+        app, "data_fit_same_group_cb", default=True,
     )
-    auto_load = bool(
-        _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=True)
+    auto_load = _safe_checkbox_checked(
+        app, "data_fit_auto_load_cb", default=True,
     )
-    autosave = bool(
-        _safe_checkbox_checked(app, "data_fit_autosave_cb", default=True)
+    autosave = _safe_checkbox_checked(
+        app, "data_fit_autosave_cb", default=True,
     )
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
