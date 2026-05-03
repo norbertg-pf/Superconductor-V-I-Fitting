@@ -85,22 +85,29 @@ _LAZY_TAB = {
 
 
 def _ensure_tab_patches_applied() -> None:
-    """Apply the ``_pct_anchor_patch`` wrappers to ``tab`` exactly once.
+    """Apply the runtime ``tab.py`` patches exactly once.
 
-    Anchors Step 3/4/5 fit windows to the untrimmed sweep and persists
-    ``linear_fit_window`` in TDMS metadata. Wrapping is done lazily so
-    headless ``service`` imports don't pull in Qt or pyqtgraph.
+    * ``_pct_anchor_patch`` anchors Step 3/4/5 fit windows to the untrimmed
+      sweep and persists ``linear_fit_window`` in TDMS metadata.
+    * ``_resample_patch`` removes the legacy "Resample everything to 100 S/s"
+      checkbox and forces ``_apply_resample_to_100sps`` to always run, so
+      every load converges on ~100 S/s without an opt-out.
+
+    Wrapping is done lazily so headless ``service`` imports don't pull in
+    Qt or pyqtgraph. Patch failures are swallowed — the worst case is the
+    original (unpatched) behaviour, never a crashed tab import.
     """
-    try:
-        from . import _pct_anchor_patch
-    except Exception:
-        return
-    try:
-        _pct_anchor_patch.apply_patches()
-    except Exception:
-        # Patch failures must not break tab import — fall back to the
-        # original (unpatched) behaviour rather than crashing the app.
-        pass
+    for module_name in ("_pct_anchor_patch", "_resample_patch"):
+        try:
+            module = __import__(
+                f"{__name__}.{module_name}", fromlist=[module_name]
+            )
+        except Exception:
+            continue
+        try:
+            module.apply_patches()
+        except Exception:
+            pass
 
 
 def __getattr__(name):
