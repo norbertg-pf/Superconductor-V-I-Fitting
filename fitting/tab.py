@@ -928,15 +928,13 @@ def _reset_data_fitting_defaults(app) -> None:
     _update_method_mode_ui(app)
     _refresh_curve_profile_selector(app)
     # Reset the Settings checkboxes to their defaults so a Clear gives the
-    # user a clean slate for the next session.
-    if hasattr(app, "data_fit_auto_load_cb"):
-        app.data_fit_auto_load_cb.setChecked(True)
-    if hasattr(app, "data_fit_autosave_cb"):
-        app.data_fit_autosave_cb.setChecked(True)
-    if hasattr(app, "data_fit_save_separate_cb"):
-        app.data_fit_save_separate_cb.setChecked(False)
-    if hasattr(app, "data_fit_same_group_cb"):
-        app.data_fit_same_group_cb.setChecked(True)
+    # user a clean slate for the next session. ``hasattr`` is not enough —
+    # the Python attribute can outlive its C++ QCheckBox after a Settings
+    # dialog round-trip, so use the safe setter that swallows RuntimeError.
+    _safe_checkbox_set_checked(app, "data_fit_auto_load_cb", True)
+    _safe_checkbox_set_checked(app, "data_fit_autosave_cb", True)
+    _safe_checkbox_set_checked(app, "data_fit_save_separate_cb", False)
+    _safe_checkbox_set_checked(app, "data_fit_same_group_cb", True)
     _refresh_save_settings_enabled(app)
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(False)
@@ -2321,6 +2319,23 @@ def _safe_checkbox_checked(app, attr_name: str, *, default: bool) -> bool:
         return bool(checkbox.isChecked())
     except RuntimeError:
         return bool(default)
+
+
+def _safe_checkbox_set_checked(app, attr_name: str, value: bool) -> None:
+    """Mirror of ``_safe_checkbox_checked`` for the write path.
+
+    ``hasattr`` and ``getattr`` return the stale Python wrapper even after
+    the underlying C++ QCheckBox has been deleted (e.g. when a Settings
+    dialog tore down its child widgets), so guarding writes also requires
+    catching RuntimeError from the actual setter call.
+    """
+    checkbox = getattr(app, attr_name, None)
+    if checkbox is None:
+        return
+    try:
+        checkbox.setChecked(bool(value))
+    except RuntimeError:
+        pass
 
 
 def open_file_dialog(app):
@@ -4923,10 +4938,14 @@ def _refresh_save_settings_enabled(app) -> None:
     same_group_cb = getattr(app, "data_fit_same_group_cb", None)
     if autosave_cb is None or save_separate_cb is None or same_group_cb is None:
         return
-    autosave_on = bool(autosave_cb.isChecked())
-    save_separate_on = bool(save_separate_cb.isChecked())
-    save_separate_cb.setEnabled(autosave_on)
-    same_group_cb.setEnabled(autosave_on and not save_separate_on)
+    # Stale C++ wrappers raise RuntimeError; bail out instead of crashing.
+    try:
+        autosave_on = bool(autosave_cb.isChecked())
+        save_separate_on = bool(save_separate_cb.isChecked())
+        save_separate_cb.setEnabled(autosave_on)
+        same_group_cb.setEnabled(autosave_on and not save_separate_on)
+    except RuntimeError:
+        return
 
 
 def _open_settings_dialog(app) -> None:
@@ -4970,7 +4989,29 @@ def _open_settings_dialog(app) -> None:
     button_row.addWidget(close_btn)
     root.addLayout(button_row)
 
-    dialog.exec_()
+    try:
+        dialog.exec_()
+    finally:
+        # Reparent the checkboxes back to ``app`` so they survive the
+        # dialog being garbage-collected. Without this, Qt destroys them
+        # as children of the dialog and any subsequent setChecked() on
+        # the cached attributes raises ``RuntimeError: wrapped C/C++
+        # object of type QCheckBox has been deleted`` (see the matching
+        # pattern in ``_open_fit_config_dialog``).
+        for attr_name in (
+            "data_fit_auto_load_cb",
+            "data_fit_autosave_cb",
+            "data_fit_save_separate_cb",
+            "data_fit_same_group_cb",
+        ):
+            cb = getattr(app, attr_name, None)
+            if cb is None:
+                continue
+            try:
+                cb.setParent(app)
+                cb.setVisible(False)
+            except RuntimeError:
+                pass
 
 
 def _save_metadata_clicked(app) -> None:
@@ -6185,22 +6226,22 @@ def _apply_preset(app, preset: FitPreset) -> None:
     else:
         app.data_fit_method_nonlinear_rb.setChecked(True)
     _update_method_mode_ui(app)
-    if hasattr(app, "data_fit_save_separate_cb"):
-        app.data_fit_save_separate_cb.setChecked(
-            bool(getattr(preset, "save_to_separate_tdms", False))
-        )
-    if hasattr(app, "data_fit_same_group_cb"):
-        app.data_fit_same_group_cb.setChecked(
-            bool(getattr(preset, "save_fit_in_same_group", True))
-        )
-    if hasattr(app, "data_fit_auto_load_cb"):
-        app.data_fit_auto_load_cb.setChecked(
-            bool(getattr(preset, "auto_load_after_acquisition", True))
-        )
-    if hasattr(app, "data_fit_autosave_cb"):
-        app.data_fit_autosave_cb.setChecked(
-            bool(getattr(preset, "autosave_fit_metadata", True))
-        )
+    _safe_checkbox_set_checked(
+        app, "data_fit_save_separate_cb",
+        bool(getattr(preset, "save_to_separate_tdms", False)),
+    )
+    _safe_checkbox_set_checked(
+        app, "data_fit_same_group_cb",
+        bool(getattr(preset, "save_fit_in_same_group", True)),
+    )
+    _safe_checkbox_set_checked(
+        app, "data_fit_auto_load_cb",
+        bool(getattr(preset, "auto_load_after_acquisition", True)),
+    )
+    _safe_checkbox_set_checked(
+        app, "data_fit_autosave_cb",
+        bool(getattr(preset, "autosave_fit_metadata", True)),
+    )
     if getattr(app, "data_fit_auto_ec_cb", None) is not None:
         cb = app.data_fit_auto_ec_cb
         cb.blockSignals(True)
