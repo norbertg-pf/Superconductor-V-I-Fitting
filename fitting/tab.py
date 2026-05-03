@@ -877,6 +877,8 @@ def _reset_data_fitting_defaults(app) -> None:
         app.data_fit_same_group_cb.setChecked(True)
     if hasattr(app, "data_fit_resample_100sps_cb"):
         app.data_fit_resample_100sps_cb.setChecked(True)
+    if hasattr(app, "data_fit_resample_target_input"):
+        _set_silently(app.data_fit_resample_target_input, "100")
     _refresh_save_settings_enabled(app)
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(False)
@@ -1055,15 +1057,24 @@ def setup_data_fitting_tab_layout(app):
         "(the layout depends on 'Use the same group/channel for fit metadata' below)."
     )
     app.data_fit_resample_100sps_cb = QCheckBox(
-        "Resample everything to 100 S/s"
+        "Resample everything to target rate"
     )
     app.data_fit_resample_100sps_cb.setChecked(True)
     app.data_fit_resample_100sps_cb.setToolTip(
         "Checked (default): when data arrives from a TDMS file, a current\n"
         "measurement, or any other source, the Plot summary 'Avg' value is\n"
-        "automatically set so the effective sample rate is ~100 S/s.\n"
+        "automatically set so the effective sample rate matches the target\n"
+        "rate (S/s) below.\n"
         "Unchecked: leave Avg at its previous value (no automatic resample)."
     )
+    app.data_fit_resample_target_input = QLineEdit("100")
+    app.data_fit_resample_target_input.setMaximumWidth(80)
+    app.data_fit_resample_target_input.setToolTip(
+        "Target effective sample rate (S/s) used by 'Resample everything to "
+        "target rate'. When the source data rate exceeds this value, the\n"
+        "Avg block-average factor is set to round the rate down to ~target."
+    )
+    app.data_fit_resample_target_label = QLabel("Target rate (S/s):")
     app.data_fit_same_group_cb = QCheckBox(
         "Use the same group/channel for fit metadata"
     )
@@ -2631,13 +2642,33 @@ def _format_rate(rate_hz: float) -> str:
     return f"{rate_hz:.3g} Hz"
 
 
+def _resample_target_sps(app, fallback: float = 100.0) -> float:
+    """Read the user-configurable target rate (S/s) for the resample feature.
+
+    Falls back to ``fallback`` when the widget is missing or holds an
+    invalid value, and clamps to a positive number so callers can divide
+    safely.
+    """
+    widget = getattr(app, "data_fit_resample_target_input", None)
+    if widget is None:
+        return fallback
+    try:
+        value = float(widget.text())
+    except (TypeError, ValueError, AttributeError, RuntimeError):
+        return fallback
+    if not np.isfinite(value) or value <= 0:
+        return fallback
+    return value
+
+
 def _apply_resample_to_100sps(app) -> None:
-    """When the Resample checkbox is on, set Avg so effective rate ~ 100 S/s.
+    """When the Resample checkbox is on, set Avg so effective rate ~ target.
 
     Computes the original sample rate from the loaded time channel and writes
-    ``data_fit_avg_input`` to ``round(orig_rate / 100)`` (clamped to >= 1).
-    Applied after any data load (TDMS file, current measurement, refresh) so
-    every data source converges on the same 100 S/s effective rate.
+    ``data_fit_avg_input`` to ``round(orig_rate / target)`` (clamped to >= 1),
+    where target is taken from ``data_fit_resample_target_input`` (default
+    100 S/s). Applied after any data load (TDMS file, current measurement,
+    refresh) so every data source converges on the same effective rate.
     """
     cb = getattr(app, "data_fit_resample_100sps_cb", None)
     avg_widget = getattr(app, "data_fit_avg_input", None)
@@ -2659,10 +2690,11 @@ def _apply_resample_to_100sps(app) -> None:
     if not np.isfinite(dt) or dt <= 0:
         return
     fs_orig = 1.0 / dt
-    if fs_orig <= 100.0:
+    target = _resample_target_sps(app)
+    if fs_orig <= target:
         avg_widget.setText("1")
         return
-    avg = max(1, int(round(fs_orig / 100.0)))
+    avg = max(1, int(round(fs_orig / target)))
     avg_widget.setText(str(avg))
 
 
@@ -4803,6 +4835,11 @@ def _open_settings_dialog(app) -> None:
     resample_group = QGroupBox("Resampling")
     resample_layout = QVBoxLayout(resample_group)
     resample_layout.addWidget(app.data_fit_resample_100sps_cb)
+    resample_target_row = QHBoxLayout()
+    resample_target_row.addWidget(app.data_fit_resample_target_label)
+    resample_target_row.addWidget(app.data_fit_resample_target_input)
+    resample_target_row.addStretch(1)
+    resample_layout.addLayout(resample_target_row)
     root.addWidget(resample_group)
 
     # Re-evaluate dependency rules every time the dialog opens, in case the
@@ -5987,6 +6024,7 @@ def _settings_to_preset(app) -> FitPreset:
         save_fit_in_same_group=same_group,
         auto_load_after_acquisition=auto_load,
         autosave_fit_metadata=autosave,
+        resample_target_sps=_resample_target_sps(app, fallback=100.0),
     )
 
 
@@ -6031,6 +6069,11 @@ def _apply_preset(app, preset: FitPreset) -> None:
         app.data_fit_autosave_cb.setChecked(
             bool(getattr(preset, "autosave_fit_metadata", True))
         )
+    if hasattr(app, "data_fit_resample_target_input"):
+        target = float(getattr(preset, "resample_target_sps", 100.0) or 100.0)
+        if target <= 0:
+            target = 100.0
+        _set_silently(app.data_fit_resample_target_input, f"{target:g}")
     # The four save-settings checkboxes drive each other's enabled state;
     # re-evaluate after every preset apply so the UI reflects the new values.
     _refresh_save_settings_enabled(app)
