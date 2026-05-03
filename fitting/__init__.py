@@ -83,22 +83,33 @@ _LAZY_TAB = {
 
 
 def _ensure_tab_patches_applied() -> None:
-    """Apply the ``_pct_anchor_patch`` wrappers to ``tab`` exactly once.
+    """Apply runtime ``tab`` wrappers exactly once.
 
-    Anchors Step 3/4/5 fit windows to the untrimmed sweep and persists
-    ``linear_fit_window`` in TDMS metadata. Wrapping is done lazily so
-    headless ``service`` imports don't pull in Qt or pyqtgraph.
+    * ``_pct_anchor_patch`` anchors Step 3/4/5 fit windows to the untrimmed
+      sweep and persists ``linear_fit_window`` in TDMS metadata.
+    * ``_auto_resample_patch`` pre-fills the AVG textbox so DAQUniversal
+      recordings above ~100 S/s resample down on load.
+
+    Wrapping is done lazily so headless ``service`` imports don't pull in
+    Qt or pyqtgraph.
     """
     try:
         from . import _pct_anchor_patch
     except Exception:
-        return
+        _pct_anchor_patch = None  # type: ignore[assignment]
     try:
-        _pct_anchor_patch.apply_patches()
+        from . import _auto_resample_patch
     except Exception:
-        # Patch failures must not break tab import — fall back to the
-        # original (unpatched) behaviour rather than crashing the app.
-        pass
+        _auto_resample_patch = None  # type: ignore[assignment]
+    for module in (_pct_anchor_patch, _auto_resample_patch):
+        if module is None:
+            continue
+        try:
+            module.apply_patches()
+        except Exception:
+            # Patch failures must not break tab import — fall back to the
+            # original (unpatched) behaviour rather than crashing the app.
+            pass
 
 
 def __getattr__(name):
