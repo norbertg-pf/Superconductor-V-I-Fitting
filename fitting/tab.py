@@ -1546,8 +1546,17 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_auto_target_r2_label, 4, 0)
     iter_layout.addWidget(app.data_fit_auto_target_r2, 4, 1)
     app.data_fit_auto_ec_cb.toggled.connect(
-        lambda _checked, a=app: _refresh_auto_ec_enabled(a)
+        lambda _checked, a=app: (
+            _refresh_auto_ec_enabled(a),
+            _save_active_curve_profile(a),
+        )
     )
+    for w in (
+        app.data_fit_auto_ec1_max,
+        app.data_fit_auto_ec2_max,
+        app.data_fit_auto_target_r2,
+    ):
+        w.editingFinished.connect(lambda a=app: _save_active_curve_profile(a))
     _refresh_auto_ec_enabled(app)
 
     iter_group.setVisible(False)
@@ -4422,7 +4431,14 @@ def run_fit(app):
         return np.isfinite(lo_v) and np.isfinite(hi_v) and hi_v > lo_v
 
     def _recompute_loglog_i_window_for_entry(result_obj, entry_obj, entry_settings_obj) -> None:
-        """Recompute IEC I-window for one fitted curve and persist to its profile."""
+        """Recompute IEC I-window for one fitted curve and persist to its profile.
+
+        When auto-Ec adjusted the decade window, the result's ``ec1``/``ec2``
+        differ from the user's entry on ``entry_settings_obj``. We re-use the
+        actually-fitted Ec1/Ec2 here so the I-window matches the fit, and
+        persist the new Ec1/Ec2 (in the displayed unit) into the profile so
+        the visible textboxes pick them up on the next profile reload.
+        """
         if getattr(result_obj, "fit_method", "") != FIT_METHOD_LOG_LOG:
             return
         x_raw = np.asarray(entry_obj.get("x", []), dtype=float)
@@ -4433,7 +4449,11 @@ def run_fit(app):
         x_arr = x_raw[:n]
         y_arr = y_raw[:n]
         y_corr = y_arr - (float(result_obj.V0) + float(result_obj.R) * x_arr)
-        y_sm = _adaptive_smooth_visual(y_corr, float(entry_settings_obj.ec1), float(entry_settings_obj.ec2))
+        # Prefer the values actually used by the fit (relevant when auto-Ec
+        # shifted them); fall back to the user's entry for non-auto runs.
+        ec1_used = float(getattr(result_obj, "ec1", 0.0)) or float(entry_settings_obj.ec1)
+        ec2_used = float(getattr(result_obj, "ec2", 0.0)) or float(entry_settings_obj.ec2)
+        y_sm = _adaptive_smooth_visual(y_corr, ec1_used, ec2_used)
 
         valid = np.isfinite(x_arr) & np.isfinite(y_sm) & (x_arr > 0)
         if not np.any(valid):
@@ -4443,8 +4463,8 @@ def run_fit(app):
         order = np.argsort(x_arr)
         x_arr = x_arr[order]
         y_sm = y_sm[order]
-        ec1 = max(float(entry_settings_obj.ec1), 1.0e-30)
-        ec2 = max(float(entry_settings_obj.ec2), ec1 * 1.000001)
+        ec1 = max(ec1_used, 1.0e-30)
+        ec2 = max(ec2_used, ec1 * 1.000001)
         x_min = float(np.min(x_arr))
         x_max = float(np.max(x_arr))
         span = max(0.0, x_max - x_min)
@@ -4465,6 +4485,10 @@ def run_fit(app):
         profile = dict(profiles.get(key, {})) if isinstance(profiles, dict) else {}
         profile["power_low_x"] = f"{x_lo:.6g}"
         profile["power_high_x"] = f"{x_hi:.6g}"
+        if bool(getattr(result_obj, "ec1_auto_adjusted", False)):
+            from_si = 1.0e6 if bool(getattr(result_obj, "uses_sample_length", False)) else 1.0e3
+            profile["loglog_low"] = f"{ec1_used * from_si:.6g}"
+            profile["loglog_high"] = f"{ec2_used * from_si:.6g}"
         if isinstance(profiles, dict):
             profiles[key] = profile
             app.data_fit_curve_profiles = profiles
@@ -4606,6 +4630,16 @@ def run_fit(app):
                     if hi_txt:
                         _set_silently(app.data_fit_power_high_x, hi_txt)
                     app.data_fit_power_window_manual = False
+                    # If auto-Ec moved the decade window, the per-entry
+                    # recompute saved the new Ec1/Ec2 into the active profile
+                    # under loglog_low/high — surface them in the visible
+                    # textboxes so the user sees what the algorithm chose.
+                    ec_lo_txt = str(active_profile.get("loglog_low", "")).strip()
+                    ec_hi_txt = str(active_profile.get("loglog_high", "")).strip()
+                    if ec_lo_txt:
+                        _set_silently(app.data_fit_power_low, ec_lo_txt)
+                    if ec_hi_txt:
+                        _set_silently(app.data_fit_power_vfrac, ec_hi_txt)
                 else:
                     n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
                     try:

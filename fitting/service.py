@@ -34,8 +34,8 @@ DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 # The user-supplied caps below define how far each end is allowed to move; the
 # IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
 DEFAULT_AUTO_EC_TARGET_R2 = 0.995
-DEFAULT_AUTO_EC1_MAX_V_PER_CM = 3.0e-7   # 0.3 µV/cm = 3× the IEC default Ec1
-DEFAULT_AUTO_EC2_MAX_V_PER_CM = 1.5e-6   # 1.5 µV/cm = 1.5× the IEC default Ec2
+DEFAULT_AUTO_EC1_MAX_V_PER_CM = 1.0e-6   # 1.0 µV/cm = 10× the IEC default Ec1
+DEFAULT_AUTO_EC2_MAX_V_PER_CM = 2.0e-6   # 2.0 µV/cm = 2× the IEC default Ec2
 AUTO_EC_MAX_ITERATIONS = 8
 AUTO_EC_REL_TOL = 0.05  # stop bisection when (k_hi/k_lo - 1) ≤ 5 %
 
