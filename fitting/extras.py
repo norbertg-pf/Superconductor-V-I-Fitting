@@ -1093,6 +1093,10 @@ class FitPreset:
     # written into the loaded TDMS as fit metadata. When False, fits run
     # silently and the user must press the Save metadata button to persist.
     autosave_fit_metadata: bool = True
+    # Target effective sample rate (S/s) used when the resample-on-load
+    # checkbox is on. The Avg block-average factor is set to round the
+    # source rate down to this target.
+    resample_target_sps: float = 100.0
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:
