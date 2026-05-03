@@ -16,6 +16,16 @@ import pyqtgraph as pg
 from . import tab as _tab
 from .extras import load_preset_from_file
 
+# The lazy ``__getattr__`` hook in ``fitting/__init__.py`` only triggers the
+# runtime patches (auto-resample, pct-anchor) when something accesses
+# ``fitting.<name>``. Standalone and DAQUniversal both import ``fitting.tab``
+# directly, which bypasses that hook — so apply the patches explicitly here.
+try:
+    from . import _ensure_tab_patches_applied as _apply_patches
+    _apply_patches()
+except Exception:
+    pass
+
 
 # Default preset file co-located with the standalone package. When present it
 # is loaded on startup so users get their saved Data Fitting parameters back
