@@ -29,8 +29,10 @@ import subprocess
 from pathlib import Path
 
 from .service import (
+    DEFAULT_RESAMPLE_TARGET_SPS,
     FitResult,
     FitSettings,
+    compute_resample_avg_window,
     robust_view_range,
     run_full_fit,
 )
@@ -111,9 +113,11 @@ def __getattr__(name):
 
 __all__ = [
     "BASE_VERSION",
+    "DEFAULT_RESAMPLE_TARGET_SPS",
     "FitResult",
     "FitSettings",
     "FALLBACK_BUILD_NUMBER",
+    "compute_resample_avg_window",
     "get_app_version_label",
     "robust_view_range",
     "run_full_fit",
