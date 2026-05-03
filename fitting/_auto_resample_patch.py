@@ -5,8 +5,7 @@ Why this lives in a separate module
 ``tab.py`` is large enough that re-uploading it through the GitHub Contents
 API is impractical (the file exceeds the per-call payload budget). The same
 behavioural change is applied by wrapping a small set of functions in
-``tab`` at import time. The wrappers honour the contract described in the
-surrounding commit message.
+``tab`` at import time.
 
 What it does
 ------------
@@ -20,12 +19,11 @@ auto-load), the patch:
    ``TARGET_EFFECTIVE_RATE_HZ``.
 2. Stamps the same factor onto every *replayed source curve* added by
    ``_replay_saved_fits_into_plot`` (the curves DAQUniversal hands to the tab
-   after a fit-enabled acquisition). The Plot summary dialog reads each
-   curve's ``avg_window`` field for its Avg column, so without this stamp
-   the column shows the hardcoded ``1`` even though the textbox is set
-   correctly.
-3. Block-averages the (t, x, y) arrays of those replayed curves so the
-   plotted samples match what Run Fit would see at the new factor.
+   after a fit-enabled acquisition) and block-averages their (t, x, y) so
+   plotted samples match Run Fit.
+3. Fixes the Plot summary dialog's preview row so its Avg column reflects
+   the active AVG factor instead of the hardcoded ``1`` literal that the
+   underlying ``_open_plot_summary`` function builds inline.
 
 How
 ---
@@ -38,6 +36,11 @@ How
    pre-fills the AVG textbox.
 3. Wrap ``_add_replayed_source_curve`` so each replayed curve picks up the
    active AVG factor and its (t, x, y) arrays are block-averaged.
+4. Wrap ``_open_plot_summary`` so a one-shot ``QTimer`` callback patches
+   the dialog's preview row to display ``_active_avg_window(app)`` instead
+   of ``1`` once the table has been built. The QTimer fires on Qt's event
+   loop while ``dialog.exec_()`` is blocking, so it runs while the dialog
+   is visible but before the user can interact with the row.
 
 Idempotent: safe to call ``apply_patches`` multiple times.
 """
@@ -120,9 +123,6 @@ def _auto_apply_target_rate_resampling(
     n = _avg_window_for_target_rate(rate_hz, target_hz)
     if n <= 1:
         return
-    # ``_set_silently`` blocks ``editingFinished`` so the curve-profile
-    # autosave doesn't fire mid-load and overwrite the freshly-reset
-    # profile with the auto-filled AVG.
     set_silently = getattr(_tab, "_set_silently", None)
     if set_silently is not None:
         set_silently(avg_input, str(int(n)))
@@ -161,10 +161,8 @@ def apply_patches() -> None:
     from . import tab as _tab
     _PATCHED = True
 
-    # 1) Clear the per-recording marker on every reset so that opening the
-    # *same* file again re-triggers auto-apply. ``_reset_data_fitting_defaults``
-    # also resets the AVG textbox back to "1", so by the time ``refresh_preview``
-    # runs inside ``_post_load_setup`` we are guaranteed a clean slate.
+    # 1) Clear the per-recording marker on every reset so re-loading the
+    # *same* file again re-triggers auto-apply.
     _orig_reset = _tab._reset_data_fitting_defaults
 
     def _patched_reset(app):
@@ -177,11 +175,8 @@ def apply_patches() -> None:
 
     _tab._reset_data_fitting_defaults = _patched_reset
 
-    # 2) Wrap ``refresh_preview`` so the *first* call after a reset (the one
-    # invoked from inside ``_post_load_setup`` once the controller has the
-    # recording loaded) pre-fills the AVG textbox. Subsequent calls for the
-    # same recording are left alone so user-edited values are not clobbered
-    # whenever a downstream interaction triggers another preview refresh.
+    # 2) Wrap ``refresh_preview`` so the first call after a reset pre-fills
+    # the AVG textbox before the underlying preview is rebuilt.
     _orig_refresh_preview = _tab.refresh_preview
 
     def _patched_refresh_preview(app):
@@ -198,11 +193,8 @@ def apply_patches() -> None:
 
     _tab.refresh_preview = _patched_refresh_preview
 
-    # 3) Wrap ``_add_replayed_source_curve`` so the replayed curves DAQUniversal
-    # hands to the tab after a fit-enabled acquisition pick up the active AVG
-    # factor (and have their plotted samples block-averaged to match). Without
-    # this, the Plot summary dialog's Avg column reads the hardcoded ``1`` from
-    # the entry even though the main AVG textbox now reads the auto-filled N.
+    # 3) Wrap ``_add_replayed_source_curve`` so replayed curves pick up
+    # the active AVG factor and have their plotted samples block-averaged.
     _orig_add_replayed = getattr(_tab, "_add_replayed_source_curve", None)
     _active_avg_window = getattr(_tab, "_active_avg_window", None)
     if _orig_add_replayed is not None and _active_avg_window is not None:
@@ -229,3 +221,71 @@ def apply_patches() -> None:
             return entry
 
         _tab._add_replayed_source_curve = _patched_add_replayed
+
+    # 4) Wrap ``_open_plot_summary`` so the dialog's preview row Avg column
+    # shows the active textbox value instead of the hardcoded ``1`` from
+    # the inline dict literal in ``_open_plot_summary``.
+    #
+    # We schedule a one-shot ``QTimer`` callback before invoking the
+    # original. The original calls ``dialog.exec_()`` which blocks but
+    # spins Qt's event loop — so the timer fires while the modal dialog
+    # is up and lets us locate the preview row's QLineEdit and rewrite
+    # its text to match ``_active_avg_window(app)``.
+    _orig_open_plot_summary = getattr(_tab, "_open_plot_summary", None)
+    if _orig_open_plot_summary is not None and _active_avg_window is not None:
+
+        def _patched_open_plot_summary(app):
+            try:
+                from PyQt5.QtCore import QTimer
+                from PyQt5.QtWidgets import (
+                    QApplication, QDialog, QLineEdit, QTableWidget,
+                )
+
+                def _fixup_preview_avg():
+                    try:
+                        # Only the active modal dialog is the one we just
+                        # opened; bail otherwise.
+                        dialog = QApplication.activeModalWidget()
+                        if not isinstance(dialog, QDialog):
+                            return
+                        if dialog.windowTitle() != "Plot summary":
+                            return
+                        if not getattr(app, "data_fit_preview_visible", True):
+                            return
+                        table = dialog.findChild(QTableWidget)
+                        if table is None or table.rowCount() == 0:
+                            return
+                        # The preview row is row 0 when the preview is
+                        # visible. The Avg column is index 3 (after Color,
+                        # Label, Skip pts).
+                        widget = table.cellWidget(0, 3)
+                        if not isinstance(widget, QLineEdit):
+                            return
+                        try:
+                            current_text = widget.text().strip()
+                        except Exception:
+                            return
+                        try:
+                            current_value = int(float(current_text))
+                        except (ValueError, TypeError):
+                            return
+                        # Only override if the dialog is still showing the
+                        # hardcoded ``1`` placeholder — leaving any user-
+                        # edited values alone.
+                        if current_value != 1:
+                            return
+                        try:
+                            active = max(1, int(_active_avg_window(app)))
+                        except Exception:
+                            return
+                        if active > 1:
+                            widget.setText(str(active))
+                    except Exception:
+                        pass
+
+                QTimer.singleShot(0, _fixup_preview_avg)
+            except Exception:
+                pass
+            return _orig_open_plot_summary(app)
+
+        _tab._open_plot_summary = _patched_open_plot_summary
