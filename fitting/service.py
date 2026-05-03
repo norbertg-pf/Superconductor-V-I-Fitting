@@ -143,6 +143,34 @@ class FitResult:
     avg_window: int = 1
 
 
+DEFAULT_RESAMPLE_TARGET_SPS = 100.0
+
+
+def compute_resample_avg_window(time_array, target_sps: float = DEFAULT_RESAMPLE_TARGET_SPS) -> int:
+    """Block-average window so the effective sample rate is ~``target_sps``.
+
+    Returns ``round(orig_rate / target_sps)`` clamped to >= 1. Returns 1 when
+    the original rate is already at or below the target, when the time array
+    is missing/too short, or when its diff is non-finite. Shared by the Data
+    Fitting tab's Resample-to-100-S/s helper and DAQUniversal's post-
+    acquisition auto-fit so both paths converge on the same Avg value.
+    """
+    if time_array is None:
+        return 1
+    arr = np.asarray(time_array, dtype=float)
+    if arr.size < 2:
+        return 1
+    dt = float(np.mean(np.diff(arr)))
+    if not np.isfinite(dt) or dt <= 0:
+        return 1
+    fs_orig = 1.0 / dt
+    if not np.isfinite(target_sps) or target_sps <= 0:
+        return 1
+    if fs_orig <= target_sps:
+        return 1
+    return max(1, int(round(fs_orig / target_sps)))
+
+
 def robust_view_range(values, low_pct: float = 1.0, high_pct: float = 99.0,
                       margin: float = 0.1) -> tuple[float, float]:
     """Percentile-based axis range that excludes a few outlier spikes."""
@@ -718,7 +746,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
     Step 4 fits y - V_ofs = V0 + R·I on the low-current baseline window.
     Step 5 fits Ic and n; default is the IEC 61788 log-log decade method
     (``settings.fit_method == FIT_METHOD_LOG_LOG``). The legacy coupled
-    non-linear fit of V = V0 + R·I + Vc·(I/Ic)^n remains available as
+    non-linear fit of V = V0 + R·I + Vc*(I/Ic)^n remains available as
     ``FIT_METHOD_NONLINEAR``.
     """
     settings = settings or FitSettings()
