@@ -13,24 +13,31 @@ What it does
 DAQUniversal acquisitions can run at kS/s, but the IEC 61788 log-log decade
 fit is calibrated around ~100 S/s. After the Data Fitting tab finishes
 loading a recording (via ``Use current measurement`` or the post-acquisition
-auto-load), the patch pre-fills the ``Plot summary AVG`` textbox with the
-smallest block-average factor that brings the effective rate down to
-``TARGET_EFFECTIVE_RATE_HZ`` so the loaded preview, the curves the user
-adds to the plot, and Run Fit all operate on the same resampled samples
-without the user having to type the factor by hand. The user can still
-override the auto-filled value afterwards.
+auto-load), the patch:
+
+1. Pre-fills the main AVG textbox (``data_fit_avg_input``) with the smallest
+   block-average factor that brings the effective rate down to
+   ``TARGET_EFFECTIVE_RATE_HZ``.
+2. Stamps the same factor onto every *replayed source curve* added by
+   ``_replay_saved_fits_into_plot`` (the curves DAQUniversal hands to the tab
+   after a fit-enabled acquisition). The Plot summary dialog reads each
+   curve's ``avg_window`` field for its Avg column, so without this stamp
+   the column shows the hardcoded ``1`` even though the textbox is set
+   correctly.
+3. Block-averages the (t, x, y) arrays of those replayed curves so the
+   plotted samples match what Run Fit would see at the new factor.
 
 How
 ---
 1. Wrap ``_reset_data_fitting_defaults`` to clear the per-recording marker
-   so that re-loading the same TDMS triggers a fresh auto-apply (the reset
+   so re-loading the same TDMS triggers a fresh auto-apply (the reset
    helper runs before every ``open_file_dialog`` /
    ``refresh_current_recording`` flow).
-2. Wrap ``refresh_preview`` so the first call that follows a reset (i.e.,
-   the one inside ``_post_load_setup``) computes the recording's sample
-   rate and writes the matching block-average factor into the AVG textbox
-   *before* the underlying preview is rebuilt. Subsequent refresh calls
-   for the same recording leave the user-edited value alone.
+2. Wrap ``refresh_preview`` so the first call after a reset (the one inside
+   ``_post_load_setup`` once the controller has the recording loaded)
+   pre-fills the AVG textbox.
+3. Wrap ``_add_replayed_source_curve`` so each replayed curve picks up the
+   active AVG factor and its (t, x, y) arrays are block-averaged.
 
 Idempotent: safe to call ``apply_patches`` multiple times.
 """
@@ -133,6 +140,19 @@ def _controller_path(app) -> str:
     return str(getattr(controller, "tdms_path", "") or "")
 
 
+def _block_average_safe(arr, window: int):
+    """Block-average ``arr`` with safety against ``None`` / zero-size inputs."""
+    if window <= 1 or arr is None:
+        return arr
+    a = np.asarray(arr, dtype=float)
+    if a.size == 0:
+        return a
+    n_bins = a.size // window
+    if n_bins == 0:
+        return a
+    return a[: n_bins * window].reshape(n_bins, window).mean(axis=1)
+
+
 def apply_patches() -> None:
     """Apply runtime patches to ``fitting.tab`` exactly once."""
     global _PATCHED
@@ -177,3 +197,35 @@ def apply_patches() -> None:
         return _orig_refresh_preview(app)
 
     _tab.refresh_preview = _patched_refresh_preview
+
+    # 3) Wrap ``_add_replayed_source_curve`` so the replayed curves DAQUniversal
+    # hands to the tab after a fit-enabled acquisition pick up the active AVG
+    # factor (and have their plotted samples block-averaged to match). Without
+    # this, the Plot summary dialog's Avg column reads the hardcoded ``1`` from
+    # the entry even though the main AVG textbox now reads the auto-filled N.
+    _orig_add_replayed = getattr(_tab, "_add_replayed_source_curve", None)
+    _active_avg_window = getattr(_tab, "_active_avg_window", None)
+    if _orig_add_replayed is not None and _active_avg_window is not None:
+
+        def _patched_add_replayed(app, name, x, y, t, meta, *, visible,
+                                  x_name="", x_meta=None):
+            try:
+                avg = max(1, int(_active_avg_window(app)))
+            except Exception:
+                avg = 1
+            if avg > 1:
+                x = _block_average_safe(x, avg)
+                y = _block_average_safe(y, avg)
+                t = _block_average_safe(t, avg)
+            entry = _orig_add_replayed(
+                app, name, x, y, t, meta,
+                visible=visible, x_name=x_name, x_meta=x_meta,
+            )
+            try:
+                if entry is not None and avg > 1:
+                    entry["avg_window"] = avg
+            except Exception:
+                pass
+            return entry
+
+        _tab._add_replayed_source_curve = _patched_add_replayed
