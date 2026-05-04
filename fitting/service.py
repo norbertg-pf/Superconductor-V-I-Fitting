@@ -33,7 +33,7 @@ DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 # escape a drifting baseline at one end or shot noise at the other. The
 # user-supplied min/max caps below define how far each end is allowed to move;
 # the IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
-DEFAULT_AUTO_EC_TARGET_R2 = 0.995
+DEFAULT_AUTO_EC_TARGET_R2 = 0.998
 DEFAULT_AUTO_EC1_MIN_V_PER_CM = 1.0e-7   # 0.1 µV/cm = the IEC default Ec1
 DEFAULT_AUTO_EC2_MIN_V_PER_CM = 1.0e-6   # 1.0 µV/cm = the IEC default Ec2
 DEFAULT_AUTO_EC1_MAX_V_PER_CM = 1.0e-6   # 1.0 µV/cm = 10× the IEC default Ec1
