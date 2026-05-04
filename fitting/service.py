@@ -29,10 +29,11 @@ DEFAULT_EC2_V_PER_CM = 5.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
 DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 
 # Auto-adjust Ec1/Ec2 defaults. When enabled, the IEC decade window is allowed
-# to slide both upward and downward (both ends scaled by the same factor k) to
-# escape a drifting baseline at one end or shot noise at the other. The
-# user-supplied min/max caps below define how far each end is allowed to move;
-# the IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
+# to slide both upward and downward as a unit (both ends scaled by the same
+# factor k, so Ec2/Ec1 stays at the IEC 10:1 ratio) to escape a drifting
+# baseline at one end or shot noise at the other. The user-supplied min/max
+# caps below define how far each end is allowed to move; the search reduces
+# the joint constraint to a 1D interval on Ec2.
 DEFAULT_AUTO_EC_TARGET_R2 = 0.998
 DEFAULT_AUTO_EC1_MIN_V_PER_CM = 1.0e-7   # 0.1 µV/cm = the IEC default Ec1
 DEFAULT_AUTO_EC2_MIN_V_PER_CM = 1.0e-6   # 1.0 µV/cm = the IEC default Ec2
@@ -41,6 +42,7 @@ DEFAULT_AUTO_EC2_MAX_V_PER_CM = 5.0e-6   # 5.0 µV/cm = 5× the IEC default Ec2
 AUTO_EC_MAX_ITERATIONS = 8
 AUTO_EC_REL_TOL = 0.05  # stop refinement when bracket width ≤ 5 %
 AUTO_EC_PROBES_PER_SIDE = 5  # log-spaced probes per scaling direction
+IEC_DECADE_RATIO = 10.0  # IEC 61788 fixes Ec2/Ec1 = 10 (one decade)
 
 # Fraction of Imax below which samples are considered part of the quiescent
 # "I = 0" segment used to estimate the thermal offset V_ofs (Step 1).
@@ -787,29 +789,32 @@ def auto_adjust_loglog_window(
     max_iterations: int = AUTO_EC_MAX_ITERATIONS,
     rel_tol: float = AUTO_EC_REL_TOL,
 ) -> tuple[tuple, float, float, int, bool]:
-    """Independently optimize Ec1 and Ec2 to maximize R² of the log-log fit.
+    """Slide the IEC decade window to maximize R² while preserving Ec2/Ec1 = 10.
 
-    Ec1 and Ec2 are searched INDEPENDENTLY within their configured bounds —
-    ``Ec1 ∈ [ec1_min, ec1_max]`` and ``Ec2 ∈ [ec2_min, ec2_max]`` — so the
-    chosen window converges toward the same globally-best fit regardless of
-    the user-entered starting values. The constraint ``Ec2 > Ec1`` is always
-    enforced (with a small safety margin so the n-value polyfit stays
-    well-conditioned).
+    The decade ratio mandated by IEC 61788 (``Ec2 = 10·Ec1``) is held fixed
+    so the auto-adjusted window remains a true decade fit and the reported
+    Ic / n stay comparable to a standard IEC measurement. Only the absolute
+    position of the pair is varied: a single scale factor moves both ends
+    together. Ic is reported at ``Ec2`` regardless of where the window
+    lands, so the criterion definition shifts with the window — this is
+    intentional and reflected in the saved ``Ec1``, ``Ec2`` properties.
 
-    Strategy: a coarse 2D log-spaced grid over the ``[ec1_min, ec1_max]
-    × [ec2_min, ec2_max]`` rectangle, followed by alternating golden-section
-    refinement on each axis (coordinate descent) around the grid winner.
-    Each evaluation is a cheap polyfit, so the whole search finishes in well
-    under a second on real data.
+    Bounds: the search is carried out in ``Ec2`` space, with the feasible
+    range derived from the intersection of the two user-supplied caps:
 
-    Returns ``(loglog_result, ec1_used, ec2_used, n_evals, target_met)``
-    where ``loglog_result`` is the eight-tuple from
-    :func:`fit_n_value_log_log`. ``target_met=False`` indicates the best
-    achievable R² inside the configured bounds is still below ``target_r2``;
-    in that case the returned (Ec1, Ec2) are the global-best candidate.
+        Ec2 ∈ [max(ec2_min, R·ec1_min), min(ec2_max, R·ec1_max)]
+
+    where ``R = IEC_DECADE_RATIO``. ``Ec1`` is then ``Ec2/R``. If the caps
+    are incompatible the function falls back to evaluating the user's
+    starting pair.
+
+    Strategy: a coarse log-spaced 1D grid over Ec2 followed by golden-
+    section refinement.
+
+    Returns ``(loglog_result, ec1_used, ec2_used, n_evals, target_met)``.
     """
-    GRID_N = 5
-    MIN_RATIO = 3  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
+    GRID_N = 7
+    R_RATIO = float(IEC_DECADE_RATIO)
     phi = (1.0 + 5.0 ** 0.5) / 2.0
 
     def _eval(e1: float, e2: float):
@@ -821,24 +826,27 @@ def auto_adjust_loglog_window(
             weight_mode=weight_mode,
         )
 
-    # Effective bounds. When a bound is missing fall back to the user's
-    # input on that side so the search degenerates gracefully.
-    e1_lo = float(ec1_min) if (ec1_min is not None and ec1_min > 0) else float(ec1)
-    e1_hi = float(ec1_max) if (ec1_max is not None and ec1_max > 0) else float(ec1)
-    e2_lo = float(ec2_min) if (ec2_min is not None and ec2_min > 0) else float(ec2)
-    e2_hi = float(ec2_max) if (ec2_max is not None and ec2_max > 0) else float(ec2)
+    # Translate the per-end caps into a single feasible interval on Ec2.
+    # When a cap is missing, the only constraint on that side is the
+    # starting pair itself, so the search collapses gracefully.
+    e1_lo = float(ec1_min) if (ec1_min is not None and ec1_min > 0) else float(ec1) / R_RATIO
+    e1_hi = float(ec1_max) if (ec1_max is not None and ec1_max > 0) else float(ec1) / R_RATIO
+    e2_lo_cap = float(ec2_min) if (ec2_min is not None and ec2_min > 0) else float(ec2)
+    e2_hi_cap = float(ec2_max) if (ec2_max is not None and ec2_max > 0) else float(ec2)
     if e1_hi < e1_lo:
         e1_hi = e1_lo
-    if e2_hi < e2_lo:
-        e2_hi = e2_lo
-    e1_lo = max(e1_lo, 1.0e-30)
-    e2_lo = max(e2_lo, 1.0e-30)
+    if e2_hi_cap < e2_lo_cap:
+        e2_hi_cap = e2_lo_cap
+
+    e2_lo = max(e2_lo_cap, R_RATIO * max(e1_lo, 1.0e-30))
+    e2_hi = min(e2_hi_cap, R_RATIO * max(e1_hi, 1.0e-30))
 
     n_evals = 0
 
-    def _try(e1: float, e2: float) -> Optional[tuple]:
+    def _try_e2(e2: float) -> Optional[tuple]:
         nonlocal n_evals
-        if e2 <= e1 * MIN_RATIO:
+        e1 = e2 / R_RATIO
+        if not (e2 > 0 and e1 > 0):
             return None
         try:
             r = _eval(e1, e2)
@@ -847,108 +855,67 @@ def auto_adjust_loglog_window(
         n_evals += 1
         return r
 
-    # Anchor the search with the user's starting (Ec1, Ec2). If the start is
-    # already a good fit there's no need for further work.
-    base = _try(float(ec1), float(ec2))
-    samples: list[tuple[float, float, tuple]] = []
+    # Anchor on the user's Ec2 (snapped onto the IEC ratio: Ec1 := Ec2/R).
+    # If the starting pair already meets the target there's no need for a
+    # search.
+    start_e2 = float(ec2)
+    base = _try_e2(start_e2)
+    samples: list[tuple[float, tuple]] = []
     if base is not None:
-        samples.append((float(ec1), float(ec2), base))
+        samples.append((start_e2, base))
         if base[7] >= target_r2:
-            return base, float(ec1), float(ec2), n_evals, True
+            return base, start_e2 / R_RATIO, start_e2, n_evals, True
 
-    # Coarse 2D log-spaced grid.
-    e1_grid = (np.geomspace(e1_lo, e1_hi, GRID_N)
-               if e1_hi > e1_lo * 1.001 else np.array([e1_lo]))
-    e2_grid = (np.geomspace(e2_lo, e2_hi, GRID_N)
-               if e2_hi > e2_lo * 1.001 else np.array([e2_lo]))
-    for e1 in e1_grid:
-        for e2 in e2_grid:
-            r = _try(float(e1), float(e2))
-            if r is not None:
-                samples.append((float(e1), float(e2), r))
+    if not (e2_hi > e2_lo):
+        # Caps inconsistent with the 10:1 ratio — return the snapped pair.
+        if base is None:
+            base = _eval(start_e2 / R_RATIO, start_e2)
+            n_evals += 1
+        return base, start_e2 / R_RATIO, start_e2, n_evals, base[7] >= target_r2
+
+    # Coarse 1D log-spaced sweep over the feasible Ec2 interval.
+    if e2_hi > e2_lo * 1.001:
+        e2_grid = np.geomspace(e2_lo, e2_hi, GRID_N)
+    else:
+        e2_grid = np.array([0.5 * (e2_lo + e2_hi)])
+    for e2 in e2_grid:
+        r = _try_e2(float(e2))
+        if r is not None:
+            samples.append((float(e2), r))
 
     if not samples:
-        # Last resort: re-evaluate the user's input so the caller gets a
-        # meaningful exception instead of an empty result.
-        base = _eval(float(ec1), float(ec2))
+        base = _eval(start_e2 / R_RATIO, start_e2)
         n_evals += 1
-        return base, float(ec1), float(ec2), n_evals, base[7] >= target_r2
+        return base, start_e2 / R_RATIO, start_e2, n_evals, base[7] >= target_r2
 
-    # Pick the global-best R² on the coarse grid as the refinement seed.
-    best_e1, best_e2, best_result = max(samples, key=lambda s: s[2][7])
+    best_e2, best_result = max(samples, key=lambda s: s[1][7])
 
-    # Coordinate descent with golden-section search in log space on each
-    # axis. Two passes is enough to settle on a smooth R² surface.
-    def _gss_axis(fixed_other: float, lo: float, hi: float, vary_ec1: bool,
-                  current_best: tuple[float, tuple]) -> tuple[float, tuple]:
-        """Maximize R² over the varying axis in [lo, hi] (log-space GSS)."""
-        nonlocal n_evals
-        if hi <= lo * 1.001:
-            return current_best
-        a = float(np.log(lo))
-        b = float(np.log(hi))
-        best_val, best_r = current_best
-        for _ in range(min(max(max_iterations, 1), 5)):
+    # Golden-section refinement in log(Ec2) inside the feasible interval.
+    if e2_hi > e2_lo * 1.001:
+        a = float(np.log(e2_lo))
+        b = float(np.log(e2_hi))
+        for _ in range(min(max(max_iterations, 1), 8)):
             c = b - (b - a) / phi
             d = a + (b - a) / phi
             ec_c = float(np.exp(c))
             ec_d = float(np.exp(d))
-            if vary_ec1:
-                pair_c = (ec_c, fixed_other)
-                pair_d = (ec_d, fixed_other)
-                feasible_c = fixed_other > ec_c * MIN_RATIO
-                feasible_d = fixed_other > ec_d * MIN_RATIO
-            else:
-                pair_c = (fixed_other, ec_c)
-                pair_d = (fixed_other, ec_d)
-                feasible_c = ec_c > fixed_other * MIN_RATIO
-                feasible_d = ec_d > fixed_other * MIN_RATIO
-            if not (feasible_c and feasible_d):
-                # Bracket reaches the Ec2>Ec1 constraint; shrink it.
-                if vary_ec1:
-                    if not feasible_d:
-                        b = d
-                    if not feasible_c:
-                        a = c
-                else:
-                    if not feasible_c:
-                        a = c
-                    if not feasible_d:
-                        b = d
-                if (b - a) < rel_tol:
-                    break
-                continue
-            try:
-                rc = _eval(*pair_c); n_evals += 1
-                rd = _eval(*pair_d); n_evals += 1
-            except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            rc = _try_e2(ec_c)
+            rd = _try_e2(ec_d)
+            if rc is None or rd is None:
                 break
             if rc[7] > rd[7]:
                 b = d
-                if rc[7] > best_r[7]:
-                    best_val, best_r = ec_c, rc
+                if rc[7] > best_result[7]:
+                    best_e2, best_result = ec_c, rc
             else:
                 a = c
-                if rd[7] > best_r[7]:
-                    best_val, best_r = ec_d, rd
+                if rd[7] > best_result[7]:
+                    best_e2, best_result = ec_d, rd
             if (b - a) < rel_tol:
                 break
-        return best_val, best_r
 
-    for _ in range(2):
-        prev_r2 = best_result[7]
-        new_e1, new_result = _gss_axis(best_e2, e1_lo, e1_hi, True,
-                                       (best_e1, best_result))
-        if new_result[7] > best_result[7]:
-            best_e1, best_result = new_e1, new_result
-        new_e2, new_result = _gss_axis(best_e1, e2_lo, e2_hi, False,
-                                       (best_e2, best_result))
-        if new_result[7] > best_result[7]:
-            best_e2, best_result = new_e2, new_result
-        if best_result[7] - prev_r2 < 1.0e-6:
-            break
-
-    return best_result, float(best_e1), float(best_e2), n_evals, best_result[7] >= target_r2
+    return (best_result, float(best_e2 / R_RATIO), float(best_e2),
+            n_evals, best_result[7] >= target_r2)
 
 
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
