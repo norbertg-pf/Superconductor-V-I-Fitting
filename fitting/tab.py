@@ -891,7 +891,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
     if getattr(app, "data_fit_auto_ec_cb", None) is not None:
-        app.data_fit_auto_ec_cb.setChecked(True)
+        app.data_fit_auto_ec_cb.setChecked(False)
     if getattr(app, "data_fit_auto_ec1_min", None) is not None:
         app.data_fit_auto_ec1_min.setText(f"{DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6:g}")
     if getattr(app, "data_fit_auto_ec2_min", None) is not None:
@@ -1522,7 +1522,7 @@ def setup_data_fitting_tab_layout(app):
     # whenever the log-log R² is below the target. Useful when baseline drift
     # contaminates the lower end of the n-value window.
     app.data_fit_auto_ec_cb = QCheckBox("Auto-adjust Ec1/Ec2 to target R²")
-    app.data_fit_auto_ec_cb.setChecked(True)
+    app.data_fit_auto_ec_cb.setChecked(False)
     app.data_fit_auto_ec_cb.setToolTip(
         "When the log-log fit's R² is below the target, slide the IEC\n"
         "decade window [Ec1, Ec2] upward to escape baseline drift. Both\n"
@@ -2218,7 +2218,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
     auto_target_r2 = _profile_text_float(
         profile, "auto_target_r2", DEFAULT_AUTO_EC_TARGET_R2,
     )
-    auto_ec_adjust = bool(profile.get("auto_ec_adjust", True))
+    auto_ec_adjust = bool(profile.get("auto_ec_adjust", False))
 
     return FitSettings(
         didt_low_frac=_profile_text_float(profile, "didt_low", DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
@@ -6337,7 +6337,7 @@ def _apply_preset(app, preset: FitPreset) -> None:
     )
     if getattr(app, "data_fit_auto_ec_cb", None) is not None:
         cb = app.data_fit_auto_ec_cb
-        cb.blockSignals(True)
+        cb.blockSignals(False)
         try:
             cb.setChecked(bool(getattr(preset, "auto_ec_adjust", True)))
         finally:

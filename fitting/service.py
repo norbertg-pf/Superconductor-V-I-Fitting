@@ -63,7 +63,7 @@ DEFAULT_WEIGHT_MODE = WEIGHT_MODE_WEIGHTED
 # weighted / robust mode. The weight of a point grows linearly in log-E from
 # 1 (at Ec1) to (1 + TRANSITION_WEIGHT_GAIN) (at Ec2), so the cleaner upper
 # part of the n-value window dominates the fit and the reported R².
-TRANSITION_WEIGHT_GAIN = 2.0
+TRANSITION_WEIGHT_GAIN = 1.0
 
 # Step-4 baseline fitting mode identifiers.
 BASELINE_MODE_OLS = "ols"
@@ -809,7 +809,7 @@ def auto_adjust_loglog_window(
     in that case the returned (Ec1, Ec2) are the global-best candidate.
     """
     GRID_N = 5
-    MIN_RATIO = 3  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
+    MIN_RATIO = 10  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
     phi = (1.0 + 5.0 ** 0.5) / 2.0
 
     def _eval(e1: float, e2: float):
