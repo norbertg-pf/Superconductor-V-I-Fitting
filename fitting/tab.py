@@ -907,7 +907,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_linear_low.setText(f"{DEFAULT_LINEAR_LOW_FRAC * 100:.2f}")
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
     if getattr(app, "data_fit_auto_ec_cb", None) is not None:
-        app.data_fit_auto_ec_cb.setChecked(True)
+        app.data_fit_auto_ec_cb.setChecked(False)
     if getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is not None:
         app.data_fit_auto_ec_lock_ratio_cb.setChecked(False)
     if getattr(app, "data_fit_auto_ec1_min", None) is not None:
