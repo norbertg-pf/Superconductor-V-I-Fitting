@@ -701,9 +701,22 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     log_Ic = (log_crit - intercept) / n_val
     Ic_at_crit = float(10.0 ** log_Ic)
     model_log_E = intercept + n_val * log_I
-    chi_sqr = float(np.sum((log_E - model_log_E) ** 2))
-    ss_tot = float(np.sum((log_E - np.mean(log_E)) ** 2))
-    r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
+    residuals = log_E - model_log_E
+    chi_sqr = float(np.sum(residuals ** 2))
+    # Weighted R² when inverse-variance weights are in play: down-weights
+    # noisy Ec1-end points whose σ_log dwarfs the signal, so the metric
+    # tracks fit quality across the cleaner transition instead of being
+    # dragged down by the baseline-dominated low end. Reduces to the standard
+    # unweighted R² when w ≡ 1 (equal-weight mode).
+    w_sum = float(np.sum(w))
+    if w_sum > 0:
+        log_E_mean_w = float(np.sum(w * log_E) / w_sum)
+        ss_res_w = float(np.sum(w * residuals ** 2))
+        ss_tot_w = float(np.sum(w * (log_E - log_E_mean_w) ** 2))
+        r_squared = float(1.0 - ss_res_w / ss_tot_w) if ss_tot_w > 0 else 0.0
+    else:
+        ss_tot = float(np.sum((log_E - np.mean(log_E)) ** 2))
+        r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
     # Uncertainty in log10(Ic) from propagation through
     # log_Ic = (log_crit - intercept) / slope.
     d_by_intercept = -1.0 / n_val
