@@ -101,12 +101,16 @@ class FitSettings:
     ec1: float = DEFAULT_EC1_V_PER_CM
     ec2: float = DEFAULT_EC2_V_PER_CM
     # Auto-adjust the IEC decade window when R² of the log-log fit falls below
-    # ``auto_ec_target_r2``. Both ends are scaled by the same factor so the
-    # decade ratio Ec2/Ec1 = 10 (per IEC 61788) is preserved. The window may
-    # slide either upward (capped by ``auto_ec1_max``/``auto_ec2_max``) or
-    # downward (floored by ``auto_ec1_min``/``auto_ec2_min``). ``None`` on a
-    # bound disables the search in that direction.
+    # ``auto_ec_target_r2``. When ``auto_ec_lock_iec_ratio`` is True (default,
+    # IEC 61788-compliant) both ends are scaled by the same factor so the
+    # decade ratio Ec2/Ec1 = 10 is preserved. When False, Ec1 and Ec2 are
+    # searched independently within their caps (legacy behaviour, useful when
+    # the data does not support a full decade window). The window may slide
+    # either upward (capped by ``auto_ec1_max``/``auto_ec2_max``) or downward
+    # (floored by ``auto_ec1_min``/``auto_ec2_min``). ``None`` on a bound
+    # disables the search in that direction.
     auto_ec_adjust: bool = False
+    auto_ec_lock_iec_ratio: bool = True
     auto_ec1_min: Optional[float] = None
     auto_ec2_min: Optional[float] = None
     auto_ec1_max: Optional[float] = None
@@ -786,8 +790,58 @@ def auto_adjust_loglog_window(
     ec1_max: Optional[float],
     ec2_max: Optional[float],
     target_r2: float,
+    lock_iec_ratio: bool = True,
     max_iterations: int = AUTO_EC_MAX_ITERATIONS,
     rel_tol: float = AUTO_EC_REL_TOL,
+) -> tuple[tuple, float, float, int, bool]:
+    """Auto-adjust the log-log decade window to maximize R².
+
+    Two search modes are available, selected by ``lock_iec_ratio``:
+
+    * ``True`` (default, IEC 61788-compliant): the pair slides as a unit
+      with ``Ec2/Ec1 = 10`` held fixed. See
+      :func:`_auto_adjust_loglog_window_iec_ratio`.
+    * ``False`` (legacy): ``Ec1`` and ``Ec2`` are searched independently
+      within their caps with only a 3:1 minimum ratio. See
+      :func:`_auto_adjust_loglog_window_independent`.
+
+    Returns ``(loglog_result, ec1_used, ec2_used, n_evals, target_met)``.
+    """
+    if lock_iec_ratio:
+        return _auto_adjust_loglog_window_iec_ratio(
+            x, y, V0=V0, R=R, ec1=ec1, ec2=ec2,
+            criterion_E=criterion_E, point_sigma=point_sigma,
+            weight_mode=weight_mode,
+            ec1_min=ec1_min, ec2_min=ec2_min,
+            ec1_max=ec1_max, ec2_max=ec2_max,
+            target_r2=target_r2,
+            max_iterations=max_iterations, rel_tol=rel_tol,
+        )
+    return _auto_adjust_loglog_window_independent(
+        x, y, V0=V0, R=R, ec1=ec1, ec2=ec2,
+        criterion_E=criterion_E, point_sigma=point_sigma,
+        weight_mode=weight_mode,
+        ec1_min=ec1_min, ec2_min=ec2_min,
+        ec1_max=ec1_max, ec2_max=ec2_max,
+        target_r2=target_r2,
+        max_iterations=max_iterations, rel_tol=rel_tol,
+    )
+
+
+def _auto_adjust_loglog_window_iec_ratio(
+    x: np.ndarray, y: np.ndarray, *,
+    V0: float, R: float,
+    ec1: float, ec2: float,
+    criterion_E: float,
+    point_sigma: Optional[np.ndarray],
+    weight_mode: str,
+    ec1_min: Optional[float],
+    ec2_min: Optional[float],
+    ec1_max: Optional[float],
+    ec2_max: Optional[float],
+    target_r2: float,
+    max_iterations: int,
+    rel_tol: float,
 ) -> tuple[tuple, float, float, int, bool]:
     """Slide the IEC decade window to maximize R² while preserving Ec2/Ec1 = 10.
 
@@ -807,11 +861,6 @@ def auto_adjust_loglog_window(
     where ``R = IEC_DECADE_RATIO``. ``Ec1`` is then ``Ec2/R``. If the caps
     are incompatible the function falls back to evaluating the user's
     starting pair.
-
-    Strategy: a coarse log-spaced 1D grid over Ec2 followed by golden-
-    section refinement.
-
-    Returns ``(loglog_result, ec1_used, ec2_used, n_evals, target_met)``.
     """
     GRID_N = 7
     R_RATIO = float(IEC_DECADE_RATIO)
@@ -916,6 +965,165 @@ def auto_adjust_loglog_window(
 
     return (best_result, float(best_e2 / R_RATIO), float(best_e2),
             n_evals, best_result[7] >= target_r2)
+
+
+def _auto_adjust_loglog_window_independent(
+    x: np.ndarray, y: np.ndarray, *,
+    V0: float, R: float,
+    ec1: float, ec2: float,
+    criterion_E: float,
+    point_sigma: Optional[np.ndarray],
+    weight_mode: str,
+    ec1_min: Optional[float],
+    ec2_min: Optional[float],
+    ec1_max: Optional[float],
+    ec2_max: Optional[float],
+    target_r2: float,
+    max_iterations: int,
+    rel_tol: float,
+) -> tuple[tuple, float, float, int, bool]:
+    """Independently optimise Ec1 and Ec2 to maximize R² (legacy mode).
+
+    Ec1 and Ec2 are searched within their separate caps with only a 3:1
+    minimum ratio enforced. The resulting window may deviate from the IEC
+    61788 decade definition, so Ic / n are no longer directly comparable
+    to a standard IEC measurement — useful when the data does not support
+    a full decade window (high noise floor, short voltage taps).
+
+    Strategy: a coarse 2D log-spaced grid over the
+    ``[ec1_min, ec1_max] × [ec2_min, ec2_max]`` rectangle, followed by
+    alternating golden-section refinement on each axis (coordinate
+    descent) around the grid winner.
+    """
+    GRID_N = 5
+    MIN_RATIO = 3  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
+    phi = (1.0 + 5.0 ** 0.5) / 2.0
+
+    def _eval(e1: float, e2: float):
+        return fit_n_value_log_log(
+            x, y, V0=V0, R=R,
+            Ec1=float(e1), Ec2=float(e2),
+            criterion_E=criterion_E,
+            point_sigma=point_sigma,
+            weight_mode=weight_mode,
+        )
+
+    e1_lo = float(ec1_min) if (ec1_min is not None and ec1_min > 0) else float(ec1)
+    e1_hi = float(ec1_max) if (ec1_max is not None and ec1_max > 0) else float(ec1)
+    e2_lo = float(ec2_min) if (ec2_min is not None and ec2_min > 0) else float(ec2)
+    e2_hi = float(ec2_max) if (ec2_max is not None and ec2_max > 0) else float(ec2)
+    if e1_hi < e1_lo:
+        e1_hi = e1_lo
+    if e2_hi < e2_lo:
+        e2_hi = e2_lo
+    e1_lo = max(e1_lo, 1.0e-30)
+    e2_lo = max(e2_lo, 1.0e-30)
+
+    n_evals = 0
+
+    def _try(e1: float, e2: float) -> Optional[tuple]:
+        nonlocal n_evals
+        if e2 <= e1 * MIN_RATIO:
+            return None
+        try:
+            r = _eval(e1, e2)
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            return None
+        n_evals += 1
+        return r
+
+    base = _try(float(ec1), float(ec2))
+    samples: list[tuple[float, float, tuple]] = []
+    if base is not None:
+        samples.append((float(ec1), float(ec2), base))
+        if base[7] >= target_r2:
+            return base, float(ec1), float(ec2), n_evals, True
+
+    e1_grid = (np.geomspace(e1_lo, e1_hi, GRID_N)
+               if e1_hi > e1_lo * 1.001 else np.array([e1_lo]))
+    e2_grid = (np.geomspace(e2_lo, e2_hi, GRID_N)
+               if e2_hi > e2_lo * 1.001 else np.array([e2_lo]))
+    for e1 in e1_grid:
+        for e2 in e2_grid:
+            r = _try(float(e1), float(e2))
+            if r is not None:
+                samples.append((float(e1), float(e2), r))
+
+    if not samples:
+        base = _eval(float(ec1), float(ec2))
+        n_evals += 1
+        return base, float(ec1), float(ec2), n_evals, base[7] >= target_r2
+
+    best_e1, best_e2, best_result = max(samples, key=lambda s: s[2][7])
+
+    def _gss_axis(fixed_other: float, lo: float, hi: float, vary_ec1: bool,
+                  current_best: tuple[float, tuple]) -> tuple[float, tuple]:
+        nonlocal n_evals
+        if hi <= lo * 1.001:
+            return current_best
+        a = float(np.log(lo))
+        b = float(np.log(hi))
+        best_val, best_r = current_best
+        for _ in range(min(max(max_iterations, 1), 5)):
+            c = b - (b - a) / phi
+            d = a + (b - a) / phi
+            ec_c = float(np.exp(c))
+            ec_d = float(np.exp(d))
+            if vary_ec1:
+                pair_c = (ec_c, fixed_other)
+                pair_d = (ec_d, fixed_other)
+                feasible_c = fixed_other > ec_c * MIN_RATIO
+                feasible_d = fixed_other > ec_d * MIN_RATIO
+            else:
+                pair_c = (fixed_other, ec_c)
+                pair_d = (fixed_other, ec_d)
+                feasible_c = ec_c > fixed_other * MIN_RATIO
+                feasible_d = ec_d > fixed_other * MIN_RATIO
+            if not (feasible_c and feasible_d):
+                if vary_ec1:
+                    if not feasible_d:
+                        b = d
+                    if not feasible_c:
+                        a = c
+                else:
+                    if not feasible_c:
+                        a = c
+                    if not feasible_d:
+                        b = d
+                if (b - a) < rel_tol:
+                    break
+                continue
+            try:
+                rc = _eval(*pair_c); n_evals += 1
+                rd = _eval(*pair_d); n_evals += 1
+            except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                break
+            if rc[7] > rd[7]:
+                b = d
+                if rc[7] > best_r[7]:
+                    best_val, best_r = ec_c, rc
+            else:
+                a = c
+                if rd[7] > best_r[7]:
+                    best_val, best_r = ec_d, rd
+            if (b - a) < rel_tol:
+                break
+        return best_val, best_r
+
+    for _ in range(2):
+        prev_r2 = best_result[7]
+        new_e1, new_result = _gss_axis(best_e2, e1_lo, e1_hi, True,
+                                       (best_e1, best_result))
+        if new_result[7] > best_result[7]:
+            best_e1, best_result = new_e1, new_result
+        new_e2, new_result = _gss_axis(best_e1, e2_lo, e2_hi, False,
+                                       (best_e2, best_result))
+        if new_result[7] > best_result[7]:
+            best_e2, best_result = new_e2, new_result
+        if best_result[7] - prev_r2 < 1.0e-6:
+            break
+
+    return best_result, float(best_e1), float(best_e2), n_evals, best_result[7] >= target_r2
 
 
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
@@ -1027,6 +1235,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                         ec1_max=settings.auto_ec1_max,
                         ec2_max=settings.auto_ec2_max,
                         target_r2=settings.auto_ec_target_r2,
+                        lock_iec_ratio=getattr(
+                            settings, "auto_ec_lock_iec_ratio", True),
                     )
                 )
             except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:

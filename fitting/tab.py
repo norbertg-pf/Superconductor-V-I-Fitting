@@ -272,6 +272,11 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_auto_ec_cb", None) is not None
             else False
         ),
+        "auto_ec_lock_iec_ratio": (
+            app.data_fit_auto_ec_lock_ratio_cb.isChecked()
+            if getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is not None
+            else True
+        ),
         "auto_ec1_min": (
             app.data_fit_auto_ec1_min.text()
             if getattr(app, "data_fit_auto_ec1_min", None) is not None
@@ -425,6 +430,16 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         finally:
             cb.blockSignals(False)
         _refresh_auto_ec_enabled(app)
+    if (
+        "auto_ec_lock_iec_ratio" in profile
+        and getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is not None
+    ):
+        cb = app.data_fit_auto_ec_lock_ratio_cb
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(bool(profile["auto_ec_lock_iec_ratio"]))
+        finally:
+            cb.blockSignals(False)
     if "weight_mode" in profile and getattr(app, "data_fit_weight_mode_cb", None) is not None:
         idx = app.data_fit_weight_mode_cb.findData(profile["weight_mode"])
         if idx < 0:
@@ -802,6 +817,7 @@ def _refresh_auto_ec_enabled(app) -> None:
         "data_fit_auto_ec1_max",
         "data_fit_auto_ec2_max",
         "data_fit_auto_target_r2",
+        "data_fit_auto_ec_lock_ratio_cb",
         "data_fit_auto_ec1_min_label",
         "data_fit_auto_ec2_min_label",
         "data_fit_auto_ec1_max_label",
@@ -892,6 +908,8 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
     if getattr(app, "data_fit_auto_ec_cb", None) is not None:
         app.data_fit_auto_ec_cb.setChecked(True)
+    if getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is not None:
+        app.data_fit_auto_ec_lock_ratio_cb.setChecked(True)
     if getattr(app, "data_fit_auto_ec1_min", None) is not None:
         app.data_fit_auto_ec1_min.setText(f"{DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6:g}")
     if getattr(app, "data_fit_auto_ec2_min", None) is not None:
@@ -1559,6 +1577,17 @@ def setup_data_fitting_tab_layout(app):
         "Target R² for the log-log fit. The smallest decade-window shift\n"
         "that achieves this R² is selected. Typical values: 0.99–0.999."
     )
+    app.data_fit_auto_ec_lock_ratio_cb = QCheckBox("Lock Ec2/Ec1 = 10 (IEC decade)")
+    app.data_fit_auto_ec_lock_ratio_cb.setChecked(True)
+    app.data_fit_auto_ec_lock_ratio_cb.setToolTip(
+        "When checked (recommended), the auto-adjust search keeps the IEC\n"
+        "61788 decade ratio Ec2/Ec1 = 10 fixed and slides the pair as a\n"
+        "unit, so the fit remains a true decade fit and Ic / n stay\n"
+        "comparable to a standard IEC measurement.\n\n"
+        "When unchecked, Ec1 and Ec2 are searched independently within\n"
+        "their min/max caps (legacy mode). Useful only when the data\n"
+        "cannot support a full decade window."
+    )
     app.data_fit_auto_ec1_min_label = QLabel("Ec1 min (µV/cm)")
     app.data_fit_auto_ec2_min_label = QLabel("Ec2 min (µV/cm)")
     app.data_fit_auto_ec1_max_label = QLabel("Ec1 max (µV/cm)")
@@ -1575,11 +1604,15 @@ def setup_data_fitting_tab_layout(app):
     iter_layout.addWidget(app.data_fit_auto_ec2_max, 4, 3)
     iter_layout.addWidget(app.data_fit_auto_target_r2_label, 5, 0)
     iter_layout.addWidget(app.data_fit_auto_target_r2, 5, 1)
+    iter_layout.addWidget(app.data_fit_auto_ec_lock_ratio_cb, 5, 2, 1, 2)
     app.data_fit_auto_ec_cb.toggled.connect(
         lambda _checked, a=app: (
             _refresh_auto_ec_enabled(a),
             _save_active_curve_profile(a),
         )
+    )
+    app.data_fit_auto_ec_lock_ratio_cb.toggled.connect(
+        lambda _checked, a=app: _save_active_curve_profile(a)
     )
     for w in (
         app.data_fit_auto_ec1_min,
@@ -2034,6 +2067,10 @@ def _settings_from_inputs(app) -> FitSettings:
         getattr(app, "data_fit_auto_ec_cb", None) is not None
         and app.data_fit_auto_ec_cb.isChecked()
     )
+    auto_ec_lock_iec_ratio = bool(
+        getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is None
+        or app.data_fit_auto_ec_lock_ratio_cb.isChecked()
+    )
     auto_ec1_min = _float_from(
         getattr(app, "data_fit_auto_ec1_min", None),
         DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6,
@@ -2219,6 +2256,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         profile, "auto_target_r2", DEFAULT_AUTO_EC_TARGET_R2,
     )
     auto_ec_adjust = bool(profile.get("auto_ec_adjust", True))
+    auto_ec_lock_iec_ratio = bool(profile.get("auto_ec_lock_iec_ratio", True))
 
     return FitSettings(
         didt_low_frac=_profile_text_float(profile, "didt_low", DEFAULT_DIDT_LOW_FRAC * 100, as_fraction=True),
@@ -2236,6 +2274,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         ec1=ec1,
         ec2=ec2,
         auto_ec_adjust=auto_ec_adjust,
+        auto_ec_lock_iec_ratio=auto_ec_lock_iec_ratio,
         auto_ec1_min=auto_ec1_min,
         auto_ec2_min=auto_ec2_min,
         auto_ec1_max=auto_ec1_max,
@@ -6269,6 +6308,10 @@ def _settings_to_preset(app) -> FitPreset:
             getattr(app, "data_fit_auto_ec_cb", None) is not None
             and app.data_fit_auto_ec_cb.isChecked()
         ),
+        auto_ec_lock_iec_ratio=bool(
+            getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is None
+            or app.data_fit_auto_ec_lock_ratio_cb.isChecked()
+        ),
         auto_ec1_min_uv_per_cm=_float_from(
             getattr(app, "data_fit_auto_ec1_min", None),
             DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6,
@@ -6338,6 +6381,13 @@ def _apply_preset(app, preset: FitPreset) -> None:
         cb.blockSignals(True)
         try:
             cb.setChecked(bool(getattr(preset, "auto_ec_adjust", True)))
+        finally:
+            cb.blockSignals(False)
+    if getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is not None:
+        cb = app.data_fit_auto_ec_lock_ratio_cb
+        cb.blockSignals(True)
+        try:
+            cb.setChecked(bool(getattr(preset, "auto_ec_lock_iec_ratio", True)))
         finally:
             cb.blockSignals(False)
     if getattr(app, "data_fit_auto_ec1_min", None) is not None:

@@ -1097,6 +1097,10 @@ class FitPreset:
     # µV/cm so the JSON preset is human-readable; the service converts to V/cm
     # at runtime based on whether sample-length normalisation is active.
     auto_ec_adjust: bool = True
+    # When True (recommended), the auto-adjust search keeps Ec2/Ec1 = 10 fixed
+    # so the window is always a true IEC 61788 decade. When False, Ec1 and Ec2
+    # are searched independently within their caps (legacy mode).
+    auto_ec_lock_iec_ratio: bool = True
     auto_ec1_min_uv_per_cm: float = 0.1
     auto_ec2_min_uv_per_cm: float = 1.0
     auto_ec1_max_uv_per_cm: float = 1.0
