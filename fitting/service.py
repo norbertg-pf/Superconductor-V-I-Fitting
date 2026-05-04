@@ -29,15 +29,18 @@ DEFAULT_EC2_V_PER_CM = 5.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
 DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 
 # Auto-adjust Ec1/Ec2 defaults. When enabled, the IEC decade window is allowed
-# to slide upward (both ends scaled by the same factor k ≥ 1) to escape a
-# drifting baseline that contaminates the lower end of the n-value window.
-# The user-supplied caps below define how far each end is allowed to move; the
-# IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
+# to slide both upward and downward (both ends scaled by the same factor k) to
+# escape a drifting baseline at one end or shot noise at the other. The
+# user-supplied min/max caps below define how far each end is allowed to move;
+# the IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
 DEFAULT_AUTO_EC_TARGET_R2 = 0.995
+DEFAULT_AUTO_EC1_MIN_V_PER_CM = 1.0e-7   # 0.1 µV/cm = the IEC default Ec1
+DEFAULT_AUTO_EC2_MIN_V_PER_CM = 1.0e-6   # 1.0 µV/cm = the IEC default Ec2
 DEFAULT_AUTO_EC1_MAX_V_PER_CM = 1.0e-6   # 1.0 µV/cm = 10× the IEC default Ec1
 DEFAULT_AUTO_EC2_MAX_V_PER_CM = 5.0e-6   # 5.0 µV/cm = 5× the IEC default Ec2
 AUTO_EC_MAX_ITERATIONS = 8
-AUTO_EC_REL_TOL = 0.05  # stop bisection when (k_hi/k_lo - 1) ≤ 5 %
+AUTO_EC_REL_TOL = 0.05  # stop refinement when bracket width ≤ 5 %
+AUTO_EC_PROBES_PER_SIDE = 5  # log-spaced probes per scaling direction
 
 # Fraction of Imax below which samples are considered part of the quiescent
 # "I = 0" segment used to estimate the thermal offset V_ofs (Step 1).
@@ -97,10 +100,13 @@ class FitSettings:
     ec2: float = DEFAULT_EC2_V_PER_CM
     # Auto-adjust the IEC decade window when R² of the log-log fit falls below
     # ``auto_ec_target_r2``. Both ends are scaled by the same factor so the
-    # decade ratio Ec2/Ec1 = 10 (per IEC 61788) is preserved; the upward range
-    # is capped by ``auto_ec1_max`` and ``auto_ec2_max``. None disables the cap
-    # for that end (effectively forbids auto-adjust on that side).
+    # decade ratio Ec2/Ec1 = 10 (per IEC 61788) is preserved. The window may
+    # slide either upward (capped by ``auto_ec1_max``/``auto_ec2_max``) or
+    # downward (floored by ``auto_ec1_min``/``auto_ec2_min``). ``None`` on a
+    # bound disables the search in that direction.
     auto_ec_adjust: bool = False
+    auto_ec1_min: Optional[float] = None
+    auto_ec2_min: Optional[float] = None
     auto_ec1_max: Optional[float] = None
     auto_ec2_max: Optional[float] = None
     auto_ec_target_r2: float = DEFAULT_AUTO_EC_TARGET_R2
@@ -773,35 +779,36 @@ def auto_adjust_loglog_window(
     criterion_E: float,
     point_sigma: Optional[np.ndarray],
     weight_mode: str,
+    ec1_min: Optional[float] = None,
+    ec2_min: Optional[float] = None,
     ec1_max: Optional[float],
     ec2_max: Optional[float],
     target_r2: float,
     max_iterations: int = AUTO_EC_MAX_ITERATIONS,
     rel_tol: float = AUTO_EC_REL_TOL,
 ) -> tuple[tuple, float, int, bool]:
-    """Slide the IEC decade window until R² ≥ ``target_r2``.
+    """Slide the IEC decade window in either direction until R² ≥ ``target_r2``.
 
     Both Ec1 and Ec2 are multiplied by the same factor ``k`` so the decade
-    ratio Ec2/Ec1 stays fixed at the value the caller passed in (typically 10,
-    per IEC 61788). ``k`` is bounded above by the smaller of
-    ``ec1_max/ec1`` and ``ec2_max/ec2``; either bound being ``None`` is
-    treated as no cap from that side. When the user-supplied ``ec1``/``ec2``
-    already exceeds its cap, the window is first clamped down (k < 1) to
-    satisfy the cap; further upward search is disabled in that case because
-    the cap is already binding.
+    ratio Ec2/Ec1 stays fixed (typically 10, per IEC 61788). ``k`` is bounded
+    above by ``min(ec1_max/ec1, ec2_max/ec2)`` and below by
+    ``max(ec1_min/ec1, ec2_min/ec2)``; ``None`` on a bound disables the
+    search in that direction. When the user-supplied ``ec1``/``ec2`` falls
+    outside the configured envelope, the window is first clamped to the
+    nearest bound so the configured caps are honoured.
 
-    Strategy: a coarse log-spaced probe on ``k`` to bracket the smallest k
-    that meets the target, then geometric bisection to refine. Total fit
-    evaluations are bounded by ``max_iterations + 6``; each evaluation is a
-    cheap polyfit, so the whole thing finishes in well under a second on
-    real data.
+    Strategy: a log-spaced probe grid covering both downward and upward
+    directions, then refinement around the candidate with the smallest log-k
+    perturbation that meets the target. When the target is unreachable, a
+    short golden-section search around the best probe squeezes out the best
+    achievable R² rather than returning a coarse-grid sample.
 
     Returns ``(loglog_result, k, n_evals, target_met)`` where
     ``loglog_result`` is the eight-tuple returned by
     :func:`fit_n_value_log_log` and ``k`` is the multiplicative factor that
-    was applied to the input ``ec1``/``ec2``. When the target is unreachable
-    within the allowed range, the best-R² candidate is returned with
-    ``target_met=False`` so the caller can surface a warning.
+    was applied to the input ``ec1``/``ec2``. ``target_met=False`` is
+    returned together with the best-R² candidate when the target is
+    unreachable within the allowed range.
     """
 
     def _eval(k: float):
@@ -815,9 +822,9 @@ def auto_adjust_loglog_window(
 
     n_evals = 0
 
-    # Compute the upper bound on k from each configured cap. When a cap is
-    # binding from above (ec1 > ec1_max or ec2 > ec2_max) the resulting
-    # k_cap is < 1 and the window must be scaled down to satisfy it.
+    # Upper bound on k from each configured maximum (binding values are the
+    # smallest such ratio). Lower bound on k from each configured minimum
+    # (binding values are the largest such ratio).
     k_caps: list[float] = []
     if ec1 > 0 and ec1_max is not None and ec1_max > 0:
         k_caps.append(float(ec1_max) / float(ec1))
@@ -825,18 +832,27 @@ def auto_adjust_loglog_window(
         k_caps.append(float(ec2_max) / float(ec2))
     k_max = min(k_caps) if k_caps else float("inf")
 
-    # User entered Ec1/Ec2 above the configured maximum: clamp down (preserving
-    # the IEC decade ratio) so the fit honours the cap from the Fit config.
-    # Auto-adjust only slides upward to escape baseline drift, so once we've
-    # clamped to the cap there is no further headroom to search.
+    k_floors: list[float] = []
+    if ec1 > 0 and ec1_min is not None and ec1_min > 0:
+        k_floors.append(float(ec1_min) / float(ec1))
+    if ec2 > 0 and ec2_min is not None and ec2_min > 0:
+        k_floors.append(float(ec2_min) / float(ec2))
+    k_min = max(k_floors) if k_floors else 0.0
+
+    # Honour out-of-envelope user input by clamping to the nearest bound.
     if k_max < 1.0 - 1.0e-9:
         try:
             clamped = _eval(k_max)
             n_evals += 1
             return clamped, k_max, n_evals, clamped[7] >= target_r2
         except (ValueError, RuntimeError, np.linalg.LinAlgError):
-            # Clamped window leaves no usable points; fall through to the
-            # un-clamped fit so the caller surfaces a meaningful error.
+            pass
+    if k_min > 1.0 + 1.0e-9:
+        try:
+            clamped = _eval(k_min)
+            n_evals += 1
+            return clamped, k_min, n_evals, clamped[7] >= target_r2
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
             pass
 
     base = _eval(1.0)
@@ -844,53 +860,116 @@ def auto_adjust_loglog_window(
     if base[7] >= target_r2:
         return base, 1.0, n_evals, True
 
-    if not k_caps or k_max <= 1.0 + 1.0e-9:
+    has_upward = np.isfinite(k_max) and k_max > 1.0 + 1.0e-9
+    has_downward = k_min > 0.0 and k_min < 1.0 - 1.0e-9
+    if not has_upward and not has_downward:
         return base, 1.0, n_evals, False
 
-    # Coarse log-spaced probe (5 candidates between 1 and k_max, exclusive of 1
-    # since base already covers it).
-    probe_count = 5
-    probes = list(np.geomspace(1.0, k_max, probe_count + 1))[1:]
     samples: list[tuple[float, tuple]] = [(1.0, base)]
-    for k in probes:
-        try:
-            r = _eval(float(k))
-        except (ValueError, RuntimeError, np.linalg.LinAlgError):
-            # Window outran the data; everything above this k is also infeasible.
-            break
-        n_evals += 1
-        samples.append((float(k), r))
-
-    hits = [(k, r) for k, r in samples if r[7] >= target_r2]
-    if not hits:
-        # Target never met; return the best R² we observed.
-        best = max(samples, key=lambda kr: kr[1][7])
-        return best[1], best[0], n_evals, False
-
-    # Smallest k that hit the target → upper bracket. Largest k below it that
-    # missed the target → lower bracket. (Lower bracket may be 1.0.)
-    k_hi, hi_result = hits[0]
-    below = [(k, r) for k, r in samples if k < k_hi]
-    k_lo = below[-1][0] if below else 1.0
-
-    # Geometric bisection refines until the relative width of the bracket is
-    # below ``rel_tol`` or we hit the iteration cap.
-    iters = 0
-    while iters < max_iterations and (k_hi / max(k_lo, 1e-12) - 1.0) > rel_tol:
-        k_mid = float(np.sqrt(k_lo * k_hi))
-        try:
-            mid = _eval(k_mid)
+    if has_upward:
+        upward = list(np.geomspace(1.0, k_max, AUTO_EC_PROBES_PER_SIDE + 1))[1:]
+        for k in upward:
+            try:
+                r = _eval(float(k))
+            except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                break
             n_evals += 1
-            if mid[7] >= target_r2:
-                k_hi, hi_result = k_mid, mid
-            else:
-                k_lo = k_mid
-        except (ValueError, RuntimeError, np.linalg.LinAlgError):
-            # Infeasible mid-window → must be too high; shrink the upper end.
-            k_hi = k_mid
-        iters += 1
+            samples.append((float(k), r))
+    if has_downward:
+        downward = list(np.geomspace(1.0, k_min, AUTO_EC_PROBES_PER_SIDE + 1))[1:]
+        for k in downward:
+            try:
+                r = _eval(float(k))
+            except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                break
+            n_evals += 1
+            samples.append((float(k), r))
 
-    return hi_result, k_hi, n_evals, True
+    samples.sort(key=lambda kr: kr[0])
+    hits = [(k, r) for k, r in samples if r[7] >= target_r2]
+    if hits:
+        # Pick the hit with smallest |log k| so the chosen window stays as
+        # close to the user-entered Ec1/Ec2 as possible.
+        hits.sort(key=lambda kr: abs(np.log(kr[0])) if kr[0] > 0 else float("inf"))
+        k_hit, hit_result = hits[0]
+        if abs(np.log(k_hit)) < 1.0e-9:
+            return hit_result, 1.0, n_evals, True
+
+        # Refine: bisect between k_hit and the nearest non-hit on the side
+        # toward k=1 to nudge k as close to 1 as possible while still hitting
+        # the target.
+        if k_hit > 1.0:
+            below = [(k, r) for k, r in samples if k < k_hit and r[7] < target_r2]
+            k_lo = below[-1][0] if below else 1.0
+            k_hi, hi_result = k_hit, hit_result
+            iters = 0
+            while iters < max_iterations and (k_hi / max(k_lo, 1e-12) - 1.0) > rel_tol:
+                k_mid = float(np.sqrt(k_lo * k_hi))
+                try:
+                    mid = _eval(k_mid)
+                    n_evals += 1
+                    if mid[7] >= target_r2:
+                        k_hi, hi_result = k_mid, mid
+                    else:
+                        k_lo = k_mid
+                except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                    k_hi = k_mid
+                iters += 1
+            return hi_result, k_hi, n_evals, True
+        else:
+            above = [(k, r) for k, r in samples if k > k_hit and r[7] < target_r2]
+            k_hi = above[0][0] if above else 1.0
+            k_lo, lo_result = k_hit, hit_result
+            iters = 0
+            while iters < max_iterations and (k_hi / max(k_lo, 1e-12) - 1.0) > rel_tol:
+                k_mid = float(np.sqrt(k_lo * k_hi))
+                try:
+                    mid = _eval(k_mid)
+                    n_evals += 1
+                    if mid[7] >= target_r2:
+                        k_lo, lo_result = k_mid, mid
+                    else:
+                        k_hi = k_mid
+                except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                    k_hi = k_mid
+                iters += 1
+            return lo_result, k_lo, n_evals, True
+
+    # Target never met across the searched range. Refine around the best
+    # probe using golden-section search in log-k so the returned fit is the
+    # best achievable rather than the coarsest probe sample.
+    best_idx = max(range(len(samples)), key=lambda i: samples[i][1][7])
+    best_k, best_result = samples[best_idx]
+    k_left = samples[best_idx - 1][0] if best_idx > 0 else best_k
+    k_right = samples[best_idx + 1][0] if best_idx < len(samples) - 1 else best_k
+    if k_right <= k_left + 1.0e-12:
+        return best_result, best_k, n_evals, False
+
+    phi = (1.0 + 5.0 ** 0.5) / 2.0
+    a = float(np.log(k_left))
+    b = float(np.log(k_right))
+    iters = 0
+    refine_budget = max(1, max_iterations // 2)
+    while iters < refine_budget and (b - a) > rel_tol:
+        c = b - (b - a) / phi
+        d = a + (b - a) / phi
+        try:
+            rc = _eval(float(np.exp(c)))
+            n_evals += 1
+            rd = _eval(float(np.exp(d)))
+            n_evals += 1
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            break
+        if rc[7] > rd[7]:
+            b = d
+            if rc[7] > best_result[7]:
+                best_result, best_k = rc, float(np.exp(c))
+        else:
+            a = c
+            if rd[7] > best_result[7]:
+                best_result, best_k = rd, float(np.exp(d))
+        iters += 1
+    return best_result, best_k, n_evals, best_result[7] >= target_r2
 
 
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
@@ -997,6 +1076,8 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                         criterion_E=crit_for_ic,
                         point_sigma=point_sigma,
                         weight_mode=weight_mode,
+                        ec1_min=settings.auto_ec1_min,
+                        ec2_min=settings.auto_ec2_min,
                         ec1_max=settings.auto_ec1_max,
                         ec2_max=settings.auto_ec2_max,
                         target_r2=settings.auto_ec_target_r2,
