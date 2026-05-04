@@ -809,7 +809,7 @@ def auto_adjust_loglog_window(
     in that case the returned (Ec1, Ec2) are the global-best candidate.
     """
     GRID_N = 5
-    MIN_RATIO = 1.5  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
+    MIN_RATIO = 3  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
     phi = (1.0 + 5.0 ** 0.5) / 2.0
 
     def _eval(e1: float, e2: float):
