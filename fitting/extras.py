@@ -1098,7 +1098,7 @@ class FitPreset:
     # at runtime based on whether sample-length normalisation is active.
     auto_ec_adjust: bool = False
     auto_ec1_max_uv_per_cm: float = 1.0
-    auto_ec2_max_uv_per_cm: float = 2.0
+    auto_ec2_max_uv_per_cm: float = 5.0
     auto_ec_target_r2: float = 0.995
     # Channels group scale/offset inputs (displayed = raw * scale - offset).
     time_scale: float = 1.0

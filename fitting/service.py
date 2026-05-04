@@ -35,7 +35,7 @@ DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 # IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
 DEFAULT_AUTO_EC_TARGET_R2 = 0.995
 DEFAULT_AUTO_EC1_MAX_V_PER_CM = 1.0e-6   # 1.0 µV/cm = 10× the IEC default Ec1
-DEFAULT_AUTO_EC2_MAX_V_PER_CM = 2.0e-6   # 2.0 µV/cm = 2× the IEC default Ec2
+DEFAULT_AUTO_EC2_MAX_V_PER_CM = 5.0e-6   # 5.0 µV/cm = 5× the IEC default Ec2
 AUTO_EC_MAX_ITERATIONS = 8
 AUTO_EC_REL_TOL = 0.05  # stop bisection when (k_hi/k_lo - 1) ≤ 5 %
 
@@ -749,13 +749,16 @@ def auto_adjust_loglog_window(
     max_iterations: int = AUTO_EC_MAX_ITERATIONS,
     rel_tol: float = AUTO_EC_REL_TOL,
 ) -> tuple[tuple, float, int, bool]:
-    """Slide the IEC decade window upward until R² ≥ ``target_r2``.
+    """Slide the IEC decade window until R² ≥ ``target_r2``.
 
     Both Ec1 and Ec2 are multiplied by the same factor ``k`` so the decade
     ratio Ec2/Ec1 stays fixed at the value the caller passed in (typically 10,
     per IEC 61788). ``k`` is bounded above by the smaller of
     ``ec1_max/ec1`` and ``ec2_max/ec2``; either bound being ``None`` is
-    treated as no cap from that side.
+    treated as no cap from that side. When the user-supplied ``ec1``/``ec2``
+    already exceeds its cap, the window is first clamped down (k < 1) to
+    satisfy the cap; further upward search is disabled in that case because
+    the cap is already binding.
 
     Strategy: a coarse log-spaced probe on ``k`` to bracket the smallest k
     that meets the target, then geometric bisection to refine. Total fit
@@ -781,20 +784,37 @@ def auto_adjust_loglog_window(
         )
 
     n_evals = 0
+
+    # Compute the upper bound on k from each configured cap. When a cap is
+    # binding from above (ec1 > ec1_max or ec2 > ec2_max) the resulting
+    # k_cap is < 1 and the window must be scaled down to satisfy it.
+    k_caps: list[float] = []
+    if ec1 > 0 and ec1_max is not None and ec1_max > 0:
+        k_caps.append(float(ec1_max) / float(ec1))
+    if ec2 > 0 and ec2_max is not None and ec2_max > 0:
+        k_caps.append(float(ec2_max) / float(ec2))
+    k_max = min(k_caps) if k_caps else float("inf")
+
+    # User entered Ec1/Ec2 above the configured maximum: clamp down (preserving
+    # the IEC decade ratio) so the fit honours the cap from the Fit config.
+    # Auto-adjust only slides upward to escape baseline drift, so once we've
+    # clamped to the cap there is no further headroom to search.
+    if k_max < 1.0 - 1.0e-9:
+        try:
+            clamped = _eval(k_max)
+            n_evals += 1
+            return clamped, k_max, n_evals, clamped[7] >= target_r2
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            # Clamped window leaves no usable points; fall through to the
+            # un-clamped fit so the caller surfaces a meaningful error.
+            pass
+
     base = _eval(1.0)
     n_evals += 1
     if base[7] >= target_r2:
         return base, 1.0, n_evals, True
 
-    k_caps: list[float] = []
-    if ec1 > 0 and ec1_max is not None and ec1_max > ec1:
-        k_caps.append(float(ec1_max) / float(ec1))
-    if ec2 > 0 and ec2_max is not None and ec2_max > ec2:
-        k_caps.append(float(ec2_max) / float(ec2))
-    if not k_caps:
-        return base, 1.0, n_evals, False
-    k_max = min(k_caps)
-    if k_max <= 1.0 + 1.0e-9:
+    if not k_caps or k_max <= 1.0 + 1.0e-9:
         return base, 1.0, n_evals, False
 
     # Coarse log-spaced probe (5 candidates between 1 and k_max, exclusive of 1
