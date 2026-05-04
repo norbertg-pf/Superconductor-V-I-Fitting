@@ -19,7 +19,7 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from nptdms import ChannelObject, GroupObject, TdmsFile, TdmsWriter
+from nptdms import ChannelObject, GroupObject, RootObject, TdmsFile, TdmsWriter
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
@@ -4201,10 +4201,14 @@ def _write_fit_report_same_group(report_path: Path,
     if not report_path.exists():
         return None
     try:
+        existing_root: Optional[RootObject] = None
         existing_groups: list[GroupObject] = []
         existing_channels: list[ChannelObject] = []
         unmatched: dict[str, dict] = dict(new_entries)
         with TdmsFile.read(str(report_path)) as tfile:
+            root_props = dict(tfile.properties)
+            if root_props:
+                existing_root = RootObject(root_props)
             for grp in tfile.groups():
                 if grp.name == "FitResults":
                     continue
@@ -4219,7 +4223,8 @@ def _write_fit_report_same_group(report_path: Path,
                                       np.asarray(ch[:]),
                                       properties=props)
                     )
-        out_objects: list = list(existing_groups) + list(existing_channels)
+        root_objects: list = [existing_root] if existing_root is not None else []
+        out_objects: list = root_objects + list(existing_groups) + list(existing_channels)
         if unmatched:
             out_objects.append(GroupObject("FitResults"))
             for name, props in unmatched.items():
@@ -4345,11 +4350,15 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
         # Older nptdms versions don't support mode='a' on TdmsWriter; fall
         # back to rewriting the file with merged contents preserved.
         try:
+            existing_root: Optional[RootObject] = None
             existing_groups: list[GroupObject] = []
             existing_channels: list[ChannelObject] = []
             existing_fit: dict[str, dict] = {}
             if report_path.exists():
                 with TdmsFile.read(str(report_path)) as tfile:
+                    root_props = dict(tfile.properties)
+                    if root_props:
+                        existing_root = RootObject(root_props)
                     for grp in tfile.groups():
                         if grp.name == "FitResults":
                             for ch in grp.channels():
@@ -4362,7 +4371,8 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
                                               properties=dict(ch.properties))
                             )
             merged = {**existing_fit, **new_entries}
-            out_objects = list(existing_groups) + list(existing_channels)
+            root_objects = [existing_root] if existing_root is not None else []
+            out_objects = root_objects + list(existing_groups) + list(existing_channels)
             out_objects.append(GroupObject("FitResults"))
             for name, props in merged.items():
                 data = np.array([np.nan], dtype=np.float64)

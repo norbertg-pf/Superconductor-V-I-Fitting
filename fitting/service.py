@@ -25,7 +25,7 @@ DEFAULT_CHI_SQR_TOL = 1.0e-14    # OriginLab-style tolerance on the fitter cost 
 DEFAULT_VC_VOLTS = 1.0e-3
 DEFAULT_EC_V_PER_CM = 1.0e-6    # 1 uV/cm = 100 uV/m, IEC 61788-3/-21 default for HTS at 77 K
 DEFAULT_EC1_V_PER_CM = 1.0e-7   # 0.1 uV/cm, lower end of IEC decade n-value window
-DEFAULT_EC2_V_PER_CM = 1.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
+DEFAULT_EC2_V_PER_CM = 5.0e-6   # 1 uV/cm, upper end (= the Ic criterion)
 DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 
 # Auto-adjust Ec1/Ec2 defaults. When enabled, the IEC decade window is allowed
