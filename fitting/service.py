@@ -786,190 +786,169 @@ def auto_adjust_loglog_window(
     target_r2: float,
     max_iterations: int = AUTO_EC_MAX_ITERATIONS,
     rel_tol: float = AUTO_EC_REL_TOL,
-) -> tuple[tuple, float, int, bool]:
-    """Slide the IEC decade window in either direction until R² ≥ ``target_r2``.
+) -> tuple[tuple, float, float, int, bool]:
+    """Independently optimize Ec1 and Ec2 to maximize R² of the log-log fit.
 
-    Both Ec1 and Ec2 are multiplied by the same factor ``k`` so the decade
-    ratio Ec2/Ec1 stays fixed (typically 10, per IEC 61788). ``k`` is bounded
-    above by ``min(ec1_max/ec1, ec2_max/ec2)`` and below by
-    ``max(ec1_min/ec1, ec2_min/ec2)``; ``None`` on a bound disables the
-    search in that direction. When the user-supplied ``ec1``/``ec2`` falls
-    outside the configured envelope, the window is first clamped to the
-    nearest bound so the configured caps are honoured.
+    Ec1 and Ec2 are searched INDEPENDENTLY within their configured bounds —
+    ``Ec1 ∈ [ec1_min, ec1_max]`` and ``Ec2 ∈ [ec2_min, ec2_max]`` — so the
+    chosen window converges toward the same globally-best fit regardless of
+    the user-entered starting values. The constraint ``Ec2 > Ec1`` is always
+    enforced (with a small safety margin so the n-value polyfit stays
+    well-conditioned).
 
-    Strategy: a log-spaced probe grid covering both downward and upward
-    directions, then refinement around the candidate with the smallest log-k
-    perturbation that meets the target. When the target is unreachable, a
-    short golden-section search around the best probe squeezes out the best
-    achievable R² rather than returning a coarse-grid sample.
+    Strategy: a coarse 2D log-spaced grid over the ``[ec1_min, ec1_max]
+    × [ec2_min, ec2_max]`` rectangle, followed by alternating golden-section
+    refinement on each axis (coordinate descent) around the grid winner.
+    Each evaluation is a cheap polyfit, so the whole search finishes in well
+    under a second on real data.
 
-    Returns ``(loglog_result, k, n_evals, target_met)`` where
-    ``loglog_result`` is the eight-tuple returned by
-    :func:`fit_n_value_log_log` and ``k`` is the multiplicative factor that
-    was applied to the input ``ec1``/``ec2``. ``target_met=False`` is
-    returned together with the best-R² candidate when the target is
-    unreachable within the allowed range.
+    Returns ``(loglog_result, ec1_used, ec2_used, n_evals, target_met)``
+    where ``loglog_result`` is the eight-tuple from
+    :func:`fit_n_value_log_log`. ``target_met=False`` indicates the best
+    achievable R² inside the configured bounds is still below ``target_r2``;
+    in that case the returned (Ec1, Ec2) are the global-best candidate.
     """
+    GRID_N = 5
+    MIN_RATIO = 1.5  # Ec2 ≥ MIN_RATIO * Ec1 to keep the n-fit well-conditioned
+    phi = (1.0 + 5.0 ** 0.5) / 2.0
 
-    def _eval(k: float):
+    def _eval(e1: float, e2: float):
         return fit_n_value_log_log(
             x, y, V0=V0, R=R,
-            Ec1=k * ec1, Ec2=k * ec2,
+            Ec1=float(e1), Ec2=float(e2),
             criterion_E=criterion_E,
             point_sigma=point_sigma,
             weight_mode=weight_mode,
         )
 
+    # Effective bounds. When a bound is missing fall back to the user's
+    # input on that side so the search degenerates gracefully.
+    e1_lo = float(ec1_min) if (ec1_min is not None and ec1_min > 0) else float(ec1)
+    e1_hi = float(ec1_max) if (ec1_max is not None and ec1_max > 0) else float(ec1)
+    e2_lo = float(ec2_min) if (ec2_min is not None and ec2_min > 0) else float(ec2)
+    e2_hi = float(ec2_max) if (ec2_max is not None and ec2_max > 0) else float(ec2)
+    if e1_hi < e1_lo:
+        e1_hi = e1_lo
+    if e2_hi < e2_lo:
+        e2_hi = e2_lo
+    e1_lo = max(e1_lo, 1.0e-30)
+    e2_lo = max(e2_lo, 1.0e-30)
+
     n_evals = 0
 
-    # Upper bound on k from each configured maximum (binding values are the
-    # smallest such ratio). Lower bound on k from each configured minimum
-    # (binding values are the largest such ratio).
-    k_caps: list[float] = []
-    if ec1 > 0 and ec1_max is not None and ec1_max > 0:
-        k_caps.append(float(ec1_max) / float(ec1))
-    if ec2 > 0 and ec2_max is not None and ec2_max > 0:
-        k_caps.append(float(ec2_max) / float(ec2))
-    k_max = min(k_caps) if k_caps else float("inf")
-
-    k_floors: list[float] = []
-    if ec1 > 0 and ec1_min is not None and ec1_min > 0:
-        k_floors.append(float(ec1_min) / float(ec1))
-    if ec2 > 0 and ec2_min is not None and ec2_min > 0:
-        k_floors.append(float(ec2_min) / float(ec2))
-    k_min = max(k_floors) if k_floors else 0.0
-
-    # Honour out-of-envelope user input by clamping to the nearest bound.
-    if k_max < 1.0 - 1.0e-9:
+    def _try(e1: float, e2: float) -> Optional[tuple]:
+        nonlocal n_evals
+        if e2 <= e1 * MIN_RATIO:
+            return None
         try:
-            clamped = _eval(k_max)
-            n_evals += 1
-            return clamped, k_max, n_evals, clamped[7] >= target_r2
+            r = _eval(e1, e2)
         except (ValueError, RuntimeError, np.linalg.LinAlgError):
-            pass
-    if k_min > 1.0 + 1.0e-9:
-        try:
-            clamped = _eval(k_min)
-            n_evals += 1
-            return clamped, k_min, n_evals, clamped[7] >= target_r2
-        except (ValueError, RuntimeError, np.linalg.LinAlgError):
-            pass
+            return None
+        n_evals += 1
+        return r
 
-    base = _eval(1.0)
-    n_evals += 1
-    if base[7] >= target_r2:
-        return base, 1.0, n_evals, True
+    # Anchor the search with the user's starting (Ec1, Ec2). If the start is
+    # already a good fit there's no need for further work.
+    base = _try(float(ec1), float(ec2))
+    samples: list[tuple[float, float, tuple]] = []
+    if base is not None:
+        samples.append((float(ec1), float(ec2), base))
+        if base[7] >= target_r2:
+            return base, float(ec1), float(ec2), n_evals, True
 
-    has_upward = np.isfinite(k_max) and k_max > 1.0 + 1.0e-9
-    has_downward = k_min > 0.0 and k_min < 1.0 - 1.0e-9
-    if not has_upward and not has_downward:
-        return base, 1.0, n_evals, False
+    # Coarse 2D log-spaced grid.
+    e1_grid = (np.geomspace(e1_lo, e1_hi, GRID_N)
+               if e1_hi > e1_lo * 1.001 else np.array([e1_lo]))
+    e2_grid = (np.geomspace(e2_lo, e2_hi, GRID_N)
+               if e2_hi > e2_lo * 1.001 else np.array([e2_lo]))
+    for e1 in e1_grid:
+        for e2 in e2_grid:
+            r = _try(float(e1), float(e2))
+            if r is not None:
+                samples.append((float(e1), float(e2), r))
 
-    samples: list[tuple[float, tuple]] = [(1.0, base)]
-    if has_upward:
-        upward = list(np.geomspace(1.0, k_max, AUTO_EC_PROBES_PER_SIDE + 1))[1:]
-        for k in upward:
+    if not samples:
+        # Last resort: re-evaluate the user's input so the caller gets a
+        # meaningful exception instead of an empty result.
+        base = _eval(float(ec1), float(ec2))
+        n_evals += 1
+        return base, float(ec1), float(ec2), n_evals, base[7] >= target_r2
+
+    # Pick the global-best R² on the coarse grid as the refinement seed.
+    best_e1, best_e2, best_result = max(samples, key=lambda s: s[2][7])
+
+    # Coordinate descent with golden-section search in log space on each
+    # axis. Two passes is enough to settle on a smooth R² surface.
+    def _gss_axis(fixed_other: float, lo: float, hi: float, vary_ec1: bool,
+                  current_best: tuple[float, tuple]) -> tuple[float, tuple]:
+        """Maximize R² over the varying axis in [lo, hi] (log-space GSS)."""
+        nonlocal n_evals
+        if hi <= lo * 1.001:
+            return current_best
+        a = float(np.log(lo))
+        b = float(np.log(hi))
+        best_val, best_r = current_best
+        for _ in range(min(max(max_iterations, 1), 5)):
+            c = b - (b - a) / phi
+            d = a + (b - a) / phi
+            ec_c = float(np.exp(c))
+            ec_d = float(np.exp(d))
+            if vary_ec1:
+                pair_c = (ec_c, fixed_other)
+                pair_d = (ec_d, fixed_other)
+                feasible_c = fixed_other > ec_c * MIN_RATIO
+                feasible_d = fixed_other > ec_d * MIN_RATIO
+            else:
+                pair_c = (fixed_other, ec_c)
+                pair_d = (fixed_other, ec_d)
+                feasible_c = ec_c > fixed_other * MIN_RATIO
+                feasible_d = ec_d > fixed_other * MIN_RATIO
+            if not (feasible_c and feasible_d):
+                # Bracket reaches the Ec2>Ec1 constraint; shrink it.
+                if vary_ec1:
+                    if not feasible_d:
+                        b = d
+                    if not feasible_c:
+                        a = c
+                else:
+                    if not feasible_c:
+                        a = c
+                    if not feasible_d:
+                        b = d
+                if (b - a) < rel_tol:
+                    break
+                continue
             try:
-                r = _eval(float(k))
+                rc = _eval(*pair_c); n_evals += 1
+                rd = _eval(*pair_d); n_evals += 1
             except (ValueError, RuntimeError, np.linalg.LinAlgError):
                 break
-            n_evals += 1
-            samples.append((float(k), r))
-    if has_downward:
-        downward = list(np.geomspace(1.0, k_min, AUTO_EC_PROBES_PER_SIDE + 1))[1:]
-        for k in downward:
-            try:
-                r = _eval(float(k))
-            except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            if rc[7] > rd[7]:
+                b = d
+                if rc[7] > best_r[7]:
+                    best_val, best_r = ec_c, rc
+            else:
+                a = c
+                if rd[7] > best_r[7]:
+                    best_val, best_r = ec_d, rd
+            if (b - a) < rel_tol:
                 break
-            n_evals += 1
-            samples.append((float(k), r))
+        return best_val, best_r
 
-    samples.sort(key=lambda kr: kr[0])
-    hits = [(k, r) for k, r in samples if r[7] >= target_r2]
-    if hits:
-        # Pick the hit with smallest |log k| so the chosen window stays as
-        # close to the user-entered Ec1/Ec2 as possible.
-        hits.sort(key=lambda kr: abs(np.log(kr[0])) if kr[0] > 0 else float("inf"))
-        k_hit, hit_result = hits[0]
-        if abs(np.log(k_hit)) < 1.0e-9:
-            return hit_result, 1.0, n_evals, True
-
-        # Refine: bisect between k_hit and the nearest non-hit on the side
-        # toward k=1 to nudge k as close to 1 as possible while still hitting
-        # the target.
-        if k_hit > 1.0:
-            below = [(k, r) for k, r in samples if k < k_hit and r[7] < target_r2]
-            k_lo = below[-1][0] if below else 1.0
-            k_hi, hi_result = k_hit, hit_result
-            iters = 0
-            while iters < max_iterations and (k_hi / max(k_lo, 1e-12) - 1.0) > rel_tol:
-                k_mid = float(np.sqrt(k_lo * k_hi))
-                try:
-                    mid = _eval(k_mid)
-                    n_evals += 1
-                    if mid[7] >= target_r2:
-                        k_hi, hi_result = k_mid, mid
-                    else:
-                        k_lo = k_mid
-                except (ValueError, RuntimeError, np.linalg.LinAlgError):
-                    k_hi = k_mid
-                iters += 1
-            return hi_result, k_hi, n_evals, True
-        else:
-            above = [(k, r) for k, r in samples if k > k_hit and r[7] < target_r2]
-            k_hi = above[0][0] if above else 1.0
-            k_lo, lo_result = k_hit, hit_result
-            iters = 0
-            while iters < max_iterations and (k_hi / max(k_lo, 1e-12) - 1.0) > rel_tol:
-                k_mid = float(np.sqrt(k_lo * k_hi))
-                try:
-                    mid = _eval(k_mid)
-                    n_evals += 1
-                    if mid[7] >= target_r2:
-                        k_lo, lo_result = k_mid, mid
-                    else:
-                        k_hi = k_mid
-                except (ValueError, RuntimeError, np.linalg.LinAlgError):
-                    k_hi = k_mid
-                iters += 1
-            return lo_result, k_lo, n_evals, True
-
-    # Target never met across the searched range. Refine around the best
-    # probe using golden-section search in log-k so the returned fit is the
-    # best achievable rather than the coarsest probe sample.
-    best_idx = max(range(len(samples)), key=lambda i: samples[i][1][7])
-    best_k, best_result = samples[best_idx]
-    k_left = samples[best_idx - 1][0] if best_idx > 0 else best_k
-    k_right = samples[best_idx + 1][0] if best_idx < len(samples) - 1 else best_k
-    if k_right <= k_left + 1.0e-12:
-        return best_result, best_k, n_evals, False
-
-    phi = (1.0 + 5.0 ** 0.5) / 2.0
-    a = float(np.log(k_left))
-    b = float(np.log(k_right))
-    iters = 0
-    refine_budget = max(1, max_iterations // 2)
-    while iters < refine_budget and (b - a) > rel_tol:
-        c = b - (b - a) / phi
-        d = a + (b - a) / phi
-        try:
-            rc = _eval(float(np.exp(c)))
-            n_evals += 1
-            rd = _eval(float(np.exp(d)))
-            n_evals += 1
-        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+    for _ in range(2):
+        prev_r2 = best_result[7]
+        new_e1, new_result = _gss_axis(best_e2, e1_lo, e1_hi, True,
+                                       (best_e1, best_result))
+        if new_result[7] > best_result[7]:
+            best_e1, best_result = new_e1, new_result
+        new_e2, new_result = _gss_axis(best_e1, e2_lo, e2_hi, False,
+                                       (best_e2, best_result))
+        if new_result[7] > best_result[7]:
+            best_e2, best_result = new_e2, new_result
+        if best_result[7] - prev_r2 < 1.0e-6:
             break
-        if rc[7] > rd[7]:
-            b = d
-            if rc[7] > best_result[7]:
-                best_result, best_k = rc, float(np.exp(c))
-        else:
-            a = c
-            if rd[7] > best_result[7]:
-                best_result, best_k = rd, float(np.exp(d))
-        iters += 1
-    return best_result, best_k, n_evals, best_result[7] >= target_r2
+
+    return best_result, float(best_e1), float(best_e2), n_evals, best_result[7] >= target_r2
 
 
 def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
@@ -1069,7 +1048,7 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         auto_adjusted = False
         if getattr(settings, "auto_ec_adjust", False):
             try:
-                (auto_result, k_used, auto_iters, auto_target_met) = (
+                (auto_result, ec1_used, ec2_used, auto_iters, auto_target_met) = (
                     auto_adjust_loglog_window(
                         x, y, V0=V0, R=R,
                         ec1=ec1_initial, ec2=ec2_initial,
@@ -1087,9 +1066,13 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
                 return FitResult(ok=False, message=f"Log-log n-value fit failed: {exc}")
             (Ic, n_value, chi_sqr, n_pts, n_window,
              sigma_Ic, sigma_n, r_squared) = auto_result
-            ec1_used = ec1_initial * float(k_used)
-            ec2_used = ec2_initial * float(k_used)
-            auto_adjusted = abs(float(k_used) - 1.0) > 1e-9
+            ec1_used = float(ec1_used)
+            ec2_used = float(ec2_used)
+            auto_adjusted = (
+                ec1_initial > 0 and abs(ec1_used / ec1_initial - 1.0) > 1.0e-6
+            ) or (
+                ec2_initial > 0 and abs(ec2_used / ec2_initial - 1.0) > 1.0e-6
+            )
         else:
             try:
                 (Ic, n_value, chi_sqr, n_pts, n_window,
