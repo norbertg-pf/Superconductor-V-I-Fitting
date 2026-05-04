@@ -73,6 +73,7 @@ from .service import (
     FIT_METHOD_LOG_LOG,
     FIT_METHOD_NONLINEAR,
     fit_linear_baseline,
+    DEFAULT_WEIGHT_MODE,
     WEIGHT_MODE_EQUAL,
     WEIGHT_MODE_ROBUST,
     WEIGHT_MODE_WEIGHTED,
@@ -849,7 +850,8 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_length_input.setText("1.0")
     app.data_fit_vc_input.setText(f"{DEFAULT_EC_V_PER_CM * 1.0e6:.6g}")
     if getattr(app, "data_fit_weight_mode_cb", None) is not None:
-        app.data_fit_weight_mode_cb.setCurrentIndex(0)
+        idx_default_weight = app.data_fit_weight_mode_cb.findData(DEFAULT_WEIGHT_MODE)
+        app.data_fit_weight_mode_cb.setCurrentIndex(max(0, idx_default_weight))
     if getattr(app, "data_fit_baseline_mode_cb", None) is not None:
         idx_default_baseline = app.data_fit_baseline_mode_cb.findData(DEFAULT_BASELINE_MODE)
         app.data_fit_baseline_mode_cb.setCurrentIndex(max(0, idx_default_baseline))
@@ -1390,12 +1392,14 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_weight_mode_cb.addItem("Equal", WEIGHT_MODE_EQUAL)
     app.data_fit_weight_mode_cb.addItem("Weighted", WEIGHT_MODE_WEIGHTED)
     app.data_fit_weight_mode_cb.addItem("Robust", WEIGHT_MODE_ROBUST)
-    app.data_fit_weight_mode_cb.setCurrentIndex(0)
+    _default_weight_idx = app.data_fit_weight_mode_cb.findData(DEFAULT_WEIGHT_MODE)
+    app.data_fit_weight_mode_cb.setCurrentIndex(max(0, _default_weight_idx))
     app.data_fit_weight_mode_cb.setMaximumWidth(145)
     app.data_fit_weight_mode_cb.setToolTip(
         "Step-5 point weighting mode.\n"
         "Equal: all points same weight (legacy behavior).\n"
-        "Weighted: auto-estimate per-point noise and weight by 1/sigma².\n"
+        "Weighted: auto-estimate per-point noise (1/sigma²) and add a\n"
+        "  log-E ramp that emphasises the upper transition near Ec2.\n"
         "Robust: weighted + Huber reweighting to suppress outliers."
     )
     power_layout.addWidget(QLabel("Point weighting:"), 2, 0, 1, 1)

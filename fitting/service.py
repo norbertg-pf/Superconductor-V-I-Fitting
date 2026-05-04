@@ -35,7 +35,7 @@ DEFAULT_EC_WINDOW_GUARD_FRAC = 0.50
 # IEC decade ratio Ec2/Ec1 is preserved to stay within the standard.
 DEFAULT_AUTO_EC_TARGET_R2 = 0.995
 DEFAULT_AUTO_EC1_MAX_V_PER_CM = 1.0e-6   # 1.0 µV/cm = 10× the IEC default Ec1
-DEFAULT_AUTO_EC2_MAX_V_PER_CM = 2.0e-6   # 2.0 µV/cm = 2× the IEC default Ec2
+DEFAULT_AUTO_EC2_MAX_V_PER_CM = 5.0e-6   # 5.0 µV/cm = 5× the IEC default Ec2
 AUTO_EC_MAX_ITERATIONS = 8
 AUTO_EC_REL_TOL = 0.05  # stop bisection when (k_hi/k_lo - 1) ≤ 5 %
 
@@ -55,7 +55,12 @@ DEFAULT_FIT_METHOD = FIT_METHOD_LOG_LOG
 WEIGHT_MODE_EQUAL = "equal"
 WEIGHT_MODE_WEIGHTED = "weighted"
 WEIGHT_MODE_ROBUST = "robust"
-DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
+DEFAULT_WEIGHT_MODE = WEIGHT_MODE_WEIGHTED
+# Transition-region emphasis applied on top of inverse-variance weights in
+# weighted / robust mode. The weight of a point grows linearly in log-E from
+# 1 (at Ec1) to (1 + TRANSITION_WEIGHT_GAIN) (at Ec2), so the cleaner upper
+# part of the n-value window dominates the fit and the reported R².
+TRANSITION_WEIGHT_GAIN = 2.0
 
 # Step-4 baseline fitting mode identifiers.
 BASELINE_MODE_OLS = "ols"
@@ -665,13 +670,25 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     e_fit = np.clip(e_sc_bounds[mask], 1e-30, None)
     log_E = np.log10(e_fit)
     w = np.ones_like(log_E, dtype=float)
-    if point_sigma is not None and weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
-        sig_all = np.asarray(point_sigma, dtype=float)
-        sig_all = sig_all[:x.size]
-        sig_sorted = sig_all[order][pos]
-        sig_seg = np.clip(sig_sorted[mask], 1e-12, None)
-        sigma_log = np.clip(sig_seg / (e_fit * np.log(10.0)), 1e-12, None)
-        w = 1.0 / (sigma_log ** 2)
+    if weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
+        if point_sigma is not None:
+            sig_all = np.asarray(point_sigma, dtype=float)
+            sig_all = sig_all[:x.size]
+            sig_sorted = sig_all[order][pos]
+            sig_seg = np.clip(sig_sorted[mask], 1e-12, None)
+            sigma_log = np.clip(sig_seg / (e_fit * np.log(10.0)), 1e-12, None)
+            w = 1.0 / (sigma_log ** 2)
+        # Transition emphasis: ramp the weight linearly in log-E from 1 at
+        # Ec1 to (1 + TRANSITION_WEIGHT_GAIN) at Ec2. The upper part of the
+        # decade is where the power-law signal is strongest and least
+        # contaminated by baseline drift, so weighting it more heavily lets
+        # the slope (and the reported R²) track the cleaner transition
+        # rather than the noise floor near Ec1.
+        log_ec1 = float(np.log10(Ec1))
+        log_ec2 = float(np.log10(Ec2))
+        span = max(log_ec2 - log_ec1, 1e-12)
+        position = np.clip((log_E - log_ec1) / span, 0.0, 1.0)
+        w = w * (1.0 + TRANSITION_WEIGHT_GAIN * position)
 
     robust_mode = (weight_mode == WEIGHT_MODE_ROBUST)
     coeffs = np.polyfit(log_I, log_E, 1, w=np.sqrt(w))
@@ -701,9 +718,22 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     log_Ic = (log_crit - intercept) / n_val
     Ic_at_crit = float(10.0 ** log_Ic)
     model_log_E = intercept + n_val * log_I
-    chi_sqr = float(np.sum((log_E - model_log_E) ** 2))
-    ss_tot = float(np.sum((log_E - np.mean(log_E)) ** 2))
-    r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
+    residuals = log_E - model_log_E
+    chi_sqr = float(np.sum(residuals ** 2))
+    # Weighted R² when inverse-variance weights are in play: down-weights
+    # noisy Ec1-end points whose σ_log dwarfs the signal, so the metric
+    # tracks fit quality across the cleaner transition instead of being
+    # dragged down by the baseline-dominated low end. Reduces to the standard
+    # unweighted R² when w ≡ 1 (equal-weight mode).
+    w_sum = float(np.sum(w))
+    if w_sum > 0:
+        log_E_mean_w = float(np.sum(w * log_E) / w_sum)
+        ss_res_w = float(np.sum(w * residuals ** 2))
+        ss_tot_w = float(np.sum(w * (log_E - log_E_mean_w) ** 2))
+        r_squared = float(1.0 - ss_res_w / ss_tot_w) if ss_tot_w > 0 else 0.0
+    else:
+        ss_tot = float(np.sum((log_E - np.mean(log_E)) ** 2))
+        r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
     # Uncertainty in log10(Ic) from propagation through
     # log_Ic = (log_crit - intercept) / slope.
     d_by_intercept = -1.0 / n_val
@@ -749,13 +779,16 @@ def auto_adjust_loglog_window(
     max_iterations: int = AUTO_EC_MAX_ITERATIONS,
     rel_tol: float = AUTO_EC_REL_TOL,
 ) -> tuple[tuple, float, int, bool]:
-    """Slide the IEC decade window upward until R² ≥ ``target_r2``.
+    """Slide the IEC decade window until R² ≥ ``target_r2``.
 
     Both Ec1 and Ec2 are multiplied by the same factor ``k`` so the decade
     ratio Ec2/Ec1 stays fixed at the value the caller passed in (typically 10,
     per IEC 61788). ``k`` is bounded above by the smaller of
     ``ec1_max/ec1`` and ``ec2_max/ec2``; either bound being ``None`` is
-    treated as no cap from that side.
+    treated as no cap from that side. When the user-supplied ``ec1``/``ec2``
+    already exceeds its cap, the window is first clamped down (k < 1) to
+    satisfy the cap; further upward search is disabled in that case because
+    the cap is already binding.
 
     Strategy: a coarse log-spaced probe on ``k`` to bracket the smallest k
     that meets the target, then geometric bisection to refine. Total fit
@@ -781,20 +814,37 @@ def auto_adjust_loglog_window(
         )
 
     n_evals = 0
+
+    # Compute the upper bound on k from each configured cap. When a cap is
+    # binding from above (ec1 > ec1_max or ec2 > ec2_max) the resulting
+    # k_cap is < 1 and the window must be scaled down to satisfy it.
+    k_caps: list[float] = []
+    if ec1 > 0 and ec1_max is not None and ec1_max > 0:
+        k_caps.append(float(ec1_max) / float(ec1))
+    if ec2 > 0 and ec2_max is not None and ec2_max > 0:
+        k_caps.append(float(ec2_max) / float(ec2))
+    k_max = min(k_caps) if k_caps else float("inf")
+
+    # User entered Ec1/Ec2 above the configured maximum: clamp down (preserving
+    # the IEC decade ratio) so the fit honours the cap from the Fit config.
+    # Auto-adjust only slides upward to escape baseline drift, so once we've
+    # clamped to the cap there is no further headroom to search.
+    if k_max < 1.0 - 1.0e-9:
+        try:
+            clamped = _eval(k_max)
+            n_evals += 1
+            return clamped, k_max, n_evals, clamped[7] >= target_r2
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            # Clamped window leaves no usable points; fall through to the
+            # un-clamped fit so the caller surfaces a meaningful error.
+            pass
+
     base = _eval(1.0)
     n_evals += 1
     if base[7] >= target_r2:
         return base, 1.0, n_evals, True
 
-    k_caps: list[float] = []
-    if ec1 > 0 and ec1_max is not None and ec1_max > ec1:
-        k_caps.append(float(ec1_max) / float(ec1))
-    if ec2 > 0 and ec2_max is not None and ec2_max > ec2:
-        k_caps.append(float(ec2_max) / float(ec2))
-    if not k_caps:
-        return base, 1.0, n_evals, False
-    k_max = min(k_caps)
-    if k_max <= 1.0 + 1.0e-9:
+    if not k_caps or k_max <= 1.0 + 1.0e-9:
         return base, 1.0, n_evals, False
 
     # Coarse log-spaced probe (5 candidates between 1 and k_max, exclusive of 1
