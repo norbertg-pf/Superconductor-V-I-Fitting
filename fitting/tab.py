@@ -55,6 +55,8 @@ from .service import (
     DEFAULT_AUTO_EC_TARGET_R2,
     DEFAULT_AUTO_EC1_MAX_V_PER_CM,
     DEFAULT_AUTO_EC2_MAX_V_PER_CM,
+    DEFAULT_AUTO_EC1_MIN_V_PER_CM,
+    DEFAULT_AUTO_EC2_MIN_V_PER_CM,
     DEFAULT_EC_V_PER_CM,
     DEFAULT_EC1_V_PER_CM,
     DEFAULT_EC2_V_PER_CM,
@@ -270,6 +272,16 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
             if getattr(app, "data_fit_auto_ec_cb", None) is not None
             else False
         ),
+        "auto_ec1_min": (
+            app.data_fit_auto_ec1_min.text()
+            if getattr(app, "data_fit_auto_ec1_min", None) is not None
+            else ""
+        ),
+        "auto_ec2_min": (
+            app.data_fit_auto_ec2_min.text()
+            if getattr(app, "data_fit_auto_ec2_min", None) is not None
+            else ""
+        ),
         "auto_ec1_max": (
             app.data_fit_auto_ec1_max.text()
             if getattr(app, "data_fit_auto_ec1_max", None) is not None
@@ -397,6 +409,8 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         (app.data_fit_ic_tol, "ic_tol"),
         (app.data_fit_chi_tol, "chi_tol"),
         (app.data_fit_vc_input, "vc"),
+        (getattr(app, "data_fit_auto_ec1_min", None), "auto_ec1_min"),
+        (getattr(app, "data_fit_auto_ec2_min", None), "auto_ec2_min"),
         (getattr(app, "data_fit_auto_ec1_max", None), "auto_ec1_max"),
         (getattr(app, "data_fit_auto_ec2_max", None), "auto_ec2_max"),
         (getattr(app, "data_fit_auto_target_r2", None), "auto_target_r2"),
@@ -777,15 +791,19 @@ def _connect_data_fitting_actions(app):
 
 
 def _refresh_auto_ec_enabled(app) -> None:
-    """Grey the Ec1 max / Ec2 max / target R² inputs when auto-adjust is off."""
+    """Grey the Ec1/Ec2 min/max and target R² inputs when auto-adjust is off."""
     cb = getattr(app, "data_fit_auto_ec_cb", None)
     if cb is None:
         return
     enabled = bool(cb.isChecked())
     for attr in (
+        "data_fit_auto_ec1_min",
+        "data_fit_auto_ec2_min",
         "data_fit_auto_ec1_max",
         "data_fit_auto_ec2_max",
         "data_fit_auto_target_r2",
+        "data_fit_auto_ec1_min_label",
+        "data_fit_auto_ec2_min_label",
         "data_fit_auto_ec1_max_label",
         "data_fit_auto_ec2_max_label",
         "data_fit_auto_target_r2_label",
@@ -874,6 +892,10 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_linear_high.setText(f"{DEFAULT_LINEAR_HIGH_FRAC * 100:.2f}")
     if getattr(app, "data_fit_auto_ec_cb", None) is not None:
         app.data_fit_auto_ec_cb.setChecked(False)
+    if getattr(app, "data_fit_auto_ec1_min", None) is not None:
+        app.data_fit_auto_ec1_min.setText(f"{DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6:g}")
+    if getattr(app, "data_fit_auto_ec2_min", None) is not None:
+        app.data_fit_auto_ec2_min.setText(f"{DEFAULT_AUTO_EC2_MIN_V_PER_CM * 1.0e6:g}")
     if getattr(app, "data_fit_auto_ec1_max", None) is not None:
         app.data_fit_auto_ec1_max.setText(f"{DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6:g}")
     if getattr(app, "data_fit_auto_ec2_max", None) is not None:
@@ -1507,6 +1529,18 @@ def setup_data_fitting_tab_layout(app):
         "ends move by the same factor so the IEC 61788 decade ratio is\n"
         "preserved; the search is bounded by the Ec1/Ec2 maxima below."
     )
+    app.data_fit_auto_ec1_min = QLineEdit(f"{DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6:g}")
+    app.data_fit_auto_ec1_min.setMaximumWidth(80)
+    app.data_fit_auto_ec1_min.setToolTip(
+        "Lower bound for Ec1 during auto-adjust (µV/cm). The search will\n"
+        "not lower Ec1 below this value."
+    )
+    app.data_fit_auto_ec2_min = QLineEdit(f"{DEFAULT_AUTO_EC2_MIN_V_PER_CM * 1.0e6:g}")
+    app.data_fit_auto_ec2_min.setMaximumWidth(80)
+    app.data_fit_auto_ec2_min.setToolTip(
+        "Lower bound for Ec2 during auto-adjust (µV/cm). Ec2 is the IEC\n"
+        "criterion; keep this close to 1 µV/cm to stay within the standard."
+    )
     app.data_fit_auto_ec1_max = QLineEdit(f"{DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6:g}")
     app.data_fit_auto_ec1_max.setMaximumWidth(80)
     app.data_fit_auto_ec1_max.setToolTip(
@@ -1525,16 +1559,22 @@ def setup_data_fitting_tab_layout(app):
         "Target R² for the log-log fit. The smallest decade-window shift\n"
         "that achieves this R² is selected. Typical values: 0.99–0.999."
     )
+    app.data_fit_auto_ec1_min_label = QLabel("Ec1 min (µV/cm)")
+    app.data_fit_auto_ec2_min_label = QLabel("Ec2 min (µV/cm)")
     app.data_fit_auto_ec1_max_label = QLabel("Ec1 max (µV/cm)")
     app.data_fit_auto_ec2_max_label = QLabel("Ec2 max (µV/cm)")
     app.data_fit_auto_target_r2_label = QLabel("Target R²")
     iter_layout.addWidget(app.data_fit_auto_ec_cb, 2, 0, 1, 4)
-    iter_layout.addWidget(app.data_fit_auto_ec1_max_label, 3, 0)
-    iter_layout.addWidget(app.data_fit_auto_ec1_max, 3, 1)
-    iter_layout.addWidget(app.data_fit_auto_ec2_max_label, 3, 2)
-    iter_layout.addWidget(app.data_fit_auto_ec2_max, 3, 3)
-    iter_layout.addWidget(app.data_fit_auto_target_r2_label, 4, 0)
-    iter_layout.addWidget(app.data_fit_auto_target_r2, 4, 1)
+    iter_layout.addWidget(app.data_fit_auto_ec1_min_label, 3, 0)
+    iter_layout.addWidget(app.data_fit_auto_ec1_min, 3, 1)
+    iter_layout.addWidget(app.data_fit_auto_ec2_min_label, 3, 2)
+    iter_layout.addWidget(app.data_fit_auto_ec2_min, 3, 3)
+    iter_layout.addWidget(app.data_fit_auto_ec1_max_label, 4, 0)
+    iter_layout.addWidget(app.data_fit_auto_ec1_max, 4, 1)
+    iter_layout.addWidget(app.data_fit_auto_ec2_max_label, 4, 2)
+    iter_layout.addWidget(app.data_fit_auto_ec2_max, 4, 3)
+    iter_layout.addWidget(app.data_fit_auto_target_r2_label, 5, 0)
+    iter_layout.addWidget(app.data_fit_auto_target_r2, 5, 1)
     app.data_fit_auto_ec_cb.toggled.connect(
         lambda _checked, a=app: (
             _refresh_auto_ec_enabled(a),
@@ -1542,6 +1582,8 @@ def setup_data_fitting_tab_layout(app):
         )
     )
     for w in (
+        app.data_fit_auto_ec1_min,
+        app.data_fit_auto_ec2_min,
         app.data_fit_auto_ec1_max,
         app.data_fit_auto_ec2_max,
         app.data_fit_auto_target_r2,
@@ -1992,6 +2034,14 @@ def _settings_from_inputs(app) -> FitSettings:
         getattr(app, "data_fit_auto_ec_cb", None) is not None
         and app.data_fit_auto_ec_cb.isChecked()
     )
+    auto_ec1_min = _float_from(
+        getattr(app, "data_fit_auto_ec1_min", None),
+        DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6,
+    ) * to_si
+    auto_ec2_min = _float_from(
+        getattr(app, "data_fit_auto_ec2_min", None),
+        DEFAULT_AUTO_EC2_MIN_V_PER_CM * 1.0e6,
+    ) * to_si
     auto_ec1_max = _float_from(
         getattr(app, "data_fit_auto_ec1_max", None),
         DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6,
@@ -2021,6 +2071,8 @@ def _settings_from_inputs(app) -> FitSettings:
         ec1=ec1,
         ec2=ec2,
         auto_ec_adjust=auto_ec_adjust,
+        auto_ec1_min=auto_ec1_min,
+        auto_ec2_min=auto_ec2_min,
         auto_ec1_max=auto_ec1_max,
         auto_ec2_max=auto_ec2_max,
         auto_ec_target_r2=auto_target_r2,
@@ -2146,6 +2198,12 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
 
     if method == FIT_METHOD_LOG_LOG:
         to_si_caps = 1.0e-6 if sample_length is not None else 1.0e-3
+        auto_ec1_min = _profile_text_float(
+            profile, "auto_ec1_min", DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6,
+        ) * to_si_caps
+        auto_ec2_min = _profile_text_float(
+            profile, "auto_ec2_min", DEFAULT_AUTO_EC2_MIN_V_PER_CM * 1.0e6,
+        ) * to_si_caps
         auto_ec1_max = _profile_text_float(
             profile, "auto_ec1_max", DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6,
         ) * to_si_caps
@@ -2153,6 +2211,8 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
             profile, "auto_ec2_max", DEFAULT_AUTO_EC2_MAX_V_PER_CM * 1.0e6,
         ) * to_si_caps
     else:
+        auto_ec1_min = DEFAULT_AUTO_EC1_MIN_V_PER_CM
+        auto_ec2_min = DEFAULT_AUTO_EC2_MIN_V_PER_CM
         auto_ec1_max = DEFAULT_AUTO_EC1_MAX_V_PER_CM
         auto_ec2_max = DEFAULT_AUTO_EC2_MAX_V_PER_CM
     auto_target_r2 = _profile_text_float(
@@ -2176,6 +2236,8 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
         ec1=ec1,
         ec2=ec2,
         auto_ec_adjust=auto_ec_adjust,
+        auto_ec1_min=auto_ec1_min,
+        auto_ec2_min=auto_ec2_min,
         auto_ec1_max=auto_ec1_max,
         auto_ec2_max=auto_ec2_max,
         auto_ec_target_r2=auto_target_r2,
@@ -6207,6 +6269,14 @@ def _settings_to_preset(app) -> FitPreset:
             getattr(app, "data_fit_auto_ec_cb", None) is not None
             and app.data_fit_auto_ec_cb.isChecked()
         ),
+        auto_ec1_min_uv_per_cm=_float_from(
+            getattr(app, "data_fit_auto_ec1_min", None),
+            DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6,
+        ),
+        auto_ec2_min_uv_per_cm=_float_from(
+            getattr(app, "data_fit_auto_ec2_min", None),
+            DEFAULT_AUTO_EC2_MIN_V_PER_CM * 1.0e6,
+        ),
         auto_ec1_max_uv_per_cm=_float_from(
             getattr(app, "data_fit_auto_ec1_max", None),
             DEFAULT_AUTO_EC1_MAX_V_PER_CM * 1.0e6,
@@ -6270,6 +6340,16 @@ def _apply_preset(app, preset: FitPreset) -> None:
             cb.setChecked(bool(getattr(preset, "auto_ec_adjust", False)))
         finally:
             cb.blockSignals(False)
+    if getattr(app, "data_fit_auto_ec1_min", None) is not None:
+        _set_silently(
+            app.data_fit_auto_ec1_min,
+            f"{getattr(preset, 'auto_ec1_min_uv_per_cm', DEFAULT_AUTO_EC1_MIN_V_PER_CM * 1.0e6):g}",
+        )
+    if getattr(app, "data_fit_auto_ec2_min", None) is not None:
+        _set_silently(
+            app.data_fit_auto_ec2_min,
+            f"{getattr(preset, 'auto_ec2_min_uv_per_cm', DEFAULT_AUTO_EC2_MIN_V_PER_CM * 1.0e6):g}",
+        )
     if getattr(app, "data_fit_auto_ec1_max", None) is not None:
         _set_silently(
             app.data_fit_auto_ec1_max,

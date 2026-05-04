@@ -1097,6 +1097,8 @@ class FitPreset:
     # µV/cm so the JSON preset is human-readable; the service converts to V/cm
     # at runtime based on whether sample-length normalisation is active.
     auto_ec_adjust: bool = False
+    auto_ec1_min_uv_per_cm: float = 0.1
+    auto_ec2_min_uv_per_cm: float = 1.0
     auto_ec1_max_uv_per_cm: float = 1.0
     auto_ec2_max_uv_per_cm: float = 5.0
     auto_ec_target_r2: float = 0.995
