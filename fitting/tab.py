@@ -2255,7 +2255,7 @@ def _settings_from_profile(profile: dict, *, use_length: bool, length_cm: float)
     auto_target_r2 = _profile_text_float(
         profile, "auto_target_r2", DEFAULT_AUTO_EC_TARGET_R2,
     )
-    auto_ec_adjust = bool(profile.get("auto_ec_adjust", True))
+    auto_ec_adjust = bool(profile.get("auto_ec_adjust", False))
     auto_ec_lock_iec_ratio = bool(profile.get("auto_ec_lock_iec_ratio", False))
 
     return FitSettings(
@@ -6382,7 +6382,7 @@ def _apply_preset(app, preset: FitPreset) -> None:
         cb = app.data_fit_auto_ec_cb
         cb.blockSignals(False)
         try:
-            cb.setChecked(bool(getattr(preset, "auto_ec_adjust", True)))
+            cb.setChecked(bool(getattr(preset, "auto_ec_adjust", False)))
         finally:
             cb.blockSignals(False)
     if getattr(app, "data_fit_auto_ec_lock_ratio_cb", None) is not None:
