@@ -3407,6 +3407,8 @@ def robust_view(app):
             x_arrays.append(np.asarray(x))
             y_arrays.append(np.asarray(y))
     for entry in getattr(app, "data_fit_curves", []):
+        if not entry.get("visible", True):
+            continue
         x = entry.get("x")
         y = entry.get("y")
         if x is None or y is None:
