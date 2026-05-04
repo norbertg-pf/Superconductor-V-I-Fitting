@@ -55,7 +55,12 @@ DEFAULT_FIT_METHOD = FIT_METHOD_LOG_LOG
 WEIGHT_MODE_EQUAL = "equal"
 WEIGHT_MODE_WEIGHTED = "weighted"
 WEIGHT_MODE_ROBUST = "robust"
-DEFAULT_WEIGHT_MODE = WEIGHT_MODE_EQUAL
+DEFAULT_WEIGHT_MODE = WEIGHT_MODE_WEIGHTED
+# Transition-region emphasis applied on top of inverse-variance weights in
+# weighted / robust mode. The weight of a point grows linearly in log-E from
+# 1 (at Ec1) to (1 + TRANSITION_WEIGHT_GAIN) (at Ec2), so the cleaner upper
+# part of the n-value window dominates the fit and the reported R².
+TRANSITION_WEIGHT_GAIN = 2.0
 
 # Step-4 baseline fitting mode identifiers.
 BASELINE_MODE_OLS = "ols"
@@ -665,13 +670,25 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     e_fit = np.clip(e_sc_bounds[mask], 1e-30, None)
     log_E = np.log10(e_fit)
     w = np.ones_like(log_E, dtype=float)
-    if point_sigma is not None and weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
-        sig_all = np.asarray(point_sigma, dtype=float)
-        sig_all = sig_all[:x.size]
-        sig_sorted = sig_all[order][pos]
-        sig_seg = np.clip(sig_sorted[mask], 1e-12, None)
-        sigma_log = np.clip(sig_seg / (e_fit * np.log(10.0)), 1e-12, None)
-        w = 1.0 / (sigma_log ** 2)
+    if weight_mode in (WEIGHT_MODE_WEIGHTED, WEIGHT_MODE_ROBUST):
+        if point_sigma is not None:
+            sig_all = np.asarray(point_sigma, dtype=float)
+            sig_all = sig_all[:x.size]
+            sig_sorted = sig_all[order][pos]
+            sig_seg = np.clip(sig_sorted[mask], 1e-12, None)
+            sigma_log = np.clip(sig_seg / (e_fit * np.log(10.0)), 1e-12, None)
+            w = 1.0 / (sigma_log ** 2)
+        # Transition emphasis: ramp the weight linearly in log-E from 1 at
+        # Ec1 to (1 + TRANSITION_WEIGHT_GAIN) at Ec2. The upper part of the
+        # decade is where the power-law signal is strongest and least
+        # contaminated by baseline drift, so weighting it more heavily lets
+        # the slope (and the reported R²) track the cleaner transition
+        # rather than the noise floor near Ec1.
+        log_ec1 = float(np.log10(Ec1))
+        log_ec2 = float(np.log10(Ec2))
+        span = max(log_ec2 - log_ec1, 1e-12)
+        position = np.clip((log_E - log_ec1) / span, 0.0, 1.0)
+        w = w * (1.0 + TRANSITION_WEIGHT_GAIN * position)
 
     robust_mode = (weight_mode == WEIGHT_MODE_ROBUST)
     coeffs = np.polyfit(log_I, log_E, 1, w=np.sqrt(w))

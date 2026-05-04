@@ -1126,7 +1126,7 @@ class FitPreset:
     linear_high_x: str = ""
     # Step 5 — Ic / n-value window editors and weighting mode.
     show_power: bool = False
-    weight_mode: str = "equal"
+    weight_mode: str = "weighted"
     power_low_x: str = ""
     power_high_x: str = ""
 
