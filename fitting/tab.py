@@ -3332,8 +3332,9 @@ def _apply_robust_view(app, x: np.ndarray, y: np.ndarray) -> None:
 def robust_view(app):
     x_arrays = []
     y_arrays = []
+    show_trimmed = bool(getattr(app, "data_fit_show_trimmed_preview", False))
     if getattr(app, "data_fit_preview_visible", True):
-        transformed = _apply_transforms(app)
+        transformed = _apply_transforms(app, apply_trim=show_trimmed)
         x = transformed["x"]
         y = transformed["y"]
         if x is not None and y is not None and x.size and y.size:
