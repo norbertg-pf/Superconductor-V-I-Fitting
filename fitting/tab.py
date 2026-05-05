@@ -1294,6 +1294,9 @@ CAPACITOR_ENERGY_CHANNEL_NAME = "Integrated Power (J)"
 CAPACITY_DATASET_NAME = "Capacity vs Voltage"
 CAPACITY_VOLTAGE_COLUMN = "Voltage (V)"
 CAPACITY_COULOMB_COLUMN = "Capacity [F] Coulomb counting method"
+CAPACITY_ENERGY_COLUMN = "Capacity [F] Energy Integration method"
+CAPACITY_COULOMB_AVG_COLUMN = "Capacity [F] Coulomb counting Avg. over"
+CAPACITY_ENERGY_AVG_COLUMN = "Capacity [F] Energy integration Avg. over"
 CAPACITY_VOLTAGE_STEP_V = 10.0
 
 
@@ -1632,87 +1635,126 @@ def _on_capacitor_integrate_clicked(app) -> None:
         status.setStyleSheet("color: #2a7a2a;")
 
 
-def _capacity_coulomb_counting(
-    t: np.ndarray, v: np.ndarray, i: np.ndarray, step_v: float = CAPACITY_VOLTAGE_STEP_V,
-):
-    """Sample C(V) = ΔQ/ΔV at every ``step_v`` volt step on the discharge.
+def _capacitor_discharge_segment(t: np.ndarray, v: np.ndarray, i: np.ndarray):
+    """Return cleaned (t, v, i) restricted to the discharge after the peak.
 
-    The discharge is identified as the segment after the peak of ``v``.
-    Voltage levels are placed at the largest multiple of ``step_v`` not
-    above the peak and stepped down by ``step_v`` until the minimum voltage
-    on the segment is reached. Cumulative charge ``Q(t) = ∫ i dt`` is
-    interpolated at each level (after dropping non-monotonic samples), and
-    each consecutive pair gives one capacitance.
-
-    Returns (voltages, capacities) — both arrays empty when the data is
-    insufficient (e.g. less than one full step on the discharge).
+    Drops NaN/Inf samples (instruments and ASCII files often pad the tail
+    with "-nan" sentinels — without this np.argmax would return the NaN
+    index and collapse the discharge to one point) and slices from the
+    voltage peak onward. Returns (None, None, None) when the data is
+    insufficient.
     """
     t = np.asarray(t, dtype=float)
     v = np.asarray(v, dtype=float)
     i = np.asarray(i, dtype=float)
     n = int(min(t.size, v.size, i.size))
-    if n < 3 or step_v <= 0:
-        return np.array([]), np.array([])
+    if n < 3:
+        return None, None, None
     t = t[:n]; v = v[:n]; i = i[:n]
-    # Drop NaN/Inf samples (instruments and ASCII files often pad the tail
-    # with "-nan" sentinels). Without this, np.argmax returns the NaN index
-    # and the discharge segment collapses to one point.
     finite = np.isfinite(t) & np.isfinite(v) & np.isfinite(i)
     if not np.any(finite):
-        return np.array([]), np.array([])
+        return None, None, None
     t = t[finite]; v = v[finite]; i = i[finite]
     if t.size < 3:
-        return np.array([]), np.array([])
-    q = _cumulative_trapezoid(i, t)
+        return None, None, None
     idx_peak = int(np.argmax(v))
+    t_seg = t[idx_peak:]
     v_seg = v[idx_peak:]
-    q_seg = q[idx_peak:] - q[idx_peak]
-    if v_seg.size < 2:
-        return np.array([]), np.array([])
+    i_seg = i[idx_peak:]
+    if v_seg.size < 2 or float(v_seg[0]) <= float(np.min(v_seg)):
+        return None, None, None
+    return t_seg, v_seg, i_seg
+
+
+def _compute_capacity_results(
+    t: np.ndarray, v: np.ndarray, i: np.ndarray,
+    step_v: float = CAPACITY_VOLTAGE_STEP_V,
+):
+    """Compute per-step and whole-range capacities from a (t, v, i) recording.
+
+    Two methods are evaluated on the same discharge segment:
+
+    * **Coulomb counting**: ``C(V) = ΔQ/ΔV`` at every ``step_v`` volt step,
+      where ``Q(t) = ∫ i dt``.
+    * **Energy integration**: ``C(V) = 2·ΔE/(V_high² − V_low²)`` at the same
+      steps, where ``E(t) = ∫ V·i dt``. Robust to drift in the resistor
+      because the math captures the actual energy dissipated.
+
+    Whole-range averages are computed once over the full discharge with the
+    same formulas applied to the segment endpoints.
+
+    Returns a dict with keys ``voltages``, ``coulomb``, ``energy``,
+    ``coulomb_avg``, ``energy_avg`` (the avg values may be ``None`` when the
+    discharge endpoints don't permit the formula). ``None`` overall when
+    the data is insufficient for at least one full ``step_v`` step.
+    """
+    if step_v <= 0:
+        return None
+    t_seg, v_seg, i_seg = _capacitor_discharge_segment(t, v, i)
+    if t_seg is None:
+        return None
+    q = _cumulative_trapezoid(i_seg, t_seg)
+    e = _cumulative_trapezoid(v_seg * i_seg, t_seg)
     v_max_seg = float(v_seg[0])
     v_min_seg = float(np.min(v_seg))
-    if v_max_seg <= v_min_seg:
-        return np.array([]), np.array([])
     # Build voltage levels at multiples of step_v from the peak down to just
     # above v_min_seg.
     top = float(np.floor(v_max_seg / step_v) * step_v)
     if top > v_max_seg:
         top -= step_v
-    levels = []
+    levels: list[float] = []
     cur = top
     while cur >= v_min_seg - 1.0e-9:
         levels.append(cur)
         cur -= step_v
     if len(levels) < 2:
-        return np.array([]), np.array([])
+        return None
     levels_arr = np.asarray(levels, dtype=float)
     # np.interp needs strictly increasing x; reverse the discharge so v is
     # increasing and discard non-monotonic samples introduced by noise.
     v_rev = v_seg[::-1]
-    q_rev = q_seg[::-1]
+    q_rev = q[::-1]
+    e_rev = e[::-1]
     keep = np.concatenate(([True], np.diff(v_rev) > 0))
-    v_rev = v_rev[keep]
-    q_rev = q_rev[keep]
+    v_rev = v_rev[keep]; q_rev = q_rev[keep]; e_rev = e_rev[keep]
     if v_rev.size < 2:
-        return np.array([]), np.array([])
+        return None
     q_levels = np.interp(levels_arr, v_rev, q_rev)
-    voltages = []
-    capacities = []
+    e_levels = np.interp(levels_arr, v_rev, e_rev)
+    voltages: list[float] = []
+    coulomb: list[float] = []
+    energy: list[float] = []
     for k in range(len(levels_arr) - 1):
-        v_high = levels_arr[k]
-        v_low = levels_arr[k + 1]
+        v_high = float(levels_arr[k])
+        v_low = float(levels_arr[k + 1])
         dv = v_high - v_low
-        if dv <= 0:
+        denom_e = v_high * v_high - v_low * v_low
+        if dv <= 0 or denom_e <= 0:
             continue
-        dq = q_levels[k + 1] - q_levels[k]
-        # Cumulative charge grew during the discharge; reporting |C| keeps
-        # the result positive regardless of the discharge-current sign
-        # convention chosen by the user.
-        cap = abs(dq) / dv
-        v_mid = 0.5 * (v_high + v_low)
-        voltages.append(v_mid)
-        capacities.append(cap)
-    return np.asarray(voltages, dtype=float), np.asarray(capacities, dtype=float)
+        dq = abs(float(q_levels[k + 1] - q_levels[k]))
+        de = abs(float(e_levels[k + 1] - e_levels[k]))
+        voltages.append(0.5 * (v_high + v_low))
+        coulomb.append(dq / dv)
+        energy.append(2.0 * de / denom_e)
+    if not voltages:
+        return None
+    # Whole-range averages computed against the actual discharge endpoints.
+    v_start = float(v_seg[0])
+    v_end = float(v_seg[-1])
+    q_total = abs(float(q[-1]))
+    e_total = abs(float(e[-1]))
+    coulomb_avg = q_total / (v_start - v_end) if v_start > v_end else None
+    denom_full = v_start * v_start - v_end * v_end
+    energy_avg = (2.0 * e_total / denom_full) if denom_full > 0 else None
+    return {
+        "voltages": np.asarray(voltages, dtype=float),
+        "coulomb": np.asarray(coulomb, dtype=float),
+        "energy": np.asarray(energy, dtype=float),
+        "coulomb_avg": coulomb_avg,
+        "energy_avg": energy_avg,
+        "v_start": v_start,
+        "v_end": v_end,
+    }
 
 
 def _on_capacity_compute_clicked(app) -> None:
@@ -1738,10 +1780,10 @@ def _on_capacity_compute_clicked(app) -> None:
             status.setText("Could not resolve the selected rows from the recording.")
             status.setStyleSheet("color: #b35a00;")
         return
-    voltages, capacities = _capacity_coulomb_counting(
+    results = _compute_capacity_results(
         t_arr, v_arr, i_arr, step_v=CAPACITY_VOLTAGE_STEP_V,
     )
-    if voltages.size == 0:
+    if results is None:
         if status is not None:
             status.setText(
                 f"Not enough discharge for one {CAPACITY_VOLTAGE_STEP_V:.0f} V step. "
@@ -1749,20 +1791,37 @@ def _on_capacity_compute_clicked(app) -> None:
             )
             status.setStyleSheet("color: #b35a00;")
         return
+    voltages = results["voltages"]
+    coulomb = results["coulomb"]
+    energy = results["energy"]
+    coulomb_avg = results["coulomb_avg"]
+    energy_avg = results["energy_avg"]
+    channels: dict[str, np.ndarray] = {
+        CAPACITY_VOLTAGE_COLUMN: voltages,
+        CAPACITY_COULOMB_COLUMN: coulomb,
+        CAPACITY_ENERGY_COLUMN: energy,
+    }
+    if coulomb_avg is not None:
+        channels[CAPACITY_COULOMB_AVG_COLUMN] = np.asarray([coulomb_avg], dtype=float)
+    if energy_avg is not None:
+        channels[CAPACITY_ENERGY_AVG_COLUMN] = np.asarray([energy_avg], dtype=float)
     controller.add_derived_dataset(
         CAPACITY_DATASET_NAME,
-        channels={
-            CAPACITY_VOLTAGE_COLUMN: voltages,
-            CAPACITY_COULOMB_COLUMN: capacities,
-        },
+        channels=channels,
         time=None,
     )
     _populate_channel_combos(app)
     if status is not None:
+        avg_parts = []
+        if coulomb_avg is not None:
+            avg_parts.append(f"Coulomb avg ≈ {coulomb_avg:.6g} F")
+        if energy_avg is not None:
+            avg_parts.append(f"Energy avg ≈ {energy_avg:.6g} F")
+        avg_text = " / ".join(avg_parts) if avg_parts else "no avg"
         status.setText(
-            f'Stored "{CAPACITY_DATASET_NAME}" ({voltages.size} steps, '
-            f'mean C ≈ {capacities.mean():.6g} F). Pick it from the Dataset '
-            "dropdown above to plot."
+            f'Stored "{CAPACITY_DATASET_NAME}" ({voltages.size} steps; '
+            f"V {results['v_start']:.6g}→{results['v_end']:.6g} V). "
+            f"{avg_text}. Pick the dataset to plot."
         )
         status.setStyleSheet("color: #2a7a2a;")
 
