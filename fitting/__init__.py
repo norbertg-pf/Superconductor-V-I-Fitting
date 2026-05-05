@@ -90,10 +90,18 @@ def _ensure_tab_patches_applied() -> None:
     sweep and persists ``linear_fit_window`` in TDMS metadata.
     ``_preset_state_patch`` extends ``_settings_to_preset`` /
     ``_apply_preset`` so the JSON preset captures every Step 1-5, Config
-    and Settings widget. Both modules are imported lazily so headless
-    ``service`` imports don't pull in Qt or pyqtgraph.
+    and Settings widget. ``_auto_resample_patch`` auto-fills the AVG
+    textbox so high-rate DAQUniversal recordings (kS/s) drop down to
+    ~100 S/s — the regime the IEC log-log decade fit is calibrated for —
+    and keeps the Plot summary preview row's Avg/Effective rate cells
+    consistent with the textbox. All modules are imported lazily so
+    headless ``service`` imports don't pull in Qt or pyqtgraph.
     """
-    for module_name in ("_pct_anchor_patch", "_preset_state_patch"):
+    for module_name in (
+        "_pct_anchor_patch",
+        "_preset_state_patch",
+        "_auto_resample_patch",
+    ):
         try:
             module = __import__(f"{__name__}.{module_name}", fromlist=["apply_patches"])
         except Exception:
