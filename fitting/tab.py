@@ -959,7 +959,11 @@ def _connect_data_fitting_actions(app):
             combo.currentIndexChanged.connect(lambda _i: _refresh_capacitor_integrate_enabled(app))
     if getattr(app, "data_fit_cap_integrate_btn", None) is not None:
         app.data_fit_cap_integrate_btn.clicked.connect(lambda: _on_capacitor_integrate_clicked(app))
-    for combo_attr in ("data_fit_cap_q_current_cb", "data_fit_cap_q_voltage_cb"):
+    for combo_attr in (
+        "data_fit_cap_q_time_cb",
+        "data_fit_cap_q_current_cb",
+        "data_fit_cap_q_voltage_cb",
+    ):
         combo = getattr(app, combo_attr, None)
         if combo is not None:
             combo.currentIndexChanged.connect(lambda _i: _refresh_capacity_compute_enabled(app))
@@ -1164,6 +1168,7 @@ def _reset_data_fitting_defaults(app) -> None:
         "data_fit_cap_row_b_cb",
         "data_fit_cap_int_time_cb",
         "data_fit_cap_int_value_cb",
+        "data_fit_cap_q_time_cb",
         "data_fit_cap_q_current_cb",
         "data_fit_cap_q_voltage_cb",
     ):
@@ -1400,22 +1405,30 @@ def _build_capacitor_testing_tab(app, layout) -> None:
         f"Step 4: Capacity at every {CAPACITY_VOLTAGE_STEP_V:.0f} V"
     )
     cap_q_layout = QGridLayout(cap_q_group)
-    cap_q_layout.addWidget(QLabel("Capacitor bank current:"), 0, 0)
+    cap_q_layout.addWidget(QLabel("Time row:"), 0, 0)
+    app.data_fit_cap_q_time_cb = QComboBox()
+    app.data_fit_cap_q_time_cb.setToolTip(
+        'Row used as the time axis for the cumulative-charge integral.\n'
+        'Defaults to "Time"; pick another row if the discharge is sampled\n'
+        'against a different axis.'
+    )
+    cap_q_layout.addWidget(app.data_fit_cap_q_time_cb, 0, 1)
+    cap_q_layout.addWidget(QLabel("Capacitor bank current:"), 1, 0)
     app.data_fit_cap_q_current_cb = QComboBox()
     app.data_fit_cap_q_current_cb.setToolTip(
         "Discharge current row (e.g. \"idisch. on a DCCT (A)\"). The cumulative\n"
         "charge ∫ i dt is sampled at every voltage step to give the capacity\n"
         "via C = ΔQ / ΔV."
     )
-    cap_q_layout.addWidget(app.data_fit_cap_q_current_cb, 0, 1)
-    cap_q_layout.addWidget(QLabel("Capacitor bank voltage:"), 1, 0)
+    cap_q_layout.addWidget(app.data_fit_cap_q_current_cb, 1, 1)
+    cap_q_layout.addWidget(QLabel("Capacitor bank voltage:"), 2, 0)
     app.data_fit_cap_q_voltage_cb = QComboBox()
     app.data_fit_cap_q_voltage_cb.setToolTip(
         "Voltage row (e.g. \"VR on a load Resistor (V)\" if it tracks the bank\n"
         f"voltage). Capacity is computed at every {CAPACITY_VOLTAGE_STEP_V:.0f} V step\n"
         "from the peak down."
     )
-    cap_q_layout.addWidget(app.data_fit_cap_q_voltage_cb, 1, 1)
+    cap_q_layout.addWidget(app.data_fit_cap_q_voltage_cb, 2, 1)
     app.data_fit_cap_q_compute_btn = QPushButton(
         f'Compute capacity vs voltage ({CAPACITY_VOLTAGE_STEP_V:.0f} V steps)'
     )
@@ -1429,11 +1442,11 @@ def _build_capacitor_testing_tab(app, layout) -> None:
         "font-weight: bold; background-color: #6f42c1; color: white; padding: 6px;"
     )
     app.data_fit_cap_q_compute_btn.setEnabled(False)
-    cap_q_layout.addWidget(app.data_fit_cap_q_compute_btn, 2, 0, 1, 2)
+    cap_q_layout.addWidget(app.data_fit_cap_q_compute_btn, 3, 0, 1, 2)
     app.data_fit_cap_q_compute_status = QLabel("")
     app.data_fit_cap_q_compute_status.setStyleSheet("color: gray;")
     app.data_fit_cap_q_compute_status.setWordWrap(True)
-    cap_q_layout.addWidget(app.data_fit_cap_q_compute_status, 3, 0, 1, 2)
+    cap_q_layout.addWidget(app.data_fit_cap_q_compute_status, 4, 0, 1, 2)
     layout.addWidget(cap_q_group)
 
 
@@ -1449,6 +1462,7 @@ def _refresh_capacitor_row_combos(app) -> None:
     combo_b = getattr(app, "data_fit_cap_row_b_cb", None)
     int_time = getattr(app, "data_fit_cap_int_time_cb", None)
     int_value = getattr(app, "data_fit_cap_int_value_cb", None)
+    q_time = getattr(app, "data_fit_cap_q_time_cb", None)
     q_current = getattr(app, "data_fit_cap_q_current_cb", None)
     q_voltage = getattr(app, "data_fit_cap_q_voltage_cb", None)
     if combo_a is None or combo_b is None:
@@ -1471,8 +1485,14 @@ def _refresh_capacitor_row_combos(app) -> None:
         if idx_pow >= 0:
             int_value.setCurrentIndex(idx_pow)
     if q_current is not None and q_voltage is not None:
-        # Step 4 picks rows from the recording itself; "Time" is not a
-        # current/voltage candidate so the dropdowns just list channels.
+        # Step 4 picks the time, current and voltage rows. The time dropdown
+        # offers "Time" plus any channel; the current/voltage dropdowns only
+        # list real channels.
+        if q_time is not None:
+            _refill_combo(q_time, options)
+            idx_time = q_time.findText("Time")
+            if idx_time >= 0:
+                q_time.setCurrentIndex(idx_time)
         _refill_combo(q_current, names)
         _refill_combo(q_voltage, names)
         _try_select(q_current, ("idisch", "discharge", "Current", "current", "I_"))
@@ -1484,11 +1504,16 @@ def _refresh_capacitor_row_combos(app) -> None:
 
 def _refresh_capacity_compute_enabled(app) -> None:
     btn = getattr(app, "data_fit_cap_q_compute_btn", None)
+    q_time = getattr(app, "data_fit_cap_q_time_cb", None)
     q_current = getattr(app, "data_fit_cap_q_current_cb", None)
     q_voltage = getattr(app, "data_fit_cap_q_voltage_cb", None)
-    if btn is None or q_current is None or q_voltage is None:
+    if btn is None or q_time is None or q_current is None or q_voltage is None:
         return
-    btn.setEnabled(bool(q_current.currentText()) and bool(q_voltage.currentText()))
+    btn.setEnabled(
+        bool(q_time.currentText())
+        and bool(q_current.currentText())
+        and bool(q_voltage.currentText())
+    )
 
 
 def _refresh_capacitor_compute_enabled(app) -> None:
@@ -1688,14 +1713,15 @@ def _on_capacity_compute_clicked(app) -> None:
     controller = getattr(app, "data_fit_controller", None)
     if controller is None:
         return
+    time_name = app.data_fit_cap_q_time_cb.currentText()
     current_name = app.data_fit_cap_q_current_cb.currentText()
     voltage_name = app.data_fit_cap_q_voltage_cb.currentText()
-    if not current_name or not voltage_name:
+    if not time_name or not current_name or not voltage_name:
         if status is not None:
-            status.setText("Pick both a current row and a voltage row.")
+            status.setText("Pick a time row, a current row and a voltage row.")
             status.setStyleSheet("color: #b35a00;")
         return
-    t_arr = controller.time_array
+    t_arr = _resolve_capacitor_row(app, time_name)
     i_arr = controller.get_channel(current_name)
     v_arr = controller.get_channel(voltage_name)
     if t_arr is None or i_arr is None or v_arr is None:
