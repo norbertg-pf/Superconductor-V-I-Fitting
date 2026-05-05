@@ -547,6 +547,78 @@ def _read_time_channel(tdms_file):
     return None
 
 
+# ASCII recording extensions accepted by the file dialog and load_recording.
+# CSV is recognised by extension and parsed with a comma delimiter; the rest
+# fall back to whitespace (tab- and space-separated columns).
+_ASCII_RECORDING_EXTS = {".txt", ".dat", ".csv", ".tsv", ".asc"}
+
+
+def _read_ascii_recording(path: str):
+    """Read a tab- or whitespace-separated ASCII data file with a header row.
+
+    Expected layout::
+
+        time(s)\ticharge(A)\tidisch(A)\tVR(V)
+        0.000e+00\t4.000e+02\t6.640e-09\t-3.200e+02
+        ...
+
+    The first column whose name starts with ``time`` (case-insensitive) is
+    taken as the time array. Other columns become channels, keyed by the
+    header text verbatim (units kept). Returns
+    ``(time_array, channels_dict, metadata_dict)``.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        # Skip blank/comment lines until we find a header.
+        header_line = ""
+        for line in fh:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("%"):
+                continue
+            header_line = stripped
+            break
+    if not header_line:
+        raise ValueError("File is empty or has no header line.")
+    # Comma vs whitespace: detect from the extension first, then from the
+    # header line as a fallback.
+    use_comma = path.lower().endswith(".csv") or (
+        "," in header_line and "\t" not in header_line
+    )
+    delim = "," if use_comma else None  # None → any whitespace
+    column_names = [c.strip() for c in (
+        header_line.split(",") if use_comma else header_line.split()
+    )]
+    column_names = [c for c in column_names if c]
+    if not column_names:
+        raise ValueError("Could not parse header columns.")
+    try:
+        data = np.loadtxt(
+            path, skiprows=1, dtype=float, delimiter=delim, comments=("#", "%"),
+        )
+    except ValueError as exc:
+        raise ValueError(f"Could not parse numeric data: {exc}") from exc
+    if data.ndim == 1:
+        # A single data row (or single column) — promote to 2-D for uniform indexing.
+        data = data.reshape(1, -1) if data.size == len(column_names) else data.reshape(-1, 1)
+    if data.shape[1] != len(column_names):
+        raise ValueError(
+            f"Header has {len(column_names)} columns but data has {data.shape[1]}."
+        )
+    time_idx = -1
+    for k, name in enumerate(column_names):
+        if name.lower().startswith("time"):
+            time_idx = k
+            break
+    time_array = data[:, time_idx] if time_idx >= 0 else None
+    channels: dict[str, np.ndarray] = {}
+    metadata: dict[str, dict] = {}
+    for k, name in enumerate(column_names):
+        if k == time_idx:
+            continue
+        channels[name] = np.asarray(data[:, k], dtype=float)
+        metadata[name] = {"scale": 1.0, "offset": 0.0, "voltage_tap_cm": None}
+    return time_array, channels, metadata
+
+
 _VTAP_KEYS = ("VTap_Distance_cm", "Voltage_Tap_Distance_cm",
               "Voltage_Tap_Distance", "Voltage_Tab_Distance")
 
@@ -660,45 +732,64 @@ class DataFittingController:
         self.datasets = {}
         self.active_dataset_name = ""
         if not path or not os.path.exists(path):
-            return False, "No recording found. Click 'Load File…' to choose a TDMS."
+            return False, "No recording found. Click 'Load File…' to choose a file."
+        ext = os.path.splitext(path)[1].lower()
         try:
-            with TdmsFile.read(path) as tdms_file:
-                self.time_array = _read_time_channel(tdms_file)
-                names: list[str] = []
-                for group in tdms_file.groups():
-                    is_fit_results_group = (group.name == "FitResults")
-                    for channel in group.channels():
-                        name = getattr(channel, "name", "")
-                        if not name or name.lower() == "time":
-                            continue
-                        props = dict(getattr(channel, "properties", {}) or {})
-                        if is_fit_results_group:
-                            # FitResults group → property dict per fitted label.
-                            self.saved_fit_results[name] = props
-                            continue
-                        if name in self.channel_cache:
-                            continue
-                        self.channel_cache[name] = np.asarray(channel[:], dtype=float)
-                        self.channel_metadata[name] = _read_channel_metadata(channel)
-                        names.append(name)
-                        # Same-group mode: fit_* properties live on the source
-                        # channel itself. Strip the prefix so consumers see the
-                        # same dict shape as a FitResults entry.
-                        same_group_fit = {
-                            key[len(_FIT_PROPERTY_PREFIX):]: value
-                            for key, value in props.items()
-                            if key.startswith(_FIT_PROPERTY_PREFIX)
-                        }
-                        if same_group_fit and name not in self.saved_fit_results:
-                            self.saved_fit_results[name] = same_group_fit
-                self.channel_names = names
+            if ext == ".tdms":
+                self._load_recording_from_tdms(path)
+            elif ext in _ASCII_RECORDING_EXTS:
+                self._load_recording_from_ascii(path)
+            else:
+                return False, (
+                    f"Unsupported file extension '{ext}'. "
+                    "Use .tdms or an ASCII data file (.txt, .dat, .csv, .tsv, .asc)."
+                )
         except Exception as exc:
-            return False, f"Could not read TDMS: {exc}"
+            return False, f"Could not read file: {exc}"
         if self.time_array is None:
-            return False, "Recording has no 'Time' channel."
+            return False, "Recording has no time column."
         self.tdms_path = path
         self.register_recording_dataset(os.path.basename(path))
         return True, f"Loaded {os.path.basename(path)} with {len(self.channel_names)} channels."
+
+    def _load_recording_from_tdms(self, path: str) -> None:
+        with TdmsFile.read(path) as tdms_file:
+            self.time_array = _read_time_channel(tdms_file)
+            names: list[str] = []
+            for group in tdms_file.groups():
+                is_fit_results_group = (group.name == "FitResults")
+                for channel in group.channels():
+                    name = getattr(channel, "name", "")
+                    if not name or name.lower() == "time":
+                        continue
+                    props = dict(getattr(channel, "properties", {}) or {})
+                    if is_fit_results_group:
+                        # FitResults group → property dict per fitted label.
+                        self.saved_fit_results[name] = props
+                        continue
+                    if name in self.channel_cache:
+                        continue
+                    self.channel_cache[name] = np.asarray(channel[:], dtype=float)
+                    self.channel_metadata[name] = _read_channel_metadata(channel)
+                    names.append(name)
+                    # Same-group mode: fit_* properties live on the source
+                    # channel itself. Strip the prefix so consumers see the
+                    # same dict shape as a FitResults entry.
+                    same_group_fit = {
+                        key[len(_FIT_PROPERTY_PREFIX):]: value
+                        for key, value in props.items()
+                        if key.startswith(_FIT_PROPERTY_PREFIX)
+                    }
+                    if same_group_fit and name not in self.saved_fit_results:
+                        self.saved_fit_results[name] = same_group_fit
+            self.channel_names = names
+
+    def _load_recording_from_ascii(self, path: str) -> None:
+        time_arr, channels, metadata = _read_ascii_recording(path)
+        self.time_array = time_arr
+        self.channel_cache.update(channels)
+        self.channel_metadata.update(metadata)
+        self.channel_names = list(channels.keys())
 
     def get_channel(self, name: str):
         if not name:
@@ -1727,7 +1818,11 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_clear_btn = QPushButton("Clear")
     app.data_fit_clear_btn.setToolTip("Reset Data Fitting to defaults and clear loaded curves and preview state.")
     app.data_fit_load_btn = QPushButton("Load file…")
-    app.data_fit_load_btn.setToolTip("Open a TDMS recording from disk for fitting.")
+    app.data_fit_load_btn.setToolTip(
+        "Open a recording from disk: a TDMS file, or an ASCII data file\n"
+        "(.txt/.dat/.csv/.tsv/.asc) whose first row is column names like\n"
+        '"time(s)\ticharge(A)\tidisch(A)\tVR(V)".'
+    )
     app.data_fit_refresh_btn = QPushButton("Use current")
     app.data_fit_refresh_btn.setToolTip("Reload the most recent recording from the active acquisition into this tab.")
     app.data_fit_export_btn = QPushButton("Export…")
@@ -3215,7 +3310,17 @@ def _safe_checkbox_set_checked(app, attr_name: str, value: bool) -> None:
 def open_file_dialog(app):
     runtime_state = getattr(app, "runtime_state", None)
     start_dir = getattr(runtime_state, "output_folder", "") or ""
-    path, _ = QFileDialog.getOpenFileName(app, "Select TDMS recording", start_dir, "TDMS Files (*.tdms);;All Files (*)")
+    path, _ = QFileDialog.getOpenFileName(
+        app,
+        "Select recording",
+        start_dir,
+        (
+            "Supported recordings (*.tdms *.txt *.dat *.csv *.tsv *.asc);;"
+            "TDMS files (*.tdms);;"
+            "ASCII data (*.txt *.dat *.csv *.tsv *.asc);;"
+            "All files (*)"
+        ),
+    )
     if not path:
         return
     # Start from a true clean slate (same behavior as Clear) before loading.
