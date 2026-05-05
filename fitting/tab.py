@@ -618,6 +618,10 @@ class DataFittingController:
         # FitResults group inside the TDMS or fit_* properties attached to the
         # source channel itself. Used to redraw fitted curves on file load.
         self.saved_fit_results: dict[str, dict] = {}
+        # Per-book user columns added in the Data book dialog. Each entry is
+        # ``{"name": str, "data": np.ndarray, "formula": str}``. Lives on the
+        # controller so each loaded TDMS keeps its own user columns.
+        self.book_user_columns: list[dict] = []
 
     # --- data source -----------------------------------------------------
     def load_recording(self, path: str) -> tuple[bool, str]:
@@ -862,11 +866,20 @@ def _on_transform_inputs_changed(app) -> None:
 
 
 def _reset_data_fitting_defaults(app) -> None:
+    # Drop every loaded book — Clear is a hard reset back to the initial
+    # state. Mutate in place so any local references held by callers (e.g.
+    # ``open_file_dialog`` re-using its books reference after the reset)
+    # stay valid.
+    if not hasattr(app, "data_fit_books") or app.data_fit_books is None:
+        app.data_fit_books = []
+    else:
+        app.data_fit_books.clear()
     app.data_fit_controller.tdms_path = ""
     app.data_fit_controller.time_array = None
     app.data_fit_controller.channel_cache = {}
     app.data_fit_controller.channel_names = []
     app.data_fit_controller.channel_metadata = {}
+    app.data_fit_controller.book_user_columns = []
     app.data_fit_path_label.setText("No file loaded.")
     app.data_fit_path_label.setStyleSheet("color: gray;")
     for cb in (app.data_fit_time_cb, app.data_fit_x_cb, app.data_fit_y_cb):
@@ -2457,12 +2470,31 @@ def open_file_dialog(app):
     path, _ = QFileDialog.getOpenFileName(app, "Select TDMS recording", start_dir, "TDMS Files (*.tdms);;All Files (*)")
     if not path:
         return
-    # Start from a true clean slate (same behavior as Clear) before loading.
-    _reset_data_fitting_defaults(app)
-    # Clear stale curves and result text so the new file starts on an
-    # empty plot rather than piling on top of the previous load.
-    _clear_plot_state_for_new_recording(app)
-    ok, msg = app.data_fit_controller.load_recording(path)
+
+    books = _data_fit_get_books(app)
+    current = getattr(app, "data_fit_controller", None)
+    is_first_book = not books and (current is None or not current.tdms_path)
+
+    if is_first_book:
+        # First book — start from a clean slate (preserves the historical UX)
+        # and load into the bootstrap controller so existing pointers stay valid.
+        _reset_data_fitting_defaults(app)
+        _clear_plot_state_for_new_recording(app)
+        target = current if current is not None else DataFittingController(app)
+        ok, msg = target.load_recording(path)
+        if ok:
+            app.data_fit_controller = target
+            books.append(target)
+    else:
+        # Subsequent loads add a new book without wiping settings or plotted
+        # curves — the user can switch back to a previous book or delete one
+        # from the Data book dialog.
+        target = DataFittingController(app)
+        ok, msg = target.load_recording(path)
+        if ok:
+            books.append(target)
+            app.data_fit_controller = target
+
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
     if ok:
@@ -6613,7 +6645,9 @@ class _DataBookModel(QAbstractTableModel):
                 "data": np.asarray(c.data, dtype=float).copy(),
                 "formula": c.formula,
             })
-        self._app.data_fit_book_user_columns = snapshot
+        controller = getattr(self._app, "data_fit_controller", None)
+        if controller is not None:
+            controller.book_user_columns = snapshot
 
     def _refresh_plot_if_relevant(self, col) -> None:
         app = self._app
@@ -6673,7 +6707,12 @@ def _build_data_book_columns(app) -> list:
                 data=arr,
                 source_key=name,
             ))
-    for uc in (getattr(app, "data_fit_book_user_columns", None) or []):
+    user_cols_source = (
+        list(getattr(controller, "book_user_columns", None) or [])
+        if controller is not None
+        else []
+    )
+    for uc in user_cols_source:
         columns.append(_DataBookColumn(
             letter=_data_book_column_letter(len(columns)),
             name=str(uc.get("name", "User")),
@@ -6683,18 +6722,82 @@ def _build_data_book_columns(app) -> list:
     return columns
 
 
-def _open_data_table_dialog(app) -> None:
-    """Open an OriginLab-style 'Data book' for the loaded TDMS.
+def _data_fit_get_books(app) -> list:
+    """Return the in-memory list of loaded books (DataFittingControllers).
 
-    Each channel becomes a letter-named column (A, B, C, …) with editable
-    cells, a "Long Name" row and an "F(x)=" formula row. Formulas reference
-    other columns by their letter; numpy functions (sin, log, sqrt, …) and
+    The list is created lazily and never holds the bootstrap empty controller.
+    Switching books reassigns ``app.data_fit_controller`` to the chosen entry.
+    """
+    books = getattr(app, "data_fit_books", None)
+    if books is None:
+        books = []
+        app.data_fit_books = books
+    return books
+
+
+def _data_fit_book_label(controller, idx: Optional[int] = None) -> str:
+    """Display label for a book in the selector combo."""
+    if controller is None or not getattr(controller, "tdms_path", ""):
+        return "(empty)" if idx is None else f"(empty) #{idx + 1}"
+    return os.path.basename(controller.tdms_path)
+
+
+def _data_fit_active_book_idx(app) -> int:
+    """Index of ``app.data_fit_controller`` in the books list, or -1."""
+    books = _data_fit_get_books(app)
+    ctrl = getattr(app, "data_fit_controller", None)
+    if ctrl is None or ctrl not in books:
+        return -1
+    return books.index(ctrl)
+
+
+def _set_active_data_fit_book(app, idx: int) -> bool:
+    """Make ``app.data_fit_books[idx]`` the active controller and refresh the UI.
+
+    Repopulates the channel combos, re-reads metadata for the new book,
+    redraws the preview, and updates the path label. Plotted curves in
+    ``data_fit_curves`` are independent snapshots and survive book switches.
+    """
+    books = _data_fit_get_books(app)
+    if not (0 <= idx < len(books)):
+        return False
+    target = books[idx]
+    if app.data_fit_controller is target:
+        return True
+    app.data_fit_controller = target
+    if hasattr(app, "data_fit_path_label"):
+        if target.tdms_path:
+            label = (f"Loaded {os.path.basename(target.tdms_path)} with "
+                     f"{len(target.channel_names)} channels.")
+            app.data_fit_path_label.setText(label)
+            app.data_fit_path_label.setStyleSheet("color: black;")
+        else:
+            app.data_fit_path_label.setText("No file loaded.")
+            app.data_fit_path_label.setStyleSheet("color: gray;")
+    try:
+        _populate_channel_combos(app)
+        load_metadata_from_tdms(app)
+        refresh_preview(app)
+    except Exception:
+        traceback.print_exc()
+    return True
+
+
+def _open_data_table_dialog(app) -> None:
+    """Open an OriginLab-style 'Data book' for the loaded TDMS recordings.
+
+    Each loaded TDMS lives as its own book — the combo at the top switches
+    between them, and "Delete this book" drops the active one. Inside a book,
+    every channel becomes a letter-named column (A, B, C, …) with an editable
+    "Long Name" row and an "F(x)=" formula row. Formulas reference other
+    columns by their letter; numpy functions (sin, log, sqrt, …) and
     constants (pi, e) are available. Edits to channel-backed columns mutate
     the controller's channel cache so the live preview reflects them.
     """
     from PyQt5.QtWidgets import (
         QAbstractItemView,
         QApplication,
+        QComboBox,
         QDialog,
         QDialogButtonBox,
         QFormLayout,
@@ -6711,34 +6814,40 @@ def _open_data_table_dialog(app) -> None:
     )
     from PyQt5.QtGui import QKeySequence
 
-    controller = getattr(app, "data_fit_controller", None)
-    has_channels = bool(controller and controller.channel_names)
-    has_time = controller is not None and controller.time_array is not None
-    if not has_channels and not has_time:
+    books = _data_fit_get_books(app)
+    # Seed the books list from the bootstrap controller if it has data but
+    # was never registered (e.g. files loaded before this feature shipped).
+    bootstrap = getattr(app, "data_fit_controller", None)
+    if not books and bootstrap is not None and bootstrap.tdms_path:
+        books.append(bootstrap)
+
+    if not books:
         QMessageBox.information(
             app, "Data book",
             "Load a recording with 'Load file…' first.",
         )
         return
 
-    columns = _build_data_book_columns(app)
-    if not columns:
-        QMessageBox.information(
-            app, "Data book", "Loaded recording has no readable channels.",
-        )
-        return
-
     dialog = QDialog(app)
     dialog.setWindowTitle("Data book — fitting")
-    dialog.resize(960, 600)
+    dialog.resize(960, 620)
     root = QVBoxLayout(dialog)
 
-    # --- top info row --------------------------------------------------
+    # --- top row: book selector + dimensions readout -------------------
     top = QHBoxLayout()
-    fname = (os.path.basename(controller.tdms_path)
-             if controller and controller.tdms_path else "(no file)")
-    title = QLabel(f"Book: <b>{fname}</b>")
-    top.addWidget(title)
+    top.addWidget(QLabel("Active book:"))
+    book_cb = QComboBox()
+    book_cb.setMinimumWidth(280)
+    top.addWidget(book_cb)
+    delete_book_btn = QPushButton("Delete this book")
+    delete_book_btn.setToolTip(
+        "Remove the currently selected book from memory. Plotted curves are "
+        "independent snapshots and stay on the plot."
+    )
+    delete_book_btn.setStyleSheet(
+        "background-color: #fbe9e9; color: #802020; padding: 4px 10px;"
+    )
+    top.addWidget(delete_book_btn)
     top.addStretch()
     info_lbl = QLabel("")
     info_lbl.setStyleSheet("color: gray;")
@@ -6754,27 +6863,101 @@ def _open_data_table_dialog(app) -> None:
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
     table.verticalHeader().setDefaultSectionSize(20)
     table.verticalHeader().setMinimumWidth(86)
-
-    model = _DataBookModel(app, columns, parent=table)
-    table.setModel(model)
     root.addWidget(table, stretch=1)
 
-    def _refresh_info() -> None:
-        n_data = max(0, model.rowCount() - model.META_ROWS)
-        info_lbl.setText(f"{n_data} rows  ·  {model.columnCount()} cols")
+    state: dict = {"model": None}
 
-    _refresh_info()
-    for sig in (model.rowsInserted, model.rowsRemoved,
-                model.columnsInserted, model.columnsRemoved,
-                model.modelReset):
-        sig.connect(lambda *_: _refresh_info())
+    def _refresh_info() -> None:
+        m = state["model"]
+        if m is None:
+            info_lbl.setText("")
+            return
+        n_data = max(0, m.rowCount() - m.META_ROWS)
+        info_lbl.setText(f"{n_data} rows  ·  {m.columnCount()} cols")
+
+    def _refill_book_combo(active_idx: int) -> None:
+        book_cb.blockSignals(True)
+        book_cb.clear()
+        for i, ctrl in enumerate(books):
+            book_cb.addItem(_data_fit_book_label(ctrl, i))
+        if 0 <= active_idx < book_cb.count():
+            book_cb.setCurrentIndex(active_idx)
+        book_cb.blockSignals(False)
+
+    def _rebuild_model() -> None:
+        columns = _build_data_book_columns(app)
+        if not columns:
+            table.setModel(None)
+            state["model"] = None
+            _refresh_info()
+            return
+        new_model = _DataBookModel(app, columns, parent=table)
+        table.setModel(new_model)
+        state["model"] = new_model
+        _refresh_info()
+        for sig in (new_model.rowsInserted, new_model.rowsRemoved,
+                    new_model.columnsInserted, new_model.columnsRemoved,
+                    new_model.modelReset):
+            sig.connect(lambda *_: _refresh_info())
+
+    def _on_book_changed(idx: int) -> None:
+        if idx < 0 or idx >= len(books):
+            return
+        if not _set_active_data_fit_book(app, idx):
+            return
+        _rebuild_model()
+
+    def _on_delete_book() -> None:
+        idx = _data_fit_active_book_idx(app)
+        if idx < 0:
+            return
+        ctrl = books[idx]
+        ans = QMessageBox.question(
+            dialog, "Delete book",
+            f"Delete this book?\n\n  {_data_fit_book_label(ctrl)}\n\n"
+            "The book's channel data and user columns will be dropped from "
+            "memory. Plotted curves on the main plot are independent "
+            "snapshots and will stay.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        books.pop(idx)
+        if not books:
+            # Nothing left — close the dialog and show the same message the
+            # main UI uses for an empty load slot.
+            try:
+                _reset_data_fitting_defaults(app)
+            except Exception:
+                traceback.print_exc()
+            dialog.accept()
+            QMessageBox.information(
+                app, "Data book",
+                "All books have been deleted. Use 'Load file…' to load a new recording.",
+            )
+            return
+        new_active = max(0, idx - 1)
+        _set_active_data_fit_book(app, new_active)
+        _refill_book_combo(new_active)
+        _rebuild_model()
+
+    # Initial population.
+    initial_idx = max(0, _data_fit_active_book_idx(app))
+    _refill_book_combo(initial_idx)
+    _set_active_data_fit_book(app, initial_idx)
+    _rebuild_model()
+
+    book_cb.currentIndexChanged.connect(_on_book_changed)
+    delete_book_btn.clicked.connect(_on_delete_book)
 
     # --- selection helpers --------------------------------------------
     def _selected_data_rows() -> list[int]:
         sm = table.selectionModel()
-        if sm is None:
+        m = state["model"]
+        if sm is None or m is None:
             return []
-        rows = sorted({i.row() for i in sm.selectedIndexes() if i.row() >= model.META_ROWS})
+        rows = sorted({i.row() for i in sm.selectedIndexes() if i.row() >= m.META_ROWS})
         return rows
 
     def _selected_columns() -> list[int]:
@@ -6785,14 +6968,23 @@ def _open_data_table_dialog(app) -> None:
 
     # --- actions -------------------------------------------------------
     def _on_insert_row() -> None:
+        m = state["model"]
+        if m is None:
+            return
         rows = _selected_data_rows()
-        target_row = rows[0] if rows else model.META_ROWS
-        model.insertRows(target_row, 1)
+        target_row = rows[0] if rows else m.META_ROWS
+        m.insertRows(target_row, 1)
 
     def _on_append_row() -> None:
-        model.insertRows(model.rowCount(), 1)
+        m = state["model"]
+        if m is None:
+            return
+        m.insertRows(m.rowCount(), 1)
 
     def _on_delete_rows() -> None:
+        m = state["model"]
+        if m is None:
+            return
         rows = _selected_data_rows()
         if not rows:
             QMessageBox.information(
@@ -6800,9 +6992,12 @@ def _open_data_table_dialog(app) -> None:
             )
             return
         for r in reversed(rows):
-            model.removeRows(r, 1)
+            m.removeRows(r, 1)
 
     def _prompt_add_column() -> None:
+        m = state["model"]
+        if m is None:
+            return
         sub = QDialog(dialog)
         sub.setWindowTitle("Add column")
         form = QFormLayout(sub)
@@ -6818,15 +7013,17 @@ def _open_data_table_dialog(app) -> None:
         form.addRow(btns)
         if sub.exec_() != QDialog.Accepted:
             return
-        new_col = model.add_user_column(
+        new_col = m.add_user_column(
             name=name_ed.text(), formula=formula_ed.text(),
         )
-        # Scroll to the new column.
         if new_col is not None:
-            new_idx = model.columnCount() - 1
-            table.scrollTo(model.index(0, new_idx))
+            new_idx = m.columnCount() - 1
+            table.scrollTo(m.index(0, new_idx))
 
     def _on_remove_column() -> None:
+        m = state["model"]
+        if m is None:
+            return
         cols = _selected_columns()
         if not cols:
             QMessageBox.information(
@@ -6835,7 +7032,7 @@ def _open_data_table_dialog(app) -> None:
             )
             return
         col_idx = cols[0]
-        col = model.column_at(col_idx)
+        col = m.column_at(col_idx)
         if col is None:
             return
         if col.is_channel:
@@ -6845,17 +7042,23 @@ def _open_data_table_dialog(app) -> None:
                 "removed — only user-added columns can.",
             )
             return
-        model.remove_column_at(col_idx)
+        m.remove_column_at(col_idx)
 
     def _on_recalc_column() -> None:
+        m = state["model"]
+        if m is None:
+            return
         cols = _selected_columns()
         if not cols:
             return
         for c in cols:
-            model.reapply_formula(c)
+            m.reapply_formula(c)
 
     # --- copy / paste --------------------------------------------------
     def _on_copy() -> None:
+        m = state["model"]
+        if m is None:
+            return
         sm = table.selectionModel()
         idxs = sm.selectedIndexes() if sm is not None else []
         if not idxs:
@@ -6866,12 +7069,15 @@ def _open_data_table_dialog(app) -> None:
         for r in rows:
             cells: list[str] = []
             for c in cols:
-                v = model.data(model.index(r, c), Qt.DisplayRole)
+                v = m.data(m.index(r, c), Qt.DisplayRole)
                 cells.append("" if v is None else str(v))
             lines.append("\t".join(cells))
         QApplication.clipboard().setText("\n".join(lines))
 
     def _on_paste() -> None:
+        m = state["model"]
+        if m is None:
+            return
         sm = table.selectionModel()
         idxs = sm.selectedIndexes() if sm is not None else []
         if not idxs:
@@ -6884,9 +7090,9 @@ def _open_data_table_dialog(app) -> None:
         for dr, line in enumerate(lines):
             cells = line.split("\t")
             for dc, cell in enumerate(cells):
-                target = model.index(start.row() + dr, start.column() + dc)
+                target = m.index(start.row() + dr, start.column() + dc)
                 if target.isValid():
-                    model.setData(target, cell, Qt.EditRole)
+                    m.setData(target, cell, Qt.EditRole)
 
     # --- buttons -------------------------------------------------------
     actions = QHBoxLayout()
@@ -6931,14 +7137,16 @@ def _open_data_table_dialog(app) -> None:
     QShortcut(QKeySequence.Paste, table, activated=_on_paste)
 
     hint = QLabel(
-        "Each column is named A, B, C, … like in OriginLab. The F(x)= row "
-        "above the data accepts expressions referencing other columns by "
-        "their letter — e.g. <code>A+B</code>, <code>2*A</code>, "
-        "<code>sqrt(B**2+C**2)</code>, <code>log10(B)</code>, "
-        "<code>diff(A)</code>. <code>^</code> is treated as power. Edits to "
-        "channel columns (Time + the TDMS channels) update the live preview; "
-        "click 'Add to plot' to rebuild a plotted curve from the edited data. "
-        "Ctrl+C / Ctrl+V copy and paste tab-separated values."
+        "Use the <b>Active book</b> combo to switch between every TDMS file "
+        "you've loaded. Each column inside a book is named A, B, C, … like "
+        "in OriginLab. The F(x)= row above the data accepts expressions "
+        "referencing other columns by their letter — e.g. <code>A+B</code>, "
+        "<code>2*A</code>, <code>sqrt(B**2+C**2)</code>, "
+        "<code>log10(B)</code>, <code>diff(A)</code>. <code>^</code> is "
+        "treated as power. Edits to channel columns (Time + the TDMS "
+        "channels) update the live preview; click 'Add to plot' to "
+        "snapshot the edited data into a plotted curve. Ctrl+C / Ctrl+V "
+        "copy and paste tab-separated values."
     )
     hint.setStyleSheet("color: #555; font-size: 11px;")
     hint.setTextFormat(Qt.RichText)
