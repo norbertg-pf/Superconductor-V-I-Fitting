@@ -9,6 +9,7 @@ data/
 
 #JSON config files
 daq_config.json
+data_fit_preset.json
 
 # JSON auth data
 client_secret.json
