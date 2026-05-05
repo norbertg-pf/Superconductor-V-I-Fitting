@@ -1495,8 +1495,8 @@ def _refresh_capacitor_row_combos(app) -> None:
                 q_time.setCurrentIndex(idx_time)
         _refill_combo(q_current, names)
         _refill_combo(q_voltage, names)
-        _try_select(q_current, ("idisch", "discharge", "Current", "current", "I_"))
-        _try_select(q_voltage, ("VR", "Voltage", "voltage", "V_"))
+        _try_select(q_current, ("idisch", "discharge", "Current", "current", "I_", "I(", "I "))
+        _try_select(q_voltage, ("V(cap", "VR", "Voltage", "voltage", "V_", "V(", "U("))
     _refresh_capacitor_compute_enabled(app)
     _refresh_capacitor_integrate_enabled(app)
     _refresh_capacity_compute_enabled(app)
@@ -1654,6 +1654,15 @@ def _capacity_coulomb_counting(
     if n < 3 or step_v <= 0:
         return np.array([]), np.array([])
     t = t[:n]; v = v[:n]; i = i[:n]
+    # Drop NaN/Inf samples (instruments and ASCII files often pad the tail
+    # with "-nan" sentinels). Without this, np.argmax returns the NaN index
+    # and the discharge segment collapses to one point.
+    finite = np.isfinite(t) & np.isfinite(v) & np.isfinite(i)
+    if not np.any(finite):
+        return np.array([]), np.array([])
+    t = t[finite]; v = v[finite]; i = i[finite]
+    if t.size < 3:
+        return np.array([]), np.array([])
     q = _cumulative_trapezoid(i, t)
     idx_peak = int(np.argmax(v))
     v_seg = v[idx_peak:]
