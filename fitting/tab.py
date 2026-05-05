@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -802,6 +803,21 @@ def _connect_data_fitting_actions(app):
     app.data_fit_plot_scale_btn.clicked.connect(lambda: _toggle_plot_scale(app))
     if getattr(app, "data_fit_config_btn", None) is not None:
         app.data_fit_config_btn.clicked.connect(lambda: _open_fit_config_dialog(app))
+    # Capacitor Testing subtab wiring.
+    if getattr(app, "data_fit_cap_show_range", None) is not None:
+        app.data_fit_cap_show_range.toggled.connect(
+            lambda checked: _on_capacitor_show_range_toggled(app, checked)
+        )
+    for w_attr in ("data_fit_cap_range_low", "data_fit_cap_range_high"):
+        widget = getattr(app, w_attr, None)
+        if widget is not None:
+            widget.editingFinished.connect(lambda: _on_capacitor_range_text_edited(app))
+    for combo_attr in ("data_fit_cap_row_a_cb", "data_fit_cap_row_b_cb"):
+        combo = getattr(app, combo_attr, None)
+        if combo is not None:
+            combo.currentIndexChanged.connect(lambda _i: _refresh_capacitor_compute_enabled(app))
+    if getattr(app, "data_fit_cap_compute_btn", None) is not None:
+        app.data_fit_cap_compute_btn.clicked.connect(lambda: _on_capacitor_compute_clicked(app))
 
 
 
@@ -980,6 +996,31 @@ def _reset_data_fitting_defaults(app) -> None:
     _refresh_save_settings_enabled(app)
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(False)
+    # Reset Capacitor Testing controls to their defaults too.
+    band = getattr(app, "data_fit_band_capacitor", None)
+    if band is not None:
+        band.setVisible(False)
+        band.setMovable(False)
+    show_cb = getattr(app, "data_fit_cap_show_range", None)
+    if show_cb is not None:
+        show_cb.blockSignals(True)
+        show_cb.setChecked(False)
+        show_cb.blockSignals(False)
+    for w_attr in ("data_fit_cap_range_low", "data_fit_cap_range_high"):
+        w = getattr(app, w_attr, None)
+        if w is not None:
+            _set_silently(w, "")
+    for combo_attr in ("data_fit_cap_row_a_cb", "data_fit_cap_row_b_cb"):
+        combo = getattr(app, combo_attr, None)
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.blockSignals(False)
+    status = getattr(app, "data_fit_cap_compute_status", None)
+    if status is not None:
+        status.setText("")
+        status.setStyleSheet("color: gray;")
+    _refresh_capacitor_compute_enabled(app)
 
 
 def _curve_profile_key_from_ui(app) -> str:
@@ -1074,6 +1115,230 @@ def _sync_active_length_settings_from_profile_key(app, key: str) -> None:
     use_length = bool(src.get("use_length", False))
     length_cm = float(src.get("length_cm", 1.0) or 1.0)
     _sync_active_length_settings(app, use_length=use_length, length_cm=length_cm)
+
+
+# ---------------------------------------------------------------------------
+# Capacitor Testing subtab
+# ---------------------------------------------------------------------------
+
+CAPACITOR_POWER_CHANNEL_NAME = "Power on a Resistor (W)"
+
+
+def _build_capacitor_testing_tab(app, layout) -> None:
+    """Build the Capacitor Testing subtab content into ``layout``.
+
+    Adds a Step 1 group for X-axis range selection (with a draggable region
+    on the plot and editable low/high textboxes) and a Step 2 group with
+    two row dropdowns and a button that creates an in-memory
+    "Power on a Resistor (W)" channel by elementwise multiplication.
+    """
+    # --- Step 1: X-axis data range selection ---
+    cap_range_group = QGroupBox("Step 1: Select data range on X-axis")
+    cap_range_layout = QGridLayout(cap_range_group)
+    app.data_fit_cap_show_range = QCheckBox("Show / edit")
+    app.data_fit_cap_show_range.setChecked(False)
+    app.data_fit_cap_show_range.setToolTip(
+        "Show/hide the purple X-range selector on the plot. While shown, drag\n"
+        "its edges to update the Low / High textboxes (and vice versa)."
+    )
+    cap_range_layout.addWidget(app.data_fit_cap_show_range, 0, 0, 1, 4)
+    cap_range_layout.addWidget(QLabel("Low (X):"), 1, 0)
+    app.data_fit_cap_range_low = QLineEdit()
+    app.data_fit_cap_range_low.setMaximumWidth(120)
+    app.data_fit_cap_range_low.setPlaceholderText("auto")
+    app.data_fit_cap_range_low.setToolTip(
+        "Lower bound of the selected X range. Editable; drag the band on the\n"
+        "plot to update, or type a value here."
+    )
+    cap_range_layout.addWidget(app.data_fit_cap_range_low, 1, 1)
+    cap_range_layout.addWidget(QLabel("High (X):"), 1, 2)
+    app.data_fit_cap_range_high = QLineEdit()
+    app.data_fit_cap_range_high.setMaximumWidth(120)
+    app.data_fit_cap_range_high.setPlaceholderText("auto")
+    app.data_fit_cap_range_high.setToolTip(
+        "Upper bound of the selected X range. Editable; drag the band on the\n"
+        "plot to update, or type a value here."
+    )
+    cap_range_layout.addWidget(app.data_fit_cap_range_high, 1, 3)
+    layout.addWidget(cap_range_group)
+
+    # --- Step 2: compute Power on a Resistor (W) ---
+    cap_power_group = QGroupBox("Step 2: Compute Power on a Resistor (W)")
+    cap_power_layout = QGridLayout(cap_power_group)
+    cap_power_layout.addWidget(QLabel("Row A:"), 0, 0)
+    app.data_fit_cap_row_a_cb = QComboBox()
+    app.data_fit_cap_row_a_cb.setToolTip("First row of the multiplication.")
+    cap_power_layout.addWidget(app.data_fit_cap_row_a_cb, 0, 1)
+    cap_power_layout.addWidget(QLabel("Row B:"), 1, 0)
+    app.data_fit_cap_row_b_cb = QComboBox()
+    app.data_fit_cap_row_b_cb.setToolTip("Second row of the multiplication.")
+    cap_power_layout.addWidget(app.data_fit_cap_row_b_cb, 1, 1)
+    app.data_fit_cap_compute_btn = QPushButton("Power on a Resistor (W) calculation")
+    app.data_fit_cap_compute_btn.setToolTip(
+        "Compute the elementwise product of Row A and Row B and store it in\n"
+        "memory as a fifth channel \"Power on a Resistor (W)\". The new row\n"
+        "becomes selectable in the X- and Y-axis dropdowns of the Channels\n"
+        "group above."
+    )
+    app.data_fit_cap_compute_btn.setStyleSheet(
+        "font-weight: bold; background-color: #6f42c1; color: white; padding: 6px;"
+    )
+    app.data_fit_cap_compute_btn.setEnabled(False)
+    cap_power_layout.addWidget(app.data_fit_cap_compute_btn, 2, 0, 1, 2)
+    app.data_fit_cap_compute_status = QLabel("")
+    app.data_fit_cap_compute_status.setStyleSheet("color: gray;")
+    app.data_fit_cap_compute_status.setWordWrap(True)
+    cap_power_layout.addWidget(app.data_fit_cap_compute_status, 3, 0, 1, 2)
+    layout.addWidget(cap_power_group)
+
+
+def _refresh_capacitor_row_combos(app) -> None:
+    """Repopulate the Capacitor Testing row dropdowns from the current channels.
+
+    Includes "Time" and the in-memory Power channel (if it exists) so the user
+    can chain calculations on top of a previously computed row.
+    """
+    combo_a = getattr(app, "data_fit_cap_row_a_cb", None)
+    combo_b = getattr(app, "data_fit_cap_row_b_cb", None)
+    if combo_a is None or combo_b is None:
+        return
+    controller = getattr(app, "data_fit_controller", None)
+    names = list(controller.channel_names) if controller is not None else []
+    options = ["Time"] + names
+    _refill_combo(combo_a, options)
+    _refill_combo(combo_b, options)
+    _refresh_capacitor_compute_enabled(app)
+
+
+def _refresh_capacitor_compute_enabled(app) -> None:
+    btn = getattr(app, "data_fit_cap_compute_btn", None)
+    combo_a = getattr(app, "data_fit_cap_row_a_cb", None)
+    combo_b = getattr(app, "data_fit_cap_row_b_cb", None)
+    if btn is None or combo_a is None or combo_b is None:
+        return
+    has_a = bool(combo_a.currentText())
+    has_b = bool(combo_b.currentText())
+    btn.setEnabled(has_a and has_b)
+
+
+def _resolve_capacitor_row(app, name: str):
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None or not name:
+        return None
+    if name == "Time":
+        return controller.time_array
+    return controller.get_channel(name)
+
+
+def _on_capacitor_compute_clicked(app) -> None:
+    """Multiply the two selected rows and add the result as an in-memory row."""
+    status = getattr(app, "data_fit_cap_compute_status", None)
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    name_a = app.data_fit_cap_row_a_cb.currentText()
+    name_b = app.data_fit_cap_row_b_cb.currentText()
+    a = _resolve_capacitor_row(app, name_a)
+    b = _resolve_capacitor_row(app, name_b)
+    if a is None or b is None:
+        if status is not None:
+            status.setText("Could not resolve one of the selected rows.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    a_arr = np.asarray(a, dtype=float)
+    b_arr = np.asarray(b, dtype=float)
+    n = int(min(a_arr.size, b_arr.size))
+    if n == 0:
+        if status is not None:
+            status.setText("Selected rows are empty.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    product = a_arr[:n] * b_arr[:n]
+    controller.channel_cache[CAPACITOR_POWER_CHANNEL_NAME] = product
+    if CAPACITOR_POWER_CHANNEL_NAME not in controller.channel_names:
+        controller.channel_names.append(CAPACITOR_POWER_CHANNEL_NAME)
+    # Refresh the channels-group X/Y combos and the capacitor-testing row
+    # dropdowns so the new row is selectable everywhere it makes sense.
+    _populate_channel_combos(app)
+    if status is not None:
+        status.setText(
+            f'Computed "{CAPACITOR_POWER_CHANNEL_NAME}" = "{name_a}" * "{name_b}" '
+            f'({n} samples). Available now in the Y-axis dropdown.'
+        )
+        status.setStyleSheet("color: #2a7a2a;")
+
+
+def _on_capacitor_show_range_toggled(app, checked: bool) -> None:
+    band = getattr(app, "data_fit_band_capacitor", None)
+    if band is None:
+        return
+    band.setMovable(bool(checked))
+    band.setVisible(bool(checked))
+    if checked:
+        _seed_capacitor_band_from_inputs_or_view(app)
+
+
+def _seed_capacitor_band_from_inputs_or_view(app) -> None:
+    """Position the capacitor band from textbox values, falling back to the
+    current view range when either textbox is blank."""
+    band = getattr(app, "data_fit_band_capacitor", None)
+    if band is None:
+        return
+    low_text = app.data_fit_cap_range_low.text().strip()
+    high_text = app.data_fit_cap_range_high.text().strip()
+    lo = _safe_float(low_text)
+    hi = _safe_float(high_text)
+    if lo is None or hi is None:
+        vb = app.data_fit_plot.getPlotItem().getViewBox()
+        x_lo, x_hi = vb.viewRange()[0]
+        span = x_hi - x_lo
+        margin = span * 0.25 if span > 0 else 1.0
+        if lo is None:
+            lo = x_lo + margin
+        if hi is None:
+            hi = x_hi - margin
+        if lo >= hi:
+            lo, hi = x_lo, x_hi
+    band.blockSignals(True)
+    try:
+        band.setRegion((float(lo), float(hi)))
+    finally:
+        band.blockSignals(False)
+    _set_silently(app.data_fit_cap_range_low, f"{float(lo):.6g}")
+    _set_silently(app.data_fit_cap_range_high, f"{float(hi):.6g}")
+
+
+def _on_capacitor_band_dragged(app) -> None:
+    band = getattr(app, "data_fit_band_capacitor", None)
+    if band is None or not bool(getattr(band, "movable", False)):
+        return
+    lo, hi = band.getRegion()
+    _set_silently(app.data_fit_cap_range_low, f"{float(lo):.6g}")
+    _set_silently(app.data_fit_cap_range_high, f"{float(hi):.6g}")
+
+
+def _on_capacitor_range_text_edited(app) -> None:
+    band = getattr(app, "data_fit_band_capacitor", None)
+    if band is None:
+        return
+    lo = _safe_float(app.data_fit_cap_range_low.text())
+    hi = _safe_float(app.data_fit_cap_range_high.text())
+    if lo is None or hi is None:
+        return
+    if lo > hi:
+        lo, hi = hi, lo
+    band.blockSignals(True)
+    try:
+        band.setRegion((float(lo), float(hi)))
+    finally:
+        band.blockSignals(False)
+
+
+def _safe_float(text: str):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def setup_data_fitting_tab_layout(app):
@@ -1283,7 +1548,22 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_curve_profile_cb = QComboBox()
     app.data_fit_curve_profile_cb.setToolTip("Select curve label to edit/load fit-window settings for that curve.")
     profile_layout.addWidget(app.data_fit_curve_profile_cb, stretch=1)
-    left.addWidget(profile_group)
+
+    # ---- Sub-tabs: V-I Fitting (existing flow) and Capacitor Testing (new) ----
+    app.data_fit_subtabs = QTabWidget()
+    vifit_widget = QWidget()
+    vifit_layout = QVBoxLayout(vifit_widget)
+    vifit_layout.setContentsMargins(0, 6, 0, 0)
+    app.data_fit_subtabs.addTab(vifit_widget, "V-I Fitting")
+    capacitor_widget = QWidget()
+    cap_layout = QVBoxLayout(capacitor_widget)
+    cap_layout.setContentsMargins(0, 6, 0, 0)
+    app.data_fit_subtabs.addTab(capacitor_widget, "Capacitor Testing")
+    left.addWidget(app.data_fit_subtabs)
+
+    # The V-I Fitting subtab keeps the per-curve profile selector and every
+    # Step group below.
+    vifit_layout.addWidget(profile_group)
 
     # --- Step 1: Thermal offset (V_ofs) subtraction from the I = 0 segment ---
     offset_group = QGroupBox("Step 1: Subtract thermal offset from I = 0 segment")
@@ -1306,7 +1586,7 @@ def setup_data_fitting_tab_layout(app):
         "I = 0 segment. Typical value: 2% (0.02)."
     )
     offset_layout.addWidget(app.data_fit_zero_i_frac, 2, 1)
-    left.addWidget(offset_group)
+    vifit_layout.addWidget(offset_group)
 
     trim_group = QGroupBox("Step 2: Trim noisy start and quench tail")
     trim_layout = QGridLayout(trim_group)
@@ -1321,7 +1601,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_trim_quench_cb = QCheckBox("Auto-trim quench drop and cut 2% before drop")
     app.data_fit_trim_quench_cb.setChecked(True)
     trim_layout.addWidget(app.data_fit_trim_quench_cb, 2, 0, 1, 4)
-    left.addWidget(trim_group)
+    vifit_layout.addWidget(trim_group)
 
     didt_group = QGroupBox("Step 3: di/dt window (fraction of Imax)")
     didt_layout = QGridLayout(didt_group)
@@ -1358,7 +1638,7 @@ def setup_data_fitting_tab_layout(app):
         high_label="High (%)", high_pct=app.data_fit_didt_high, high_x=app.data_fit_didt_high_x,
         extra_widget=didt_mode_wrap,
     )
-    left.addWidget(didt_group)
+    vifit_layout.addWidget(didt_group)
 
     linear_group = QGroupBox("Step 4: Linear baseline window (fraction of Imax)")
     linear_layout = QGridLayout(linear_group)
@@ -1396,7 +1676,7 @@ def setup_data_fitting_tab_layout(app):
         high_label="High (%)", high_pct=app.data_fit_linear_high, high_x=app.data_fit_linear_high_x,
         extra_widget=baseline_mode_wrap,
     )
-    left.addWidget(linear_group)
+    vifit_layout.addWidget(linear_group)
 
     power_group = QGroupBox("Step 5: Ic and n-value")
     power_layout = QGridLayout(power_group)
@@ -1498,7 +1778,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_power_high_label = power_layout.itemAtPosition(4, 2).widget()
     app.data_fit_power_low_x_label = power_layout.itemAtPosition(5, 0).widget()
     app.data_fit_power_high_x_label = power_layout.itemAtPosition(5, 2).widget()
-    left.addWidget(power_group)
+    vifit_layout.addWidget(power_group)
 
     app.data_fit_window_inputs = {
         ("didt", "low"): (app.data_fit_didt_low, app.data_fit_didt_low_x, "Imax"),
@@ -1645,7 +1925,7 @@ def setup_data_fitting_tab_layout(app):
     # Stretch ratios make Run Fit three times as wide as Save metadata.
     run_row.addWidget(app.data_fit_run_btn, stretch=3)
     run_row.addWidget(app.data_fit_save_metadata_btn, stretch=1)
-    left.addLayout(run_row)
+    vifit_layout.addLayout(run_row)
 
     preset_row = QHBoxLayout()
     app.data_fit_save_preset_btn = QPushButton("Save preset…")
@@ -1658,7 +1938,7 @@ def setup_data_fitting_tab_layout(app):
     preset_row.addWidget(app.data_fit_save_preset_btn)
     preset_row.addWidget(app.data_fit_load_preset_btn)
     preset_row.addWidget(app.data_fit_help_btn)
-    left.addLayout(preset_row)
+    vifit_layout.addLayout(preset_row)
 
     # Save-result checkboxes were moved to the Settings dialog; the four
     # QCheckBox instances are constructed earlier in this layout so other
@@ -1670,9 +1950,13 @@ def setup_data_fitting_tab_layout(app):
         "background-color: #fff7c2; color: #665200; border: 1px solid #e6cc00; padding: 6px;"
     )
     app.data_fit_warning_label.setVisible(False)
-    left.addWidget(app.data_fit_warning_label)
+    vifit_layout.addWidget(app.data_fit_warning_label)
+    vifit_layout.addStretch()
 
-    left.addStretch()
+    # ---- Capacitor Testing subtab content ----
+    _build_capacitor_testing_tab(app, cap_layout)
+    cap_layout.addStretch()
+
     root.addWidget(left_widget)
 
     right_widget = QWidget()
@@ -1738,6 +2022,21 @@ def setup_data_fitting_tab_layout(app):
     )
     app.data_fit_band_power.sigRegionChanged.connect(
         lambda *_: _on_band_dragged(app, "power")
+    )
+
+    # Capacitor-testing X-range band: a dedicated draggable region for the
+    # Capacitor Testing subtab Step 1. Hidden by default; the user toggles it
+    # via the Show/edit checkbox in that subtab.
+    app.data_fit_band_capacitor = pg.LinearRegionItem(
+        brush=pg.mkBrush(170, 80, 200, 45),
+        pen=pg.mkPen(170, 80, 200, 180),
+        movable=False,
+    )
+    app.data_fit_band_capacitor.setZValue(5)
+    app.data_fit_band_capacitor.setVisible(False)
+    app.data_fit_plot.addItem(app.data_fit_band_capacitor, ignoreBounds=True)
+    app.data_fit_band_capacitor.sigRegionChanged.connect(
+        lambda *_: _on_capacitor_band_dragged(app)
     )
 
     # Ic marker + criterion line shown after a successful fit.
@@ -1870,7 +2169,7 @@ def _apply_transforms(app, *, apply_trim: bool = False):
     x_name = app.data_fit_x_cb.currentText()
     y_name = app.data_fit_y_cb.currentText()
     t_raw = controller.get_channel(time_name) if time_name and time_name != "Time" else controller.time_array
-    x_raw = controller.get_channel(x_name)
+    x_raw = controller.get_channel(x_name) if x_name and x_name != "Time" else controller.time_array
     y_raw = controller.get_channel(y_name)
     t = controller.apply_transform(t_raw, t_scale, t_offset)
     x = controller.apply_transform(x_raw, x_scale, x_offset)
@@ -2307,10 +2606,21 @@ def _populate_channel_combos(app):
     names = list(app.data_fit_controller.channel_names)
     time_options = ["Time"] + names
     _refill_combo(app.data_fit_time_cb, time_options)
-    _refill_combo(app.data_fit_x_cb, names)
+    # X-axis combo also offers "Time" so the capacitor-testing workflow can
+    # plot data against the recording time. The V-I fitting workflow keeps
+    # picking a current channel — _try_select below restores that default.
+    _refill_combo(app.data_fit_x_cb, time_options)
     _refill_combo(app.data_fit_y_cb, names)
     _try_select(app.data_fit_x_cb, ("AI0", "Current", "I", "current"))
+    # Without a current-channel match the X combo would otherwise default to
+    # "Time" (the new index 0); fall back to the first signal channel so the
+    # V-I fitting workflow still gets a sensible default.
+    if app.data_fit_x_cb.currentText() == "Time" and names:
+        idx = app.data_fit_x_cb.findText(names[0])
+        if idx >= 0:
+            app.data_fit_x_cb.setCurrentIndex(idx)
     _try_select(app.data_fit_y_cb, ("AI1", "Voltage", "V", "voltage"))
+    _refresh_capacitor_row_combos(app)
 
 
 def _refill_combo(combo: QComboBox, items):
@@ -2388,6 +2698,31 @@ def _clear_plot_state_for_new_recording(app) -> None:
         controller.last_fit_results = []
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(False)
+    # Drop any in-memory capacitor power row so a fresh file does not inherit
+    # it; the user can recompute on the new data.
+    if controller is not None:
+        controller.channel_cache.pop(CAPACITOR_POWER_CHANNEL_NAME, None)
+        if CAPACITOR_POWER_CHANNEL_NAME in (controller.channel_names or []):
+            controller.channel_names = [
+                n for n in controller.channel_names if n != CAPACITOR_POWER_CHANNEL_NAME
+            ]
+    band = getattr(app, "data_fit_band_capacitor", None)
+    if band is not None:
+        band.setVisible(False)
+        band.setMovable(False)
+    show_cb = getattr(app, "data_fit_cap_show_range", None)
+    if show_cb is not None:
+        show_cb.blockSignals(True)
+        show_cb.setChecked(False)
+        show_cb.blockSignals(False)
+    for w_attr in ("data_fit_cap_range_low", "data_fit_cap_range_high"):
+        w = getattr(app, w_attr, None)
+        if w is not None:
+            _set_silently(w, "")
+    status = getattr(app, "data_fit_cap_compute_status", None)
+    if status is not None:
+        status.setText("")
+        status.setStyleSheet("color: gray;")
 
 
 def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
