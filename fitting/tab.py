@@ -6252,120 +6252,164 @@ def _open_plot_summary(app) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OriginLab-style "Data Book" — a table view of the loaded numpy arrays that
-# lets the user edit cells, insert/remove rows, and add user-defined columns.
-# Edits are written back into the curve entry's numpy arrays in-place and the
-# plot is refreshed live so changes are visible immediately.
+# OriginLab-style "Data book" — exposes every channel of the loaded TDMS as a
+# letter-named column (A, B, C, …) with a F(x)= formula row and editable
+# cells. Edits to channel-backed columns mutate the controller's channel
+# cache in-place so the live preview re-reads the modified data; user-added
+# columns persist on ``app.data_fit_book_user_columns`` across dialog opens.
 # ---------------------------------------------------------------------------
 
 
-_TABLE_BASE_KEYS: tuple[str, ...] = ("t", "x", "y")
+def _data_book_column_letter(idx: int) -> str:
+    """OriginLab-style column letters: A, B, …, Z, AA, AB, …"""
+    s = ""
+    n = int(idx)
+    while True:
+        s = chr(ord("A") + n % 26) + s
+        n = n // 26 - 1
+        if n < 0:
+            return s
 
 
-def _table_base_headers(entry: dict) -> tuple[str, str, str]:
-    """Column headers for the three built-in axes of a curve entry.
+def _data_book_formula_namespace(columns) -> dict:
+    """Build the eval namespace used by the F(x)= row.
 
-    The Y label switches to V/cm when the curve was added with the voltage-tap
-    separation enabled, so the book matches the plot's Y axis.
+    Each column is exposed under its letter; numpy ufuncs and constants are
+    available without prefix (sin, cos, exp, log, sqrt, …, pi, e). No Python
+    builtins are reachable from within the formula.
     """
-    use_length = bool((entry.get("source") or {}).get("use_length", False))
-    y_header = "E-field (V/cm)" if use_length else "Voltage (V)"
-    return ("Time (s)", "Current (A)", y_header)
+    ns: dict = {
+        "sin": np.sin, "cos": np.cos, "tan": np.tan,
+        "asin": np.arcsin, "acos": np.arccos, "atan": np.arctan,
+        "atan2": np.arctan2,
+        "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
+        "exp": np.exp, "log": np.log, "log10": np.log10, "log2": np.log2,
+        "sqrt": np.sqrt, "abs": np.abs, "absolute": np.abs,
+        "mean": np.mean, "std": np.std, "var": np.var,
+        "sum": np.sum, "min": np.min, "max": np.max,
+        "median": np.median, "where": np.where,
+        "diff": lambda a: np.concatenate(([np.nan], np.diff(np.asarray(a, dtype=float)))),
+        "cumsum": np.cumsum, "cumprod": np.cumprod,
+        "linspace": np.linspace, "arange": np.arange,
+        "clip": np.clip, "round": np.round, "floor": np.floor, "ceil": np.ceil,
+        "pi": float(np.pi), "e": float(np.e),
+        "nan": float("nan"), "inf": float("inf"),
+        "np": np,
+    }
+    for col in columns:
+        ns[col.letter] = np.asarray(col.data, dtype=float)
+    return ns
 
 
-class _DataFittingTableModel(QAbstractTableModel):
-    """Editable table model exposing one ``data_fit_curves`` entry as cells.
+def _data_book_evaluate_formula(formula: str, columns) -> np.ndarray:
+    """Evaluate a F(x)= formula against the current columns and return a 1-D float array.
 
-    Built-in columns 0/1/2 are Time/Current/Voltage and write through to
-    ``entry['t']/'x'/'y'`` (and the matching ``*_orig`` snapshots so trim
-    toggles don't silently revert edits). Columns 3+ are user-added columns
-    stored in ``entry['user_columns']`` and don't affect the plot.
+    ``^`` is rewritten to ``**`` so spreadsheet-style power expressions work.
+    Scalar results are broadcast to match the longest column.
+    """
+    expr = formula.replace("^", "**")
+    ns = _data_book_formula_namespace(columns)
+    value = eval(expr, {"__builtins__": {}}, ns)  # noqa: S307 - trusted local app
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        n = max((len(c.data) for c in columns), default=0)
+        arr = np.full(n, float(arr))
+    elif arr.ndim > 1:
+        arr = arr.reshape(-1)
+    return arr
 
-    Notifying the view of every mutation goes through ``beginInsertRows`` /
-    ``beginRemoveRows`` etc, so a ``QTableView`` will redraw correctly.
+
+class _DataBookColumn:
+    """A single column in the workbook.
+
+    ``source_key`` non-None and ``is_time`` False  → channel-backed (mutations
+    propagate to ``controller.channel_cache[source_key]``).
+    ``is_time`` True                               → backed by ``controller.time_array``.
+    Otherwise                                      → user column (persisted via app state).
     """
 
-    def __init__(self, app, entry: dict, parent=None) -> None:
+    __slots__ = ("letter", "name", "_data", "source_key", "is_time", "formula")
+
+    def __init__(self, *, letter: str, name: str, data,
+                 source_key=None, is_time: bool = False, formula: str = "") -> None:
+        self.letter = letter
+        self.name = name
+        self._data = np.asarray(data, dtype=float)
+        self.source_key = source_key
+        self.is_time = bool(is_time)
+        self.formula = formula or ""
+
+    @property
+    def data(self) -> np.ndarray:
+        return self._data
+
+    @data.setter
+    def data(self, value) -> None:
+        self._data = np.asarray(value, dtype=float)
+
+    @property
+    def is_channel(self) -> bool:
+        return self.is_time or self.source_key is not None
+
+
+class _DataBookModel(QAbstractTableModel):
+    """Editable model with two meta-rows (Long Name / F(x)=) on top of the data.
+
+    Built-in (channel-backed) columns mutate ``controller.channel_cache`` and
+    ``controller.time_array`` so refresh_preview picks up edits. User columns
+    persist on ``app.data_fit_book_user_columns`` so reopening the dialog shows
+    them again.
+    """
+
+    META_ROWS = 2
+    META_LABELS = ("Long Name", "F(x)=")
+    META_BG = QColor("#eef0f7")
+
+    def __init__(self, app, columns: list, parent=None) -> None:
         super().__init__(parent)
         self._app = app
-        self._entry = entry
-        if not isinstance(entry.get("user_columns"), dict):
-            entry["user_columns"] = {}
-        self._user_keys: list[str] = list(entry["user_columns"].keys())
-        self._headers = _table_base_headers(entry)
-        self._sync_user_column_lengths()
+        self._columns: list = columns
 
-    # --- helpers --------------------------------------------------------
-    def _row_count_internal(self) -> int:
-        n = 0
-        for key in _TABLE_BASE_KEYS:
-            arr = self._entry.get(key)
-            if arr is not None:
-                n = max(n, len(arr))
-        for key in self._user_keys:
-            arr = self._entry["user_columns"].get(key)
-            if arr is not None:
-                n = max(n, len(arr))
-        return n
+    # --- introspection --------------------------------------------------
+    @property
+    def columns(self) -> list:
+        return self._columns
 
-    def _sync_user_column_lengths(self) -> None:
-        n = self._row_count_internal()
-        for key in self._user_keys:
-            arr = np.asarray(
-                self._entry["user_columns"].get(key, []), dtype=float
-            )
-            if arr.size < n:
-                arr = np.concatenate([arr, np.full(n - arr.size, np.nan)])
-            elif arr.size > n:
-                arr = arr[:n]
-            self._entry["user_columns"][key] = arr
-
-    def _array_for_column(self, col: int) -> np.ndarray:
-        if 0 <= col < 3:
-            arr = self._entry.get(_TABLE_BASE_KEYS[col])
-            return np.asarray(arr if arr is not None else [], dtype=float)
-        return np.asarray(
-            self._entry["user_columns"][self._user_keys[col - 3]], dtype=float,
-        )
-
-    def _set_array_for_column(self, col: int, arr: np.ndarray) -> None:
-        if 0 <= col < 3:
-            key = _TABLE_BASE_KEYS[col]
-            self._entry[key] = arr
-            # Promote the edited array as the new untrimmed snapshot so a
-            # later Step-2 trim re-application uses the edited values.
-            self._entry[key + "_orig"] = arr.copy()
-        else:
-            self._entry["user_columns"][self._user_keys[col - 3]] = arr
-
-    def _refresh_plot(self) -> None:
-        try:
-            _refresh_curve_item(self._entry)
-        except Exception:
-            traceback.print_exc()
+    def column_at(self, idx: int):
+        if 0 <= idx < len(self._columns):
+            return self._columns[idx]
+        return None
 
     # --- Qt model API ---------------------------------------------------
-    def rowCount(self, parent=QModelIndex()):  # noqa: N802 - Qt API
+    def rowCount(self, parent=QModelIndex()):  # noqa: N802
         if parent.isValid():
             return 0
-        return self._row_count_internal()
+        n_data = max((len(c.data) for c in self._columns), default=0)
+        return self.META_ROWS + n_data
 
-    def columnCount(self, parent=QModelIndex()):  # noqa: N802 - Qt API
+    def columnCount(self, parent=QModelIndex()):  # noqa: N802
         if parent.isValid():
             return 0
-        return 3 + len(self._user_keys)
+        return len(self._columns)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):  # noqa: N802
-        if role != Qt.DisplayRole:
-            return None
         if orientation == Qt.Horizontal:
-            if 0 <= section < 3:
-                return self._headers[section]
-            idx = section - 3
-            if 0 <= idx < len(self._user_keys):
-                return self._user_keys[idx]
+            if not (0 <= section < len(self._columns)):
+                return None
+            col = self._columns[section]
+            if role == Qt.DisplayRole:
+                return col.letter
+            if role == Qt.ToolTipRole:
+                kind = "Time" if col.is_time else (
+                    "Channel" if col.source_key else "User column"
+                )
+                return f"{col.letter}: {col.name} ({kind})"
             return None
-        return str(section + 1)
+        if role == Qt.DisplayRole:
+            if 0 <= section < self.META_ROWS:
+                return self.META_LABELS[section]
+            return str(section - self.META_ROWS + 1)
+        return None
 
     def flags(self, index):
         if not index.isValid():
@@ -6375,139 +6419,290 @@ class _DataFittingTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
+        col = self._columns[index.column()]
+        row = index.row()
+        if role == Qt.BackgroundRole and row < self.META_ROWS:
+            return self.META_BG
         if role not in (Qt.DisplayRole, Qt.EditRole):
             return None
-        arr = self._array_for_column(index.column())
-        row = index.row()
-        if row < 0 or row >= arr.size:
+        if row == 0:
+            return col.name
+        if row == 1:
+            return col.formula
+        data_row = row - self.META_ROWS
+        if data_row >= len(col.data):
             return ""
-        v = float(arr[row])
+        v = float(col.data[data_row])
         if not np.isfinite(v):
             return ""
-        if role == Qt.EditRole:
-            return f"{v:.10g}"
-        return f"{v:.6g}"
+        return f"{v:.6g}" if role == Qt.DisplayRole else f"{v:.10g}"
 
-    def setData(self, index, value, role=Qt.EditRole):  # noqa: N802 - Qt API
+    def setData(self, index, value, role=Qt.EditRole):  # noqa: N802
         if not index.isValid() or role != Qt.EditRole:
             return False
-        text = "" if value is None else str(value).strip()
+        col = self._columns[index.column()]
+        row = index.row()
+        text = "" if value is None else str(value)
+        if row == 0:
+            new_name = text.strip()
+            if not new_name or new_name == col.name:
+                return True
+            col.name = new_name
+            self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+            self._persist_user_columns()
+            return True
+        if row == 1:
+            col.formula = text.strip()
+            self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+            if col.formula:
+                self._apply_formula(col)
+            self._persist_user_columns()
+            return True
         try:
-            v = float("nan") if not text else float(text)
+            v = float("nan") if not text.strip() else float(text)
         except ValueError:
             return False
-        col = index.column()
-        row = index.row()
-        arr = self._array_for_column(col).copy()
-        if row >= arr.size:
-            arr = np.concatenate([arr, np.full(row + 1 - arr.size, np.nan)])
-        arr[row] = v
-        self._set_array_for_column(col, arr)
+        data_row = row - self.META_ROWS
+        arr = np.asarray(col.data, dtype=float).copy()
+        if data_row >= arr.size:
+            arr = np.concatenate([arr, np.full(data_row + 1 - arr.size, np.nan)])
+        arr[data_row] = v
+        self._store_column(col, arr)
         self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
-        if col < 3:
-            self._refresh_plot()
+        self._refresh_plot_if_relevant(col)
         return True
 
     # --- structural mutations ------------------------------------------
     def insertRows(self, row, count, parent=QModelIndex()):  # noqa: N802
-        if count <= 0 or row < 0:
+        if count <= 0 or row < self.META_ROWS:
             return False
-        n = self._row_count_internal()
-        row = min(row, n)
-        self.beginInsertRows(parent, row, row + count - 1)
-        new_block = np.full(count, np.nan)
-        for col in range(self.columnCount()):
-            arr = self._array_for_column(col)
-            if arr.size < n:
-                arr = np.concatenate([arr, np.full(n - arr.size, np.nan)])
-            new_arr = np.insert(arr, row, new_block)
-            self._set_array_for_column(col, new_arr)
+        n_data = self.rowCount() - self.META_ROWS
+        data_row = max(0, min(row - self.META_ROWS, n_data))
+        self.beginInsertRows(parent, self.META_ROWS + data_row,
+                             self.META_ROWS + data_row + count - 1)
+        for col in self._columns:
+            arr = np.asarray(col.data, dtype=float)
+            if data_row > arr.size:
+                arr = np.concatenate([arr, np.full(data_row - arr.size, np.nan)])
+            new_arr = np.insert(arr, min(data_row, arr.size),
+                                np.full(count, np.nan))
+            self._store_column(col, new_arr)
         self.endInsertRows()
-        self._refresh_plot()
+        self._refresh_plot_if_relevant(None)
         return True
 
     def removeRows(self, row, count, parent=QModelIndex()):  # noqa: N802
-        if count <= 0 or row < 0:
+        if count <= 0 or row < self.META_ROWS:
             return False
-        n = self._row_count_internal()
-        if row >= n:
+        n_data = self.rowCount() - self.META_ROWS
+        start = row - self.META_ROWS
+        if start >= n_data:
             return False
-        last = min(row + count - 1, n - 1)
-        self.beginRemoveRows(parent, row, last)
-        idx = np.arange(row, last + 1)
-        for col in range(self.columnCount()):
-            arr = self._array_for_column(col)
+        last = min(start + count - 1, n_data - 1)
+        self.beginRemoveRows(parent, self.META_ROWS + start, self.META_ROWS + last)
+        idx = np.arange(start, last + 1)
+        for col in self._columns:
+            arr = np.asarray(col.data, dtype=float)
             if arr.size == 0:
                 continue
             mask_idx = idx[idx < arr.size]
             if mask_idx.size:
                 arr = np.delete(arr, mask_idx)
-            self._set_array_for_column(col, arr)
+                self._store_column(col, arr)
         self.endRemoveRows()
-        self._refresh_plot()
+        self._refresh_plot_if_relevant(None)
         return True
 
-    def addColumn(self, name: str, fill: float = 0.0) -> bool:  # noqa: N802
-        name = (name or "").strip()
-        if not name or name in self._user_keys or name in self._headers:
-            return False
-        col = self.columnCount()
-        self.beginInsertColumns(QModelIndex(), col, col)
-        n = self._row_count_internal()
+    def add_user_column(self, name: str = "", formula: str = "",
+                        fill: float = float("nan")):
+        idx = len(self._columns)
+        letter = _data_book_column_letter(idx)
+        clean = (name or "").strip()
+        if not clean:
+            clean = f"Col_{letter}"
+        if any(c.name == clean for c in self._columns):
+            base = clean
+            k = 2
+            while any(c.name == f"{base}_{k}" for c in self._columns):
+                k += 1
+            clean = f"{base}_{k}"
+        n = max((len(c.data) for c in self._columns), default=0)
         try:
-            value = float(fill)
+            fill_val = float(fill)
         except (TypeError, ValueError):
-            value = 0.0
-        self._entry["user_columns"][name] = np.full(n, value, dtype=float)
-        self._user_keys.append(name)
+            fill_val = float("nan")
+        arr = np.full(n, fill_val, dtype=float)
+        new_col = _DataBookColumn(letter=letter, name=clean, data=arr,
+                                  formula=(formula or "").strip())
+        self.beginInsertColumns(QModelIndex(), idx, idx)
+        self._columns.append(new_col)
         self.endInsertColumns()
-        return True
+        if new_col.formula:
+            self._apply_formula(new_col)
+        self._persist_user_columns()
+        return new_col
 
-    def removeColumnAt(self, col: int) -> bool:  # noqa: N802
-        if col < 3 or col >= self.columnCount():
+    def remove_column_at(self, idx: int) -> bool:
+        if not (0 <= idx < len(self._columns)):
             return False
-        self.beginRemoveColumns(QModelIndex(), col, col)
-        key = self._user_keys.pop(col - 3)
-        self._entry["user_columns"].pop(key, None)
+        col = self._columns[idx]
+        if col.is_channel:
+            return False
+        self.beginRemoveColumns(QModelIndex(), idx, idx)
+        self._columns.pop(idx)
         self.endRemoveColumns()
+        self._reletter_columns()
+        self._persist_user_columns()
         return True
 
-    def renameColumn(self, col: int, new_name: str) -> bool:  # noqa: N802
-        if col < 3 or col >= self.columnCount():
+    def reapply_formula(self, col_idx: int) -> bool:
+        col = self.column_at(col_idx)
+        if col is None or not col.formula:
             return False
-        new_name = (new_name or "").strip()
-        if not new_name:
+        return self._apply_formula(col)
+
+    # --- helpers --------------------------------------------------------
+    def _reletter_columns(self) -> None:
+        if not self._columns:
+            return
+        changed = False
+        for i, c in enumerate(self._columns):
+            new_letter = _data_book_column_letter(i)
+            if c.letter != new_letter:
+                c.letter = new_letter
+                changed = True
+        if changed:
+            self.headerDataChanged.emit(Qt.Horizontal, 0, len(self._columns) - 1)
+
+    def _store_column(self, col, new_arr: np.ndarray) -> None:
+        col.data = new_arr
+        controller = getattr(self._app, "data_fit_controller", None)
+        if controller is None:
+            return
+        if col.is_time:
+            controller.time_array = col.data
+        elif col.source_key is not None:
+            controller.channel_cache[col.source_key] = col.data
+
+    def _apply_formula(self, col) -> bool:
+        try:
+            arr = _data_book_evaluate_formula(col.formula, self._columns)
+        except Exception as exc:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                None, "Data book — formula error",
+                f"Could not evaluate '{col.formula}':\n{exc}",
+            )
             return False
-        old = self._user_keys[col - 3]
-        if new_name == old:
-            return True
-        if new_name in self._user_keys or new_name in self._headers:
-            return False
-        self._entry["user_columns"][new_name] = self._entry["user_columns"].pop(old)
-        self._user_keys[col - 3] = new_name
-        self.headerDataChanged.emit(Qt.Horizontal, col, col)
+        col_idx = self._columns.index(col)
+        self._store_column(col, arr)
+        if self.rowCount() > self.META_ROWS:
+            top = self.index(self.META_ROWS, col_idx)
+            bot = self.index(self.rowCount() - 1, col_idx)
+            self.dataChanged.emit(top, bot, [Qt.DisplayRole, Qt.EditRole])
+        self._refresh_plot_if_relevant(col)
         return True
+
+    def _persist_user_columns(self) -> None:
+        snapshot = []
+        for c in self._columns:
+            if c.is_channel:
+                continue
+            snapshot.append({
+                "name": c.name,
+                "data": np.asarray(c.data, dtype=float).copy(),
+                "formula": c.formula,
+            })
+        self._app.data_fit_book_user_columns = snapshot
+
+    def _refresh_plot_if_relevant(self, col) -> None:
+        app = self._app
+        if not hasattr(app, "data_fit_time_cb"):
+            return
+        try:
+            time_name = app.data_fit_time_cb.currentText()
+            x_name = app.data_fit_x_cb.currentText()
+            y_name = app.data_fit_y_cb.currentText()
+        except Exception:
+            return
+        active_keys = {x_name, y_name}
+        if time_name and time_name != "Time":
+            active_keys.add(time_name)
+        # col=None means structural change (insert/remove row) — always refresh.
+        if col is None:
+            try:
+                refresh_preview(app)
+            except Exception:
+                traceback.print_exc()
+            return
+        triggers = False
+        if col.is_time and (not time_name or time_name == "Time"):
+            triggers = True
+        if col.source_key is not None and col.source_key in active_keys:
+            triggers = True
+        if triggers:
+            try:
+                refresh_preview(app)
+            except Exception:
+                traceback.print_exc()
+
+
+def _build_data_book_columns(app) -> list:
+    """Snapshot the controller's channels (+ persisted user cols) into columns.
+
+    Channel arrays are referenced live (no copy) so cell edits mutate the
+    controller's cache directly. User columns come from ``app.data_fit_book_user_columns``.
+    """
+    controller = getattr(app, "data_fit_controller", None)
+    columns: list = []
+    if controller is not None and controller.time_array is not None:
+        columns.append(_DataBookColumn(
+            letter=_data_book_column_letter(len(columns)),
+            name="Time",
+            data=controller.time_array,
+            is_time=True,
+        ))
+    if controller is not None:
+        for name in controller.channel_names:
+            arr = controller.channel_cache.get(name)
+            if arr is None:
+                continue
+            columns.append(_DataBookColumn(
+                letter=_data_book_column_letter(len(columns)),
+                name=name,
+                data=arr,
+                source_key=name,
+            ))
+    for uc in (getattr(app, "data_fit_book_user_columns", None) or []):
+        columns.append(_DataBookColumn(
+            letter=_data_book_column_letter(len(columns)),
+            name=str(uc.get("name", "User")),
+            data=np.asarray(uc.get("data", []), dtype=float).copy(),
+            formula=str(uc.get("formula", "")),
+        ))
+    return columns
 
 
 def _open_data_table_dialog(app) -> None:
-    """Show an OriginLab-style 'Data Book' for inspecting/editing curve data.
+    """Open an OriginLab-style 'Data book' for the loaded TDMS.
 
-    Each curve in ``app.data_fit_curves`` becomes a sheet selectable from a
-    combo box at the top. Cell edits, row insert/delete and user-column
-    add/remove update the curve's numpy arrays in place and refresh the plot
-    immediately. If the user has only a preview curve (no curves added yet)
-    we offer to materialize it into a real curve so the table has something
-    to edit, mirroring how OriginLab requires data to be in a Workbook.
+    Each channel becomes a letter-named column (A, B, C, …) with editable
+    cells, a "Long Name" row and an "F(x)=" formula row. Formulas reference
+    other columns by their letter; numpy functions (sin, log, sqrt, …) and
+    constants (pi, e) are available. Edits to channel-backed columns mutate
+    the controller's channel cache so the live preview reflects them.
     """
     from PyQt5.QtWidgets import (
         QAbstractItemView,
         QApplication,
-        QComboBox,
         QDialog,
+        QDialogButtonBox,
+        QFormLayout,
         QHBoxLayout,
         QHeaderView,
         QInputDialog,
         QLabel,
+        QLineEdit,
         QMessageBox,
         QPushButton,
         QShortcut,
@@ -6516,149 +6711,71 @@ def _open_data_table_dialog(app) -> None:
     )
     from PyQt5.QtGui import QKeySequence
 
-    if not hasattr(app, "data_fit_curves"):
-        app.data_fit_curves = []
+    controller = getattr(app, "data_fit_controller", None)
+    has_channels = bool(controller and controller.channel_names)
+    has_time = controller is not None and controller.time_array is not None
+    if not has_channels and not has_time:
+        QMessageBox.information(
+            app, "Data book",
+            "Load a recording with 'Load file…' first.",
+        )
+        return
 
-    transformed = _apply_transforms(app)
-    px = transformed.get("x")
-    py = transformed.get("y")
-    has_preview = (
-        bool(getattr(app, "data_fit_preview_visible", True))
-        and px is not None and py is not None
-        and getattr(px, "size", 0) and getattr(py, "size", 0)
-    )
-
-    if not app.data_fit_curves:
-        if has_preview:
-            ans = QMessageBox.question(
-                app,
-                "Data table",
-                "No curves are on the plot yet — only the live preview.\n\n"
-                "Add the current preview as a curve so you can edit it in the book?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if ans != QMessageBox.Yes:
-                return
-            try:
-                app.data_fit_plot_dirty = True
-                _add_plot_from_current(app)
-            except Exception:
-                traceback.print_exc()
-            if not app.data_fit_curves:
-                QMessageBox.warning(
-                    app, "Data table", "Could not add the preview curve.",
-                )
-                return
-        else:
-            QMessageBox.information(
-                app,
-                "Data table",
-                "Load a recording with 'Load file…' first, then click 'Add to plot'.",
-            )
-            return
+    columns = _build_data_book_columns(app)
+    if not columns:
+        QMessageBox.information(
+            app, "Data book", "Loaded recording has no readable channels.",
+        )
+        return
 
     dialog = QDialog(app)
     dialog.setWindowTitle("Data book — fitting")
-    dialog.resize(880, 560)
+    dialog.resize(960, 600)
     root = QVBoxLayout(dialog)
 
-    # --- top row: book selector + dimensions readout --------------------
+    # --- top info row --------------------------------------------------
     top = QHBoxLayout()
-    top.addWidget(QLabel("Book:"))
-    book_cb = QComboBox()
-    for entry in app.data_fit_curves:
-        book_cb.addItem(entry.get("label") or "(curve)")
-    top.addWidget(book_cb, stretch=1)
+    fname = (os.path.basename(controller.tdms_path)
+             if controller and controller.tdms_path else "(no file)")
+    title = QLabel(f"Book: <b>{fname}</b>")
+    top.addWidget(title)
+    top.addStretch()
     info_lbl = QLabel("")
     info_lbl.setStyleSheet("color: gray;")
     top.addWidget(info_lbl)
     root.addLayout(top)
 
-    # --- table ----------------------------------------------------------
+    # --- table ---------------------------------------------------------
     table = QTableView()
     table.setSelectionBehavior(QAbstractItemView.SelectItems)
     table.setSelectionMode(QAbstractItemView.ContiguousSelection)
     table.setAlternatingRowColors(True)
-    header = table.horizontalHeader()
-    header.setSectionResizeMode(QHeaderView.Interactive)
-    header.setStretchLastSection(True)
+    table.horizontalHeader().setDefaultSectionSize(120)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
     table.verticalHeader().setDefaultSectionSize(20)
+    table.verticalHeader().setMinimumWidth(86)
+
+    model = _DataBookModel(app, columns, parent=table)
+    table.setModel(model)
     root.addWidget(table, stretch=1)
 
-    state: dict = {"model": None, "entry": None}
-
     def _refresh_info() -> None:
-        m = state["model"]
-        if m is None:
-            info_lbl.setText("")
-            return
-        info_lbl.setText(f"{m.rowCount()} rows  ·  {m.columnCount()} cols")
+        n_data = max(0, model.rowCount() - model.META_ROWS)
+        info_lbl.setText(f"{n_data} rows  ·  {model.columnCount()} cols")
 
-    def _set_book(idx: int) -> None:
-        if not (0 <= idx < len(app.data_fit_curves)):
-            return
-        entry = app.data_fit_curves[idx]
-        model = _DataFittingTableModel(app, entry, parent=table)
-        table.setModel(model)
-        for col in range(min(3, model.columnCount())):
-            table.setColumnWidth(col, 130)
-        state["model"] = model
-        state["entry"] = entry
-        _refresh_info()
-        for sig in (
-            model.rowsInserted, model.rowsRemoved,
-            model.columnsInserted, model.columnsRemoved,
-            model.modelReset, model.dataChanged,
-        ):
-            sig.connect(lambda *_: _refresh_info())
+    _refresh_info()
+    for sig in (model.rowsInserted, model.rowsRemoved,
+                model.columnsInserted, model.columnsRemoved,
+                model.modelReset):
+        sig.connect(lambda *_: _refresh_info())
 
-    book_cb.currentIndexChanged.connect(_set_book)
-    _set_book(0)
-
-    # --- bottom action row ---------------------------------------------
-    actions = QHBoxLayout()
-    insert_btn = QPushButton("Insert row above")
-    insert_btn.setToolTip("Insert a blank row above the first selected cell.")
-    append_btn = QPushButton("Append row")
-    append_btn.setToolTip("Append a blank row at the end of the book.")
-    delete_btn = QPushButton("Delete rows")
-    delete_btn.setToolTip("Delete every row that has a selected cell.")
-    add_col_btn = QPushButton("Add column…")
-    add_col_btn.setToolTip(
-        "Add a user column (visible only in the book — not used for fitting)."
-    )
-    rm_col_btn = QPushButton("Remove column")
-    rm_col_btn.setToolTip(
-        "Remove the selected user column. Time/Current/Voltage cannot be removed."
-    )
-    rename_col_btn = QPushButton("Rename column…")
-    rename_col_btn.setToolTip("Rename the selected user column.")
-    actions.addWidget(insert_btn)
-    actions.addWidget(append_btn)
-    actions.addWidget(delete_btn)
-    actions.addWidget(add_col_btn)
-    actions.addWidget(rm_col_btn)
-    actions.addWidget(rename_col_btn)
-    actions.addStretch()
-    close_btn = QPushButton("Close")
-    actions.addWidget(close_btn)
-    root.addLayout(actions)
-
-    hint = QLabel(
-        "Edits to Time/Current/Voltage update the plot live. "
-        "Ctrl+C / Ctrl+V copy and paste tab-separated values (Excel-compatible)."
-    )
-    hint.setStyleSheet("color: #555; font-size: 11px;")
-    hint.setWordWrap(True)
-    root.addWidget(hint)
-
-    # --- helpers --------------------------------------------------------
-    def _selected_rows() -> list[int]:
+    # --- selection helpers --------------------------------------------
+    def _selected_data_rows() -> list[int]:
         sm = table.selectionModel()
         if sm is None:
             return []
-        return sorted({i.row() for i in sm.selectedIndexes()})
+        rows = sorted({i.row() for i in sm.selectedIndexes() if i.row() >= model.META_ROWS})
+        return rows
 
     def _selected_columns() -> list[int]:
         sm = table.selectionModel()
@@ -6666,105 +6783,79 @@ def _open_data_table_dialog(app) -> None:
             return []
         return sorted({i.column() for i in sm.selectedIndexes()})
 
-    def _current_model() -> Optional[_DataFittingTableModel]:
-        return state["model"]
-
+    # --- actions -------------------------------------------------------
     def _on_insert_row() -> None:
-        model = _current_model()
-        if model is None:
-            return
-        rows = _selected_rows()
-        target = rows[0] if rows else 0
-        model.insertRows(target, 1)
+        rows = _selected_data_rows()
+        target_row = rows[0] if rows else model.META_ROWS
+        model.insertRows(target_row, 1)
 
     def _on_append_row() -> None:
-        model = _current_model()
-        if model is None:
-            return
         model.insertRows(model.rowCount(), 1)
 
     def _on_delete_rows() -> None:
-        model = _current_model()
-        if model is None:
-            return
-        rows = _selected_rows()
+        rows = _selected_data_rows()
         if not rows:
             QMessageBox.information(
-                dialog, "Data table", "Select at least one cell first.",
+                dialog, "Data book", "Select at least one cell in a data row first.",
             )
             return
         for r in reversed(rows):
             model.removeRows(r, 1)
 
-    def _on_add_column() -> None:
-        model = _current_model()
-        if model is None:
+    def _prompt_add_column() -> None:
+        sub = QDialog(dialog)
+        sub.setWindowTitle("Add column")
+        form = QFormLayout(sub)
+        name_ed = QLineEdit()
+        name_ed.setPlaceholderText("e.g. Power, V_corr, Sample")
+        formula_ed = QLineEdit()
+        formula_ed.setPlaceholderText("optional, e.g.  A*B   sqrt(B**2+C**2)   log10(B)")
+        form.addRow("Long name:", name_ed)
+        form.addRow("F(x)= :", formula_ed)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(sub.accept)
+        btns.rejected.connect(sub.reject)
+        form.addRow(btns)
+        if sub.exec_() != QDialog.Accepted:
             return
-        name, ok = QInputDialog.getText(
-            dialog, "Add column", "Column name:",
+        new_col = model.add_user_column(
+            name=name_ed.text(), formula=formula_ed.text(),
         )
-        if not ok:
-            return
-        if not model.addColumn(name):
-            QMessageBox.warning(
-                dialog, "Data table",
-                "Column name is empty, duplicates an existing column, or is invalid.",
-            )
+        # Scroll to the new column.
+        if new_col is not None:
+            new_idx = model.columnCount() - 1
+            table.scrollTo(model.index(0, new_idx))
 
     def _on_remove_column() -> None:
-        model = _current_model()
-        if model is None:
-            return
         cols = _selected_columns()
         if not cols:
             QMessageBox.information(
-                dialog, "Data table",
+                dialog, "Data book",
                 "Select a cell in the column you want to remove.",
             )
             return
-        col = cols[0]
-        if col < 3:
+        col_idx = cols[0]
+        col = model.column_at(col_idx)
+        if col is None:
+            return
+        if col.is_channel:
             QMessageBox.information(
-                dialog, "Data table",
-                "Time, Current and Voltage are built-in columns and cannot be removed.",
+                dialog, "Data book",
+                "Channel-backed columns (Time and TDMS channels) can't be "
+                "removed — only user-added columns can.",
             )
             return
-        model.removeColumnAt(col)
+        model.remove_column_at(col_idx)
 
-    def _on_rename_column() -> None:
-        model = _current_model()
-        if model is None:
-            return
+    def _on_recalc_column() -> None:
         cols = _selected_columns()
         if not cols:
-            QMessageBox.information(
-                dialog, "Data table",
-                "Select a cell in the column you want to rename.",
-            )
             return
-        col = cols[0]
-        if col < 3:
-            QMessageBox.information(
-                dialog, "Data table",
-                "Built-in columns cannot be renamed.",
-            )
-            return
-        old = model.headerData(col, Qt.Horizontal) or ""
-        new, ok = QInputDialog.getText(
-            dialog, "Rename column", "New column name:", text=str(old),
-        )
-        if not ok:
-            return
-        if not model.renameColumn(col, new):
-            QMessageBox.warning(
-                dialog, "Data table",
-                "Empty, duplicate or invalid column name.",
-            )
+        for c in cols:
+            model.reapply_formula(c)
 
+    # --- copy / paste --------------------------------------------------
     def _on_copy() -> None:
-        model = _current_model()
-        if model is None:
-            return
         sm = table.selectionModel()
         idxs = sm.selectedIndexes() if sm is not None else []
         if not idxs:
@@ -6781,9 +6872,6 @@ def _open_data_table_dialog(app) -> None:
         QApplication.clipboard().setText("\n".join(lines))
 
     def _on_paste() -> None:
-        model = _current_model()
-        if model is None:
-            return
         sm = table.selectionModel()
         idxs = sm.selectedIndexes() if sm is not None else []
         if not idxs:
@@ -6800,16 +6888,62 @@ def _open_data_table_dialog(app) -> None:
                 if target.isValid():
                     model.setData(target, cell, Qt.EditRole)
 
+    # --- buttons -------------------------------------------------------
+    actions = QHBoxLayout()
+    insert_btn = QPushButton("Insert row above")
+    insert_btn.setToolTip("Insert a blank row above the first selected data row.")
+    append_btn = QPushButton("Append row")
+    append_btn.setToolTip("Append a blank row at the end of every column.")
+    delete_btn = QPushButton("Delete rows")
+    delete_btn.setToolTip("Delete every data row that has a selected cell.")
+    add_col_btn = QPushButton("Add column…")
+    add_col_btn.setToolTip(
+        "Add a user column. Optionally provide an F(x)= expression that "
+        "references existing columns by their letter (A, B, C, …).",
+    )
+    rm_col_btn = QPushButton("Remove column")
+    rm_col_btn.setToolTip("Remove the selected user column.")
+    recalc_btn = QPushButton("Recalc F(x)")
+    recalc_btn.setToolTip(
+        "Re-evaluate the F(x)= formula of the selected columns against the "
+        "current data.",
+    )
+    actions.addWidget(insert_btn)
+    actions.addWidget(append_btn)
+    actions.addWidget(delete_btn)
+    actions.addWidget(add_col_btn)
+    actions.addWidget(rm_col_btn)
+    actions.addWidget(recalc_btn)
+    actions.addStretch()
+    close_btn = QPushButton("Close")
+    actions.addWidget(close_btn)
+    root.addLayout(actions)
+
     insert_btn.clicked.connect(_on_insert_row)
     append_btn.clicked.connect(_on_append_row)
     delete_btn.clicked.connect(_on_delete_rows)
-    add_col_btn.clicked.connect(_on_add_column)
+    add_col_btn.clicked.connect(_prompt_add_column)
     rm_col_btn.clicked.connect(_on_remove_column)
-    rename_col_btn.clicked.connect(_on_rename_column)
+    recalc_btn.clicked.connect(_on_recalc_column)
     close_btn.clicked.connect(dialog.accept)
 
     QShortcut(QKeySequence.Copy, table, activated=_on_copy)
     QShortcut(QKeySequence.Paste, table, activated=_on_paste)
+
+    hint = QLabel(
+        "Each column is named A, B, C, … like in OriginLab. The F(x)= row "
+        "above the data accepts expressions referencing other columns by "
+        "their letter — e.g. <code>A+B</code>, <code>2*A</code>, "
+        "<code>sqrt(B**2+C**2)</code>, <code>log10(B)</code>, "
+        "<code>diff(A)</code>. <code>^</code> is treated as power. Edits to "
+        "channel columns (Time + the TDMS channels) update the live preview; "
+        "click 'Add to plot' to rebuild a plotted curve from the edited data. "
+        "Ctrl+C / Ctrl+V copy and paste tab-separated values."
+    )
+    hint.setStyleSheet("color: #555; font-size: 11px;")
+    hint.setTextFormat(Qt.RichText)
+    hint.setWordWrap(True)
+    root.addWidget(hint)
 
     dialog.exec_()
 
