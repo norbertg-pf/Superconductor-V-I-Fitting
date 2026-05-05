@@ -818,6 +818,12 @@ def _connect_data_fitting_actions(app):
             combo.currentIndexChanged.connect(lambda _i: _refresh_capacitor_compute_enabled(app))
     if getattr(app, "data_fit_cap_compute_btn", None) is not None:
         app.data_fit_cap_compute_btn.clicked.connect(lambda: _on_capacitor_compute_clicked(app))
+    for combo_attr in ("data_fit_cap_int_time_cb", "data_fit_cap_int_value_cb"):
+        combo = getattr(app, combo_attr, None)
+        if combo is not None:
+            combo.currentIndexChanged.connect(lambda _i: _refresh_capacitor_integrate_enabled(app))
+    if getattr(app, "data_fit_cap_integrate_btn", None) is not None:
+        app.data_fit_cap_integrate_btn.clicked.connect(lambda: _on_capacitor_integrate_clicked(app))
 
 
 
@@ -1010,17 +1016,24 @@ def _reset_data_fitting_defaults(app) -> None:
         w = getattr(app, w_attr, None)
         if w is not None:
             _set_silently(w, "")
-    for combo_attr in ("data_fit_cap_row_a_cb", "data_fit_cap_row_b_cb"):
+    for combo_attr in (
+        "data_fit_cap_row_a_cb",
+        "data_fit_cap_row_b_cb",
+        "data_fit_cap_int_time_cb",
+        "data_fit_cap_int_value_cb",
+    ):
         combo = getattr(app, combo_attr, None)
         if combo is not None:
             combo.blockSignals(True)
             combo.clear()
             combo.blockSignals(False)
-    status = getattr(app, "data_fit_cap_compute_status", None)
-    if status is not None:
-        status.setText("")
-        status.setStyleSheet("color: gray;")
+    for status_attr in ("data_fit_cap_compute_status", "data_fit_cap_integrate_status"):
+        status = getattr(app, status_attr, None)
+        if status is not None:
+            status.setText("")
+            status.setStyleSheet("color: gray;")
     _refresh_capacitor_compute_enabled(app)
+    _refresh_capacitor_integrate_enabled(app)
 
 
 def _curve_profile_key_from_ui(app) -> str:
@@ -1122,6 +1135,7 @@ def _sync_active_length_settings_from_profile_key(app, key: str) -> None:
 # ---------------------------------------------------------------------------
 
 CAPACITOR_POWER_CHANNEL_NAME = "Power on a Resistor (W)"
+CAPACITOR_ENERGY_CHANNEL_NAME = "Integrated Power (J)"
 
 
 def _build_capacitor_testing_tab(app, layout) -> None:
@@ -1191,6 +1205,42 @@ def _build_capacitor_testing_tab(app, layout) -> None:
     cap_power_layout.addWidget(app.data_fit_cap_compute_status, 3, 0, 1, 2)
     layout.addWidget(cap_power_group)
 
+    # --- Step 3: integrate a column over time (J) ---
+    cap_int_group = QGroupBox("Step 3: Integrated power over time (J)")
+    cap_int_layout = QGridLayout(cap_int_group)
+    cap_int_layout.addWidget(QLabel("Time row:"), 0, 0)
+    app.data_fit_cap_int_time_cb = QComboBox()
+    app.data_fit_cap_int_time_cb.setToolTip(
+        "Row used as the time axis for the cumulative integral. Defaults to\n"
+        '"Time"; pick another row if the integrand is sampled on a different\n'
+        "axis."
+    )
+    cap_int_layout.addWidget(app.data_fit_cap_int_time_cb, 0, 1)
+    cap_int_layout.addWidget(QLabel("Integrand row:"), 1, 0)
+    app.data_fit_cap_int_value_cb = QComboBox()
+    app.data_fit_cap_int_value_cb.setToolTip(
+        f'Row to integrate over time. Defaults to "{CAPACITOR_POWER_CHANNEL_NAME}"\n'
+        "when present, but any row may be selected."
+    )
+    cap_int_layout.addWidget(app.data_fit_cap_int_value_cb, 1, 1)
+    app.data_fit_cap_integrate_btn = QPushButton("Integrate over time (J) calculation")
+    app.data_fit_cap_integrate_btn.setToolTip(
+        "Compute the cumulative trapezoidal integral of the integrand row\n"
+        f'with respect to the time row and store the result as "{CAPACITOR_ENERGY_CHANNEL_NAME}".\n'
+        "The new row appears in the X- and Y-axis dropdowns of the Channels\n"
+        "group above."
+    )
+    app.data_fit_cap_integrate_btn.setStyleSheet(
+        "font-weight: bold; background-color: #6f42c1; color: white; padding: 6px;"
+    )
+    app.data_fit_cap_integrate_btn.setEnabled(False)
+    cap_int_layout.addWidget(app.data_fit_cap_integrate_btn, 2, 0, 1, 2)
+    app.data_fit_cap_integrate_status = QLabel("")
+    app.data_fit_cap_integrate_status.setStyleSheet("color: gray;")
+    app.data_fit_cap_integrate_status.setWordWrap(True)
+    cap_int_layout.addWidget(app.data_fit_cap_integrate_status, 3, 0, 1, 2)
+    layout.addWidget(cap_int_group)
+
 
 def _refresh_capacitor_row_combos(app) -> None:
     """Repopulate the Capacitor Testing row dropdowns from the current channels.
@@ -1200,6 +1250,8 @@ def _refresh_capacitor_row_combos(app) -> None:
     """
     combo_a = getattr(app, "data_fit_cap_row_a_cb", None)
     combo_b = getattr(app, "data_fit_cap_row_b_cb", None)
+    int_time = getattr(app, "data_fit_cap_int_time_cb", None)
+    int_value = getattr(app, "data_fit_cap_int_value_cb", None)
     if combo_a is None or combo_b is None:
         return
     controller = getattr(app, "data_fit_controller", None)
@@ -1207,7 +1259,20 @@ def _refresh_capacitor_row_combos(app) -> None:
     options = ["Time"] + names
     _refill_combo(combo_a, options)
     _refill_combo(combo_b, options)
+    if int_time is not None and int_value is not None:
+        _refill_combo(int_time, options)
+        _refill_combo(int_value, options)
+        # Default the time axis to "Time" and the integrand to the computed
+        # power row when present — so the typical workflow needs no clicks
+        # in Step 3.
+        idx_time = int_time.findText("Time")
+        if idx_time >= 0:
+            int_time.setCurrentIndex(idx_time)
+        idx_pow = int_value.findText(CAPACITOR_POWER_CHANNEL_NAME)
+        if idx_pow >= 0:
+            int_value.setCurrentIndex(idx_pow)
     _refresh_capacitor_compute_enabled(app)
+    _refresh_capacitor_integrate_enabled(app)
 
 
 def _refresh_capacitor_compute_enabled(app) -> None:
@@ -1264,6 +1329,64 @@ def _on_capacitor_compute_clicked(app) -> None:
         status.setText(
             f'Computed "{CAPACITOR_POWER_CHANNEL_NAME}" = "{name_a}" * "{name_b}" '
             f'({n} samples). Available now in the Y-axis dropdown.'
+        )
+        status.setStyleSheet("color: #2a7a2a;")
+
+
+def _refresh_capacitor_integrate_enabled(app) -> None:
+    btn = getattr(app, "data_fit_cap_integrate_btn", None)
+    int_time = getattr(app, "data_fit_cap_int_time_cb", None)
+    int_value = getattr(app, "data_fit_cap_int_value_cb", None)
+    if btn is None or int_time is None or int_value is None:
+        return
+    btn.setEnabled(bool(int_time.currentText()) and bool(int_value.currentText()))
+
+
+def _cumulative_trapezoid(y: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Return ``∫ y dx`` from the first sample to each subsequent sample.
+
+    The result has the same length as the inputs and starts at 0 — the
+    classical cumulative trapezoidal integral.
+    """
+    if y.size < 2:
+        return np.zeros_like(y)
+    dx = np.diff(x)
+    avg = 0.5 * (y[:-1] + y[1:])
+    return np.concatenate(([0.0], np.cumsum(avg * dx)))
+
+
+def _on_capacitor_integrate_clicked(app) -> None:
+    """Cumulatively integrate the selected row over the selected time row."""
+    status = getattr(app, "data_fit_cap_integrate_status", None)
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    time_name = app.data_fit_cap_int_time_cb.currentText()
+    value_name = app.data_fit_cap_int_value_cb.currentText()
+    t = _resolve_capacitor_row(app, time_name)
+    v = _resolve_capacitor_row(app, value_name)
+    if t is None or v is None:
+        if status is not None:
+            status.setText("Could not resolve one of the selected rows.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    t_arr = np.asarray(t, dtype=float)
+    v_arr = np.asarray(v, dtype=float)
+    n = int(min(t_arr.size, v_arr.size))
+    if n < 2:
+        if status is not None:
+            status.setText("Need at least two samples to integrate.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    energy = _cumulative_trapezoid(v_arr[:n], t_arr[:n])
+    controller.channel_cache[CAPACITOR_ENERGY_CHANNEL_NAME] = energy
+    if CAPACITOR_ENERGY_CHANNEL_NAME not in controller.channel_names:
+        controller.channel_names.append(CAPACITOR_ENERGY_CHANNEL_NAME)
+    _populate_channel_combos(app)
+    if status is not None:
+        status.setText(
+            f'Computed "{CAPACITOR_ENERGY_CHANNEL_NAME}" = ∫ "{value_name}" d"{time_name}"'
+            f' ({n} samples, total ≈ {energy[-1]:.6g} J).'
         )
         status.setStyleSheet("color: #2a7a2a;")
 
@@ -2698,14 +2821,15 @@ def _clear_plot_state_for_new_recording(app) -> None:
         controller.last_fit_results = []
     if hasattr(app, "data_fit_save_metadata_btn"):
         app.data_fit_save_metadata_btn.setEnabled(False)
-    # Drop any in-memory capacitor power row so a fresh file does not inherit
-    # it; the user can recompute on the new data.
+    # Drop any in-memory capacitor rows so a fresh file does not inherit them;
+    # the user can recompute on the new data.
     if controller is not None:
-        controller.channel_cache.pop(CAPACITOR_POWER_CHANNEL_NAME, None)
-        if CAPACITOR_POWER_CHANNEL_NAME in (controller.channel_names or []):
-            controller.channel_names = [
-                n for n in controller.channel_names if n != CAPACITOR_POWER_CHANNEL_NAME
-            ]
+        for cap_name in (CAPACITOR_POWER_CHANNEL_NAME, CAPACITOR_ENERGY_CHANNEL_NAME):
+            controller.channel_cache.pop(cap_name, None)
+        controller.channel_names = [
+            n for n in (controller.channel_names or [])
+            if n not in (CAPACITOR_POWER_CHANNEL_NAME, CAPACITOR_ENERGY_CHANNEL_NAME)
+        ]
     band = getattr(app, "data_fit_band_capacitor", None)
     if band is not None:
         band.setVisible(False)
@@ -2719,10 +2843,11 @@ def _clear_plot_state_for_new_recording(app) -> None:
         w = getattr(app, w_attr, None)
         if w is not None:
             _set_silently(w, "")
-    status = getattr(app, "data_fit_cap_compute_status", None)
-    if status is not None:
-        status.setText("")
-        status.setStyleSheet("color: gray;")
+    for status_attr in ("data_fit_cap_compute_status", "data_fit_cap_integrate_status"):
+        status = getattr(app, status_attr, None)
+        if status is not None:
+            status.setText("")
+            status.setStyleSheet("color: gray;")
 
 
 def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
