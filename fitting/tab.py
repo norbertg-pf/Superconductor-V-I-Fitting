@@ -619,6 +619,36 @@ class DataFittingController:
         # FitResults group inside the TDMS or fit_* properties attached to the
         # source channel itself. Used to redraw fitted curves on file load.
         self.saved_fit_results: dict[str, dict] = {}
+        # Multi-dataset support. The recording, once loaded, is registered as
+        # the first entry; derived datasets (e.g. Capacity vs Voltage from the
+        # Capacitor Testing tab) are appended here. The Channels-group dataset
+        # combo selects which dataset's channels populate the X/Y dropdowns
+        # and feed the plot.
+        # Each entry: {"channels": dict[str, ndarray], "time": ndarray|None,
+        #              "is_recording": bool}.
+        self.datasets: dict[str, dict] = {}
+        self.active_dataset_name: str = ""
+
+    def register_recording_dataset(self, name: str) -> None:
+        """Register the just-loaded recording as the active dataset."""
+        self.datasets = {
+            name: {
+                "channels": self.channel_cache,
+                "time": self.time_array,
+                "is_recording": True,
+            }
+        }
+        self.active_dataset_name = name
+
+    def add_derived_dataset(self, name: str, channels: dict, time=None) -> None:
+        self.datasets[name] = {
+            "channels": dict(channels),
+            "time": time,
+            "is_recording": False,
+        }
+
+    def active_dataset(self) -> Optional[dict]:
+        return self.datasets.get(self.active_dataset_name)
 
     # --- data source -----------------------------------------------------
     def load_recording(self, path: str) -> tuple[bool, str]:
@@ -627,6 +657,8 @@ class DataFittingController:
         self.channel_names = []
         self.time_array = None
         self.saved_fit_results = {}
+        self.datasets = {}
+        self.active_dataset_name = ""
         if not path or not os.path.exists(path):
             return False, "No recording found. Click 'Load File…' to choose a TDMS."
         try:
@@ -665,6 +697,7 @@ class DataFittingController:
         if self.time_array is None:
             return False, "Recording has no 'Time' channel."
         self.tdms_path = path
+        self.register_recording_dataset(os.path.basename(path))
         return True, f"Loaded {os.path.basename(path)} with {len(self.channel_names)} channels."
 
     def get_channel(self, name: str):
@@ -692,7 +725,18 @@ class DataFittingController:
                     settings: FitSettings, avg_window: int = 1):
         x_raw = self.get_channel(x_sig)
         y_raw = self.get_channel(y_sig)
-        t_raw = self.get_channel(time_sig) if time_sig and time_sig != "Time" else self.time_array
+        # ``time_sig`` is now a dataset name (Channels-group "Dataset" combo)
+        # rather than a channel name. Resolve to the dataset's stored time
+        # array; legacy "Time" sentinel and channel-name lookups still work.
+        t_raw = None
+        if time_sig:
+            dataset = self.datasets.get(time_sig)
+            if dataset is not None:
+                t_raw = dataset.get("time")
+            elif time_sig != "Time":
+                t_raw = self.get_channel(time_sig)
+        if t_raw is None:
+            t_raw = self.time_array
         if t_raw is None or x_raw is None or y_raw is None:
             return None, "Please choose Time, X and Y channels that exist in the recording."
         x = self.apply_transform(x_raw, x_scale, x_offset)
@@ -824,6 +868,12 @@ def _connect_data_fitting_actions(app):
             combo.currentIndexChanged.connect(lambda _i: _refresh_capacitor_integrate_enabled(app))
     if getattr(app, "data_fit_cap_integrate_btn", None) is not None:
         app.data_fit_cap_integrate_btn.clicked.connect(lambda: _on_capacitor_integrate_clicked(app))
+    for combo_attr in ("data_fit_cap_q_current_cb", "data_fit_cap_q_voltage_cb"):
+        combo = getattr(app, combo_attr, None)
+        if combo is not None:
+            combo.currentIndexChanged.connect(lambda _i: _refresh_capacity_compute_enabled(app))
+    if getattr(app, "data_fit_cap_q_compute_btn", None) is not None:
+        app.data_fit_cap_q_compute_btn.clicked.connect(lambda: _on_capacity_compute_clicked(app))
 
 
 
@@ -887,6 +937,8 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_controller.channel_cache = {}
     app.data_fit_controller.channel_names = []
     app.data_fit_controller.channel_metadata = {}
+    app.data_fit_controller.datasets = {}
+    app.data_fit_controller.active_dataset_name = ""
     app.data_fit_path_label.setText("No file loaded.")
     app.data_fit_path_label.setStyleSheet("color: gray;")
     for cb in (app.data_fit_time_cb, app.data_fit_x_cb, app.data_fit_y_cb):
@@ -1021,19 +1073,26 @@ def _reset_data_fitting_defaults(app) -> None:
         "data_fit_cap_row_b_cb",
         "data_fit_cap_int_time_cb",
         "data_fit_cap_int_value_cb",
+        "data_fit_cap_q_current_cb",
+        "data_fit_cap_q_voltage_cb",
     ):
         combo = getattr(app, combo_attr, None)
         if combo is not None:
             combo.blockSignals(True)
             combo.clear()
             combo.blockSignals(False)
-    for status_attr in ("data_fit_cap_compute_status", "data_fit_cap_integrate_status"):
+    for status_attr in (
+        "data_fit_cap_compute_status",
+        "data_fit_cap_integrate_status",
+        "data_fit_cap_q_compute_status",
+    ):
         status = getattr(app, status_attr, None)
         if status is not None:
             status.setText("")
             status.setStyleSheet("color: gray;")
     _refresh_capacitor_compute_enabled(app)
     _refresh_capacitor_integrate_enabled(app)
+    _refresh_capacity_compute_enabled(app)
 
 
 def _curve_profile_key_from_ui(app) -> str:
@@ -1136,6 +1195,10 @@ def _sync_active_length_settings_from_profile_key(app, key: str) -> None:
 
 CAPACITOR_POWER_CHANNEL_NAME = "Power on a Resistor (W)"
 CAPACITOR_ENERGY_CHANNEL_NAME = "Integrated Power (J)"
+CAPACITY_DATASET_NAME = "Capacity vs Voltage"
+CAPACITY_VOLTAGE_COLUMN = "Voltage (V)"
+CAPACITY_COULOMB_COLUMN = "Capacity [F] Coulomb counting method"
+CAPACITY_VOLTAGE_STEP_V = 10.0
 
 
 def _build_capacitor_testing_tab(app, layout) -> None:
@@ -1241,17 +1304,62 @@ def _build_capacitor_testing_tab(app, layout) -> None:
     cap_int_layout.addWidget(app.data_fit_cap_integrate_status, 3, 0, 1, 2)
     layout.addWidget(cap_int_group)
 
+    # --- Step 4: capacity vs voltage (Coulomb counting) ---
+    cap_q_group = QGroupBox(
+        f"Step 4: Capacity at every {CAPACITY_VOLTAGE_STEP_V:.0f} V"
+    )
+    cap_q_layout = QGridLayout(cap_q_group)
+    cap_q_layout.addWidget(QLabel("Capacitor bank current:"), 0, 0)
+    app.data_fit_cap_q_current_cb = QComboBox()
+    app.data_fit_cap_q_current_cb.setToolTip(
+        "Discharge current row (e.g. \"idisch. on a DCCT (A)\"). The cumulative\n"
+        "charge ∫ i dt is sampled at every voltage step to give the capacity\n"
+        "via C = ΔQ / ΔV."
+    )
+    cap_q_layout.addWidget(app.data_fit_cap_q_current_cb, 0, 1)
+    cap_q_layout.addWidget(QLabel("Capacitor bank voltage:"), 1, 0)
+    app.data_fit_cap_q_voltage_cb = QComboBox()
+    app.data_fit_cap_q_voltage_cb.setToolTip(
+        "Voltage row (e.g. \"VR on a load Resistor (V)\" if it tracks the bank\n"
+        f"voltage). Capacity is computed at every {CAPACITY_VOLTAGE_STEP_V:.0f} V step\n"
+        "from the peak down."
+    )
+    cap_q_layout.addWidget(app.data_fit_cap_q_voltage_cb, 1, 1)
+    app.data_fit_cap_q_compute_btn = QPushButton(
+        f'Compute capacity vs voltage ({CAPACITY_VOLTAGE_STEP_V:.0f} V steps)'
+    )
+    app.data_fit_cap_q_compute_btn.setToolTip(
+        f'Compute capacity by Coulomb counting at every {CAPACITY_VOLTAGE_STEP_V:.0f} V step\n'
+        f'and store the result as a separate "{CAPACITY_DATASET_NAME}" dataset\n'
+        "in memory. Pick that dataset from the Channels-group Dataset\n"
+        "dropdown to plot it."
+    )
+    app.data_fit_cap_q_compute_btn.setStyleSheet(
+        "font-weight: bold; background-color: #6f42c1; color: white; padding: 6px;"
+    )
+    app.data_fit_cap_q_compute_btn.setEnabled(False)
+    cap_q_layout.addWidget(app.data_fit_cap_q_compute_btn, 2, 0, 1, 2)
+    app.data_fit_cap_q_compute_status = QLabel("")
+    app.data_fit_cap_q_compute_status.setStyleSheet("color: gray;")
+    app.data_fit_cap_q_compute_status.setWordWrap(True)
+    cap_q_layout.addWidget(app.data_fit_cap_q_compute_status, 3, 0, 1, 2)
+    layout.addWidget(cap_q_group)
+
 
 def _refresh_capacitor_row_combos(app) -> None:
     """Repopulate the Capacitor Testing row dropdowns from the current channels.
 
-    Includes "Time" and the in-memory Power channel (if it exists) so the user
-    can chain calculations on top of a previously computed row.
+    Sources rows from the recording dataset (the primary in-memory dataset)
+    plus the synthetic "Time" entry, so the user can chain calculations on
+    top of any previously computed row regardless of which dataset is
+    currently selected for the channels-group plot.
     """
     combo_a = getattr(app, "data_fit_cap_row_a_cb", None)
     combo_b = getattr(app, "data_fit_cap_row_b_cb", None)
     int_time = getattr(app, "data_fit_cap_int_time_cb", None)
     int_value = getattr(app, "data_fit_cap_int_value_cb", None)
+    q_current = getattr(app, "data_fit_cap_q_current_cb", None)
+    q_voltage = getattr(app, "data_fit_cap_q_voltage_cb", None)
     if combo_a is None or combo_b is None:
         return
     controller = getattr(app, "data_fit_controller", None)
@@ -1271,8 +1379,25 @@ def _refresh_capacitor_row_combos(app) -> None:
         idx_pow = int_value.findText(CAPACITOR_POWER_CHANNEL_NAME)
         if idx_pow >= 0:
             int_value.setCurrentIndex(idx_pow)
+    if q_current is not None and q_voltage is not None:
+        # Step 4 picks rows from the recording itself; "Time" is not a
+        # current/voltage candidate so the dropdowns just list channels.
+        _refill_combo(q_current, names)
+        _refill_combo(q_voltage, names)
+        _try_select(q_current, ("idisch", "discharge", "Current", "current", "I_"))
+        _try_select(q_voltage, ("VR", "Voltage", "voltage", "V_"))
     _refresh_capacitor_compute_enabled(app)
     _refresh_capacitor_integrate_enabled(app)
+    _refresh_capacity_compute_enabled(app)
+
+
+def _refresh_capacity_compute_enabled(app) -> None:
+    btn = getattr(app, "data_fit_cap_q_compute_btn", None)
+    q_current = getattr(app, "data_fit_cap_q_current_cb", None)
+    q_voltage = getattr(app, "data_fit_cap_q_voltage_cb", None)
+    if btn is None or q_current is None or q_voltage is None:
+        return
+    btn.setEnabled(bool(q_current.currentText()) and bool(q_voltage.currentText()))
 
 
 def _refresh_capacitor_compute_enabled(app) -> None:
@@ -1387,6 +1512,131 @@ def _on_capacitor_integrate_clicked(app) -> None:
         status.setText(
             f'Computed "{CAPACITOR_ENERGY_CHANNEL_NAME}" = ∫ "{value_name}" d"{time_name}"'
             f' ({n} samples, total ≈ {energy[-1]:.6g} J).'
+        )
+        status.setStyleSheet("color: #2a7a2a;")
+
+
+def _capacity_coulomb_counting(
+    t: np.ndarray, v: np.ndarray, i: np.ndarray, step_v: float = CAPACITY_VOLTAGE_STEP_V,
+):
+    """Sample C(V) = ΔQ/ΔV at every ``step_v`` volt step on the discharge.
+
+    The discharge is identified as the segment after the peak of ``v``.
+    Voltage levels are placed at the largest multiple of ``step_v`` not
+    above the peak and stepped down by ``step_v`` until the minimum voltage
+    on the segment is reached. Cumulative charge ``Q(t) = ∫ i dt`` is
+    interpolated at each level (after dropping non-monotonic samples), and
+    each consecutive pair gives one capacitance.
+
+    Returns (voltages, capacities) — both arrays empty when the data is
+    insufficient (e.g. less than one full step on the discharge).
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+    i = np.asarray(i, dtype=float)
+    n = int(min(t.size, v.size, i.size))
+    if n < 3 or step_v <= 0:
+        return np.array([]), np.array([])
+    t = t[:n]; v = v[:n]; i = i[:n]
+    q = _cumulative_trapezoid(i, t)
+    idx_peak = int(np.argmax(v))
+    v_seg = v[idx_peak:]
+    q_seg = q[idx_peak:] - q[idx_peak]
+    if v_seg.size < 2:
+        return np.array([]), np.array([])
+    v_max_seg = float(v_seg[0])
+    v_min_seg = float(np.min(v_seg))
+    if v_max_seg <= v_min_seg:
+        return np.array([]), np.array([])
+    # Build voltage levels at multiples of step_v from the peak down to just
+    # above v_min_seg.
+    top = float(np.floor(v_max_seg / step_v) * step_v)
+    if top > v_max_seg:
+        top -= step_v
+    levels = []
+    cur = top
+    while cur >= v_min_seg - 1.0e-9:
+        levels.append(cur)
+        cur -= step_v
+    if len(levels) < 2:
+        return np.array([]), np.array([])
+    levels_arr = np.asarray(levels, dtype=float)
+    # np.interp needs strictly increasing x; reverse the discharge so v is
+    # increasing and discard non-monotonic samples introduced by noise.
+    v_rev = v_seg[::-1]
+    q_rev = q_seg[::-1]
+    keep = np.concatenate(([True], np.diff(v_rev) > 0))
+    v_rev = v_rev[keep]
+    q_rev = q_rev[keep]
+    if v_rev.size < 2:
+        return np.array([]), np.array([])
+    q_levels = np.interp(levels_arr, v_rev, q_rev)
+    voltages = []
+    capacities = []
+    for k in range(len(levels_arr) - 1):
+        v_high = levels_arr[k]
+        v_low = levels_arr[k + 1]
+        dv = v_high - v_low
+        if dv <= 0:
+            continue
+        dq = q_levels[k + 1] - q_levels[k]
+        # Cumulative charge grew during the discharge; reporting |C| keeps
+        # the result positive regardless of the discharge-current sign
+        # convention chosen by the user.
+        cap = abs(dq) / dv
+        v_mid = 0.5 * (v_high + v_low)
+        voltages.append(v_mid)
+        capacities.append(cap)
+    return np.asarray(voltages, dtype=float), np.asarray(capacities, dtype=float)
+
+
+def _on_capacity_compute_clicked(app) -> None:
+    """Compute capacity vs voltage by Coulomb counting and store as a
+    separate dataset, selectable from the Channels-group Dataset combo."""
+    status = getattr(app, "data_fit_cap_q_compute_status", None)
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    current_name = app.data_fit_cap_q_current_cb.currentText()
+    voltage_name = app.data_fit_cap_q_voltage_cb.currentText()
+    if not current_name or not voltage_name:
+        if status is not None:
+            status.setText("Pick both a current row and a voltage row.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    t_arr = controller.time_array
+    i_arr = controller.get_channel(current_name)
+    v_arr = controller.get_channel(voltage_name)
+    if t_arr is None or i_arr is None or v_arr is None:
+        if status is not None:
+            status.setText("Could not resolve the selected rows from the recording.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    voltages, capacities = _capacity_coulomb_counting(
+        t_arr, v_arr, i_arr, step_v=CAPACITY_VOLTAGE_STEP_V,
+    )
+    if voltages.size == 0:
+        if status is not None:
+            status.setText(
+                f"Not enough discharge for one {CAPACITY_VOLTAGE_STEP_V:.0f} V step. "
+                "Check the selected rows."
+            )
+            status.setStyleSheet("color: #b35a00;")
+        return
+    controller.add_derived_dataset(
+        CAPACITY_DATASET_NAME,
+        channels={
+            CAPACITY_VOLTAGE_COLUMN: voltages,
+            CAPACITY_COULOMB_COLUMN: capacities,
+        },
+        time=None,
+    )
+    _populate_channel_combos(app)
+    if status is not None:
+        status.setText(
+            f'Stored "{CAPACITY_DATASET_NAME}" ({voltages.size} steps, '
+            f'mean C ≈ {capacities.mean():.6g} F). Pick it from the Dataset '
+            "dropdown above to plot."
         )
         status.setStyleSheet("color: #2a7a2a;")
 
@@ -1570,10 +1820,19 @@ def setup_data_fitting_tab_layout(app):
     ch_grid.addWidget(QLabel("Channel"), 0, 0)
     ch_grid.addWidget(QLabel("Scale"), 0, 2)
     ch_grid.addWidget(QLabel("Offset"), 0, 3)
-    ch_grid.addWidget(QLabel("Time axis:"), 1, 0)
-    ch_grid.addWidget(app.data_fit_time_cb, 1, 1)
-    ch_grid.addWidget(app.data_fit_time_scale, 1, 2)
-    ch_grid.addWidget(app.data_fit_time_offset, 1, 3)
+    # The first row used to pick a Time channel for V-I fits; it now picks
+    # which dataset (the loaded recording or any in-memory derived dataset)
+    # the X/Y combos read from. Scale/offset are not meaningful for a
+    # dataset switcher and are hidden.
+    ch_grid.addWidget(QLabel("Dataset:"), 1, 0)
+    ch_grid.addWidget(app.data_fit_time_cb, 1, 1, 1, 3)
+    app.data_fit_time_cb.setToolTip(
+        "Active dataset. Defaults to the loaded recording. Step 4 of the\n"
+        "Capacitor Testing tab adds a derived dataset that can be selected\n"
+        "here; switching repopulates the X- and Y-axis dropdowns below."
+    )
+    app.data_fit_time_scale.setVisible(False)
+    app.data_fit_time_offset.setVisible(False)
     ch_grid.addWidget(QLabel("X axis (current):"), 2, 0)
     ch_grid.addWidget(app.data_fit_x_cb, 2, 1)
     ch_grid.addWidget(app.data_fit_x_scale, 2, 2)
@@ -2288,12 +2547,26 @@ def _apply_transforms(app, *, apply_trim: bool = False):
     t_scale, t_offset = _scale_offset_from_inputs(app, "time")
     x_scale, x_offset = _scale_offset_from_inputs(app, "x")
     y_scale, y_offset = _scale_offset_from_inputs(app, "y")
-    time_name = app.data_fit_time_cb.currentText()
+    dataset_name = app.data_fit_time_cb.currentText()
     x_name = app.data_fit_x_cb.currentText()
     y_name = app.data_fit_y_cb.currentText()
-    t_raw = controller.get_channel(time_name) if time_name and time_name != "Time" else controller.time_array
-    x_raw = controller.get_channel(x_name) if x_name and x_name != "Time" else controller.time_array
-    y_raw = controller.get_channel(y_name)
+    # Resolve the active dataset (the recording or any derived dataset created
+    # from the Capacitor Testing tab). Channels and the time array come from
+    # there; legacy code paths fall through to the primary cache when no
+    # dataset is registered yet.
+    dataset = controller.datasets.get(dataset_name) if dataset_name else None
+    if dataset is None:
+        channels = controller.channel_cache
+        time_arr = controller.time_array
+    else:
+        channels = dataset["channels"]
+        time_arr = dataset.get("time")
+    t_raw = time_arr
+    if x_name == "Time":
+        x_raw = time_arr
+    else:
+        x_raw = channels.get(x_name) if x_name else None
+    y_raw = channels.get(y_name) if y_name else None
     t = controller.apply_transform(t_raw, t_scale, t_offset)
     x = controller.apply_transform(x_raw, x_scale, x_offset)
     y = controller.apply_transform(y_raw, y_scale, y_offset)
@@ -2726,24 +2999,55 @@ def _settings_for_entry(app, entry: dict) -> FitSettings:
 
 
 def _populate_channel_combos(app):
-    names = list(app.data_fit_controller.channel_names)
-    time_options = ["Time"] + names
-    _refill_combo(app.data_fit_time_cb, time_options)
-    # X-axis combo also offers "Time" so the capacitor-testing workflow can
-    # plot data against the recording time. The V-I fitting workflow keeps
-    # picking a current channel — _try_select below restores that default.
-    _refill_combo(app.data_fit_x_cb, time_options)
-    _refill_combo(app.data_fit_y_cb, names)
-    _try_select(app.data_fit_x_cb, ("AI0", "Current", "I", "current"))
-    # Without a current-channel match the X combo would otherwise default to
-    # "Time" (the new index 0); fall back to the first signal channel so the
-    # V-I fitting workflow still gets a sensible default.
-    if app.data_fit_x_cb.currentText() == "Time" and names:
-        idx = app.data_fit_x_cb.findText(names[0])
-        if idx >= 0:
-            app.data_fit_x_cb.setCurrentIndex(idx)
-    _try_select(app.data_fit_y_cb, ("AI1", "Voltage", "V", "voltage"))
+    controller = app.data_fit_controller
+    dataset_names = list(controller.datasets.keys())
+    # Block signals so the index assignment below doesn't fire the channel
+    # selection handler before the X/Y combos are repopulated explicitly.
+    app.data_fit_time_cb.blockSignals(True)
+    try:
+        _refill_combo(app.data_fit_time_cb, dataset_names)
+        if (
+            controller.active_dataset_name
+            and controller.active_dataset_name in dataset_names
+        ):
+            idx = app.data_fit_time_cb.findText(controller.active_dataset_name)
+            if idx >= 0:
+                app.data_fit_time_cb.setCurrentIndex(idx)
+        elif dataset_names:
+            controller.active_dataset_name = dataset_names[0]
+            app.data_fit_time_cb.setCurrentIndex(0)
+    finally:
+        app.data_fit_time_cb.blockSignals(False)
+    _refresh_xy_combos_for_active_dataset(app)
     _refresh_capacitor_row_combos(app)
+
+
+def _refresh_xy_combos_for_active_dataset(app) -> None:
+    """Repopulate the X/Y axis combos with the channels of the active dataset."""
+    controller = app.data_fit_controller
+    dataset = controller.active_dataset()
+    if dataset is None:
+        _refill_combo(app.data_fit_x_cb, [])
+        _refill_combo(app.data_fit_y_cb, [])
+        return
+    channels = dataset["channels"]
+    has_time = dataset.get("time") is not None
+    column_names = list(channels.keys())
+    # X gains the synthetic "Time" entry only when the dataset has a time
+    # array; derived datasets without a time axis (e.g. Capacity vs Voltage)
+    # only expose their stored columns.
+    x_options = (["Time"] + column_names) if has_time else list(column_names)
+    _refill_combo(app.data_fit_x_cb, x_options)
+    _refill_combo(app.data_fit_y_cb, list(column_names))
+    if dataset.get("is_recording", False):
+        _try_select(app.data_fit_x_cb, ("AI0", "Current", "I", "current"))
+        # Default to the first signal channel rather than "Time" for the V-I
+        # fitting workflow when no current-channel match is found.
+        if app.data_fit_x_cb.currentText() == "Time" and column_names:
+            idx = app.data_fit_x_cb.findText(column_names[0])
+            if idx >= 0:
+                app.data_fit_x_cb.setCurrentIndex(idx)
+        _try_select(app.data_fit_y_cb, ("AI1", "Voltage", "V", "voltage"))
 
 
 def _refill_combo(combo: QComboBox, items):
@@ -2830,6 +3134,7 @@ def _clear_plot_state_for_new_recording(app) -> None:
             n for n in (controller.channel_names or [])
             if n not in (CAPACITOR_POWER_CHANNEL_NAME, CAPACITOR_ENERGY_CHANNEL_NAME)
         ]
+        controller.datasets.pop(CAPACITY_DATASET_NAME, None)
     band = getattr(app, "data_fit_band_capacitor", None)
     if band is not None:
         band.setVisible(False)
@@ -2843,7 +3148,11 @@ def _clear_plot_state_for_new_recording(app) -> None:
         w = getattr(app, w_attr, None)
         if w is not None:
             _set_silently(w, "")
-    for status_attr in ("data_fit_cap_compute_status", "data_fit_cap_integrate_status"):
+    for status_attr in (
+        "data_fit_cap_compute_status",
+        "data_fit_cap_integrate_status",
+        "data_fit_cap_q_compute_status",
+    ):
         status = getattr(app, status_attr, None)
         if status is not None:
             status.setText("")
@@ -3363,8 +3672,8 @@ def _update_avg_rate_label(app):
     controller = getattr(app, "data_fit_controller", None)
     t_raw = None
     if controller is not None:
-        time_name = app.data_fit_time_cb.currentText()
-        t_raw = controller.get_channel(time_name) if time_name and time_name != "Time" else controller.time_array
+        dataset = controller.active_dataset()
+        t_raw = dataset.get("time") if dataset is not None else controller.time_array
     window = _active_avg_window(app)
     if t_raw is None or np.asarray(t_raw).size < 2:
         label.setText(f"Effective rate: — (avg window = {window})")
@@ -4250,7 +4559,9 @@ def load_metadata_from_tdms(app):
     if not controller.channel_metadata:
         QMessageBox.information(app, "Data Fitting", "Load a TDMS recording first.")
         return
-    for axis in ("time", "x", "y"):
+    # The "time" axis is now the dataset selector — it has no per-channel
+    # metadata, so only X and Y need a scale/offset refresh from TDMS.
+    for axis in ("x", "y"):
         _load_axis_metadata_from_tdms(app, axis)
     _apply_voltage_tap_from_metadata(app)
     refresh_preview(app)
@@ -4275,7 +4586,22 @@ def _load_axis_metadata_from_tdms(app, axis: str) -> None:
 
 
 def _on_channel_selection_changed(app, axis: str) -> None:
-    """Whenever a channel dropdown changes, refresh that axis transform."""
+    """Whenever a channel dropdown changes, refresh that axis transform.
+
+    The "time" combo is repurposed as a dataset selector, so changes there
+    swap the active dataset and rebuild the X/Y combos instead of reloading
+    a single channel's scale/offset.
+    """
+    if axis == "time":
+        controller = getattr(app, "data_fit_controller", None)
+        if controller is not None:
+            new_name = app.data_fit_time_cb.currentText()
+            if new_name and new_name in controller.datasets:
+                controller.active_dataset_name = new_name
+                _refresh_xy_combos_for_active_dataset(app)
+                _refresh_capacitor_row_combos(app)
+        _on_transform_inputs_changed(app)
+        return
     _load_axis_metadata_from_tdms(app, axis)
     if axis == "y":
         _apply_voltage_tap_from_metadata(app)
@@ -6310,7 +6636,17 @@ def _recompute_curve_from_source(app, entry: dict) -> None:
     src = entry.get("source") or {}
     controller = app.data_fit_controller
     time_sig = src.get("time_sig", "Time")
-    t_raw = controller.get_channel(time_sig) if time_sig and time_sig != "Time" else controller.time_array
+    # ``time_sig`` may be a dataset name (Channels-group Dataset combo) or
+    # a legacy channel/sentinel; resolve in either form.
+    t_raw = None
+    if time_sig:
+        dataset = controller.datasets.get(time_sig) if controller.datasets else None
+        if dataset is not None:
+            t_raw = dataset.get("time")
+        elif time_sig != "Time":
+            t_raw = controller.get_channel(time_sig)
+    if t_raw is None:
+        t_raw = controller.time_array
     x_raw = controller.get_channel(src.get("x_sig", ""))
     y_raw = controller.get_channel(src.get("y_sig", ""))
     t = controller.apply_transform(t_raw, float(src.get("t_scale", 1.0)), float(src.get("t_offset", 0.0)))
