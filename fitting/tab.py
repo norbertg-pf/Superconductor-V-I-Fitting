@@ -619,9 +619,13 @@ class DataFittingController:
         # source channel itself. Used to redraw fitted curves on file load.
         self.saved_fit_results: dict[str, dict] = {}
         # Per-book user columns added in the Data book dialog. Each entry is
-        # ``{"name": str, "data": np.ndarray, "formula": str}``. Lives on the
-        # controller so each loaded TDMS keeps its own user columns.
+        # ``{"name": str, "data": np.ndarray, "formula": str, "role": str}``.
+        # Lives on the controller so each loaded TDMS keeps its own user columns.
         self.book_user_columns: list[dict] = []
+        # Plot-role assignments for channel-backed columns, keyed by source
+        # name ("__time__" for the time column). Values: "X", "Y", or absent.
+        # User-column roles live alongside their entry in ``book_user_columns``.
+        self.column_roles: dict[str, str] = {}
 
     # --- data source -----------------------------------------------------
     def load_recording(self, path: str) -> tuple[bool, str]:
@@ -880,6 +884,7 @@ def _reset_data_fitting_defaults(app) -> None:
     app.data_fit_controller.channel_names = []
     app.data_fit_controller.channel_metadata = {}
     app.data_fit_controller.book_user_columns = []
+    app.data_fit_controller.column_roles = {}
     app.data_fit_path_label.setText("No file loaded.")
     app.data_fit_path_label.setStyleSheet("color: gray;")
     for cb in (app.data_fit_time_cb, app.data_fit_x_cb, app.data_fit_y_cb):
@@ -6360,16 +6365,18 @@ class _DataBookColumn:
     Otherwise                                      → user column (persisted via app state).
     """
 
-    __slots__ = ("letter", "name", "_data", "source_key", "is_time", "formula")
+    __slots__ = ("letter", "name", "_data", "source_key", "is_time", "formula", "plot_role")
 
     def __init__(self, *, letter: str, name: str, data,
-                 source_key=None, is_time: bool = False, formula: str = "") -> None:
+                 source_key=None, is_time: bool = False, formula: str = "",
+                 plot_role: str = "") -> None:
         self.letter = letter
         self.name = name
         self._data = np.asarray(data, dtype=float)
         self.source_key = source_key
         self.is_time = bool(is_time)
         self.formula = formula or ""
+        self.plot_role = plot_role or ""
 
     @property
     def data(self) -> np.ndarray:
@@ -6430,12 +6437,18 @@ class _DataBookModel(QAbstractTableModel):
                 return None
             col = self._columns[section]
             if role == Qt.DisplayRole:
+                if col.plot_role:
+                    return f"{col.letter} [{col.plot_role}]"
                 return col.letter
             if role == Qt.ToolTipRole:
                 kind = "Time" if col.is_time else (
                     "Channel" if col.source_key else "User column"
                 )
-                return f"{col.letter}: {col.name} ({kind})"
+                role_part = (
+                    f" — plot role: {col.plot_role}"
+                    if col.plot_role else ""
+                )
+                return f"{col.letter}: {col.name} ({kind}){role_part}"
             return None
         if role == Qt.DisplayRole:
             if 0 <= section < self.META_ROWS:
@@ -6593,6 +6606,43 @@ class _DataBookModel(QAbstractTableModel):
             return False
         return self._apply_formula(col)
 
+    def set_column_role(self, col_idx: int, role: str) -> bool:
+        """Tag a column as ``X``, ``Y``, or unset (``""``).
+
+        Channel columns persist on ``controller.column_roles`` keyed by source
+        name (or ``"__time__"`` for the time column); user columns persist via
+        ``_persist_user_columns`` so reopening the dialog restores the tag.
+        """
+        col = self.column_at(col_idx)
+        if col is None:
+            return False
+        role = (role or "").upper().strip()
+        if role not in ("X", "Y", ""):
+            return False
+        col.plot_role = role
+        controller = getattr(self._app, "data_fit_controller", None)
+        if controller is not None:
+            roles_map = getattr(controller, "column_roles", None)
+            if roles_map is None:
+                controller.column_roles = {}
+                roles_map = controller.column_roles
+            if col.is_time:
+                key = "__time__"
+            elif col.source_key is not None:
+                key = col.source_key
+            else:
+                key = None
+            if key is not None:
+                if role:
+                    roles_map[key] = role
+                else:
+                    roles_map.pop(key, None)
+            else:
+                # User column — persist via the snapshot which now carries role.
+                self._persist_user_columns()
+        self.headerDataChanged.emit(Qt.Horizontal, col_idx, col_idx)
+        return True
+
     # --- helpers --------------------------------------------------------
     def _reletter_columns(self) -> None:
         if not self._columns:
@@ -6644,6 +6694,7 @@ class _DataBookModel(QAbstractTableModel):
                 "name": c.name,
                 "data": np.asarray(c.data, dtype=float).copy(),
                 "formula": c.formula,
+                "role": c.plot_role,
             })
         controller = getattr(self._app, "data_fit_controller", None)
         if controller is not None:
@@ -6681,6 +6732,156 @@ class _DataBookModel(QAbstractTableModel):
                 traceback.print_exc()
 
 
+_BOOK_PLOT_COLORS = (
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+)
+
+
+def _build_plot_specs_from_selection(model, selected_cols):
+    """Resolve a list of selected columns into ``(specs, error)``.
+
+    ``specs`` is a list of ``(x_label, x_array, y_label, y_array)`` tuples ready
+    to feed a plot. X axis precedence:
+
+    1. The first column among the selection that is tagged ``X``.
+    2. Otherwise the first column in the whole book tagged ``X``.
+    3. Otherwise — when more than one column is selected — the first selected
+       column is treated as X and the rest as Y.
+    4. Otherwise (single untagged selection) the row index becomes X.
+    """
+    if not selected_cols:
+        return [], "Select at least one column to plot."
+    cols = [model.column_at(i) for i in selected_cols]
+    cols = [c for c in cols if c is not None]
+    if not cols:
+        return [], "Selection holds no valid columns."
+
+    sel_x = [c for c in cols if c.plot_role == "X"]
+    sel_y = [c for c in cols if c.plot_role == "Y"]
+    sel_untyped = [c for c in cols if not c.plot_role]
+
+    if sel_x:
+        x_col = sel_x[0]
+        y_cols = [c for c in (sel_y + sel_untyped) if c is not x_col]
+    else:
+        book_x = [c for c in model.columns if c.plot_role == "X"]
+        if book_x:
+            x_col = book_x[0]
+            y_cols = [c for c in (sel_y + sel_untyped) if c is not x_col]
+        elif len(cols) >= 2:
+            x_col = cols[0]
+            y_cols = [c for c in cols[1:] if c is not x_col]
+        else:
+            x_col = None  # plot vs row index
+            y_cols = list(cols)
+
+    if not y_cols:
+        return [], "Selection has no Y columns to plot."
+
+    if x_col is None:
+        n = max((len(c.data) for c in y_cols), default=0)
+        if n == 0:
+            return [], "Selected columns are empty."
+        x_arr = np.arange(1, n + 1, dtype=float)
+        x_label = "Row"
+    else:
+        x_arr = np.asarray(x_col.data, dtype=float)
+        x_label = x_col.name or x_col.letter
+
+    specs = []
+    for y in y_cols:
+        y_arr = np.asarray(y.data, dtype=float)
+        n = int(min(x_arr.size, y_arr.size))
+        if n <= 0:
+            continue
+        specs.append((x_label, x_arr[:n], y.name or y.letter, y_arr[:n]))
+    if not specs:
+        return [], "Selected columns produced no plottable rows."
+    return specs, ""
+
+
+def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
+    """Open a non-modal plot window with the given (x, y) specs.
+
+    ``draw_mode`` is one of ``"line"``, ``"scatter"``, ``"both"``. The window
+    is kept alive on ``app._data_fit_book_plot_windows`` so the user can have
+    several open at once without them being garbage collected.
+    """
+    from PyQt5.QtWidgets import QDialog, QHBoxLayout, QPushButton, QVBoxLayout
+
+    dlg = QDialog(app)
+    dlg.setWindowTitle(title)
+    dlg.resize(720, 540)
+    dlg.setModal(False)
+    layout = QVBoxLayout(dlg)
+
+    plot = pg.PlotWidget()
+    plot.setBackground("w")
+    plot.showGrid(x=True, y=True, alpha=0.25)
+    legend = plot.addLegend(offset=(10, 10))
+    layout.addWidget(plot, stretch=1)
+
+    common_x_label = plot_specs[0][0] if plot_specs else ""
+    plot.setLabel("bottom", common_x_label)
+    if len({spec[2] for spec in plot_specs}) == 1 and plot_specs:
+        plot.setLabel("left", plot_specs[0][2])
+    else:
+        plot.setLabel("left", "Y")
+
+    for i, (_xlabel, x_arr, y_label, y_arr) in enumerate(plot_specs):
+        color = _BOOK_PLOT_COLORS[i % len(_BOOK_PLOT_COLORS)]
+        # Drop NaNs/infs so pyqtgraph doesn't break the line; non-finite mask.
+        mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+        if not np.any(mask):
+            continue
+        x_clean = x_arr[mask]
+        y_clean = y_arr[mask]
+        if draw_mode == "scatter":
+            plot.plot(
+                x_clean, y_clean, pen=None,
+                symbol="o", symbolSize=5,
+                symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color),
+                name=y_label,
+            )
+        elif draw_mode == "both":
+            plot.plot(
+                x_clean, y_clean, pen=pg.mkPen(color, width=1.2),
+                symbol="o", symbolSize=4,
+                symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color),
+                name=y_label,
+            )
+        else:  # "line"
+            plot.plot(
+                x_clean, y_clean, pen=pg.mkPen(color, width=1.5),
+                name=y_label,
+            )
+
+    # Bottom row with Close.
+    btns = QHBoxLayout()
+    btns.addStretch()
+    close = QPushButton("Close")
+    close.clicked.connect(dlg.accept)
+    btns.addWidget(close)
+    layout.addLayout(btns)
+
+    if not hasattr(app, "_data_fit_book_plot_windows"):
+        app._data_fit_book_plot_windows = []
+    app._data_fit_book_plot_windows.append(dlg)
+
+    def _drop_when_closed(_result):
+        try:
+            app._data_fit_book_plot_windows.remove(dlg)
+        except (ValueError, AttributeError):
+            pass
+
+    dlg.finished.connect(_drop_when_closed)
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    return dlg
+
+
 def _build_data_book_columns(app) -> list:
     """Snapshot the controller's channels (+ persisted user cols) into columns.
 
@@ -6689,12 +6890,18 @@ def _build_data_book_columns(app) -> list:
     """
     controller = getattr(app, "data_fit_controller", None)
     columns: list = []
+    roles_map: dict = (
+        getattr(controller, "column_roles", None) or {}
+        if controller is not None
+        else {}
+    )
     if controller is not None and controller.time_array is not None:
         columns.append(_DataBookColumn(
             letter=_data_book_column_letter(len(columns)),
             name="Time",
             data=controller.time_array,
             is_time=True,
+            plot_role=str(roles_map.get("__time__", "")),
         ))
     if controller is not None:
         for name in controller.channel_names:
@@ -6706,6 +6913,7 @@ def _build_data_book_columns(app) -> list:
                 name=name,
                 data=arr,
                 source_key=name,
+                plot_role=str(roles_map.get(name, "")),
             ))
     user_cols_source = (
         list(getattr(controller, "book_user_columns", None) or [])
@@ -6718,6 +6926,7 @@ def _build_data_book_columns(app) -> list:
             name=str(uc.get("name", "User")),
             data=np.asarray(uc.get("data", []), dtype=float).copy(),
             formula=str(uc.get("formula", "")),
+            plot_role=str(uc.get("role", "")),
         ))
     return columns
 
@@ -6807,6 +7016,7 @@ def _open_data_table_dialog(app) -> None:
         QLabel,
         QLineEdit,
         QMessageBox,
+        QMenu,
         QPushButton,
         QShortcut,
         QTableView,
@@ -6857,12 +7067,18 @@ def _open_data_table_dialog(app) -> None:
     # --- table ---------------------------------------------------------
     table = QTableView()
     table.setSelectionBehavior(QAbstractItemView.SelectItems)
-    table.setSelectionMode(QAbstractItemView.ContiguousSelection)
+    table.setSelectionMode(QAbstractItemView.ExtendedSelection)
     table.setAlternatingRowColors(True)
     table.horizontalHeader().setDefaultSectionSize(120)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+    table.horizontalHeader().setSectionsClickable(True)
+    table.horizontalHeader().sectionClicked.connect(
+        lambda idx: table.selectColumn(idx)
+    )
     table.verticalHeader().setDefaultSectionSize(20)
     table.verticalHeader().setMinimumWidth(86)
+    table.setContextMenuPolicy(Qt.CustomContextMenu)
+    table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
     root.addWidget(table, stretch=1)
 
     state: dict = {"model": None}
@@ -7133,20 +7349,101 @@ def _open_data_table_dialog(app) -> None:
     recalc_btn.clicked.connect(_on_recalc_column)
     close_btn.clicked.connect(dialog.accept)
 
+    # --- right-click context menu (Set X/Y, Plot ▸ Line/Scatter/Both) ---
+    def _do_plot(draw_mode: str, cols: list[int]) -> None:
+        m = state["model"]
+        if m is None:
+            return
+        specs, err = _build_plot_specs_from_selection(m, cols)
+        if err:
+            QMessageBox.information(dialog, "Plot from book", err)
+            return
+        ctrl = getattr(app, "data_fit_controller", None)
+        book_name = (
+            os.path.basename(ctrl.tdms_path)
+            if ctrl is not None and ctrl.tdms_path
+            else "(book)"
+        )
+        kind_label = {
+            "line": "line",
+            "scatter": "scatter",
+            "both": "line + scatter",
+        }.get(draw_mode, draw_mode)
+        title = f"Plot ({kind_label}) — {book_name}"
+        _open_book_plot_window(app, title=title, plot_specs=specs, draw_mode=draw_mode)
+
+    def _show_book_context_menu(global_pos, *, header_pos=None) -> None:
+        m = state["model"]
+        if m is None:
+            return
+        cols = _selected_columns()
+        # If the menu was raised on the header, fall back to the header's
+        # logical column when nothing is selected.
+        if not cols and header_pos is not None:
+            section = table.horizontalHeader().logicalIndexAt(header_pos)
+            if section >= 0:
+                cols = [section]
+        if not cols:
+            return
+        menu = QMenu(table)
+        sel_label = (
+            f"Selected column: {m.headerData(cols[0], Qt.Horizontal)}"
+            if len(cols) == 1
+            else f"Selected {len(cols)} columns"
+        )
+        title_act = menu.addAction(sel_label)
+        title_act.setEnabled(False)
+        menu.addSeparator()
+        set_x = menu.addAction("Set as X")
+        set_y = menu.addAction("Set as Y")
+        clear_xy = menu.addAction("Clear X/Y")
+        menu.addSeparator()
+        plot_menu = menu.addMenu("Plot")
+        plot_line = plot_menu.addAction("Line")
+        plot_scatter = plot_menu.addAction("Scatter")
+        plot_both = plot_menu.addAction("Line + Scatter")
+        chosen = menu.exec_(global_pos)
+        if chosen is None:
+            return
+        if chosen is set_x:
+            for c in cols:
+                m.set_column_role(c, "X")
+        elif chosen is set_y:
+            for c in cols:
+                m.set_column_role(c, "Y")
+        elif chosen is clear_xy:
+            for c in cols:
+                m.set_column_role(c, "")
+        elif chosen is plot_line:
+            _do_plot("line", cols)
+        elif chosen is plot_scatter:
+            _do_plot("scatter", cols)
+        elif chosen is plot_both:
+            _do_plot("both", cols)
+
+    table.customContextMenuRequested.connect(
+        lambda pos: _show_book_context_menu(table.viewport().mapToGlobal(pos))
+    )
+    table.horizontalHeader().customContextMenuRequested.connect(
+        lambda pos: _show_book_context_menu(
+            table.horizontalHeader().mapToGlobal(pos), header_pos=pos,
+        )
+    )
+
     QShortcut(QKeySequence.Copy, table, activated=_on_copy)
     QShortcut(QKeySequence.Paste, table, activated=_on_paste)
 
     hint = QLabel(
         "Use the <b>Active book</b> combo to switch between every TDMS file "
-        "you've loaded. Each column inside a book is named A, B, C, … like "
-        "in OriginLab. The F(x)= row above the data accepts expressions "
-        "referencing other columns by their letter — e.g. <code>A+B</code>, "
-        "<code>2*A</code>, <code>sqrt(B**2+C**2)</code>, "
-        "<code>log10(B)</code>, <code>diff(A)</code>. <code>^</code> is "
-        "treated as power. Edits to channel columns (Time + the TDMS "
-        "channels) update the live preview; click 'Add to plot' to "
-        "snapshot the edited data into a plotted curve. Ctrl+C / Ctrl+V "
-        "copy and paste tab-separated values."
+        "you've loaded. Each column is named A, B, C, … like in OriginLab; "
+        "the F(x)= row above the data accepts expressions referencing other "
+        "columns by their letter (<code>A+B</code>, <code>sqrt(B**2+C**2)</code>, "
+        "<code>diff(A)</code>; <code>^</code> means power). "
+        "<b>Right-click</b> a column header (or a multi-column selection) to "
+        "<b>Set as X / Set as Y</b> or to <b>Plot ▸ Line / Scatter / "
+        "Line + Scatter</b> in a new window — the plot honors the X/Y tags. "
+        "Ctrl+click selects multiple columns; click a header to grab a whole "
+        "column. Ctrl+C / Ctrl+V copy and paste tab-separated values."
     )
     hint.setStyleSheet("color: #555; font-size: 11px;")
     hint.setTextFormat(Qt.RichText)
