@@ -7340,13 +7340,18 @@ def _column_pick_options(model) -> list[tuple[str, int]]:
 
 
 def _open_plot_picker_dialog(app, parent, model) -> None:
-    """Explicit multi-column plot picker.
+    """Simple X-vs-Ys picker — primary path for plotting from the data book.
 
-    A row per column with a checkbox and a role dropdown so the user can
-    plot several Y curves at once (against one or several X columns) with
-    no Ctrl-click selection juggling. The dialog also writes the chosen
-    roles back onto the columns when "Update tags" is checked, so the
-    next plot can re-use them.
+    The dialog has just three things to configure:
+
+    * an **X axis** combo with every column (plus a "(row index)" entry);
+    * a **Y axes** check-list — every ticked column gets a curve on the plot;
+    * the **draw mode** (line / scatter / both).
+
+    For the multi-X/Y use-case (X1/Y1, X2/Y2, … as set via the
+    right-click "Set as X<sub>k</sub> / Y<sub>k</sub>" submenu), tick
+    the "Use X<sub>k</sub>/Y<sub>k</sub> tags" checkbox: the X combo is
+    ignored and each Y plots against its matching X<sub>k</sub>.
     """
     from PyQt5.QtWidgets import (
         QButtonGroup,
@@ -7355,14 +7360,12 @@ def _open_plot_picker_dialog(app, parent, model) -> None:
         QDialog,
         QDialogButtonBox,
         QHBoxLayout,
-        QHeaderView,
         QLabel,
+        QListWidget,
+        QListWidgetItem,
         QMessageBox,
         QRadioButton,
-        QTableWidget,
-        QTableWidgetItem,
         QVBoxLayout,
-        QWidget,
     )
 
     if model is None or model.columnCount() == 0:
@@ -7372,112 +7375,107 @@ def _open_plot_picker_dialog(app, parent, model) -> None:
     dlg = QDialog(parent)
     dlg.setWindowTitle("Plot from data book")
     dlg.setModal(True)
-    dlg.resize(560, 480)
+    dlg.resize(460, 540)
     root = QVBoxLayout(dlg)
 
-    info = QLabel(
-        "Tick the columns you want on the plot and pick a role for each. "
-        "Several Y columns are overlaid on the same graph; Y<sub>k</sub> "
-        "uses X<sub>k</sub> as its X axis (Y2 → X2, Y1 → X1, …). Untagged "
-        "Y columns fall back to X1 or to the row index when no X is "
-        "available."
-    )
-    info.setWordWrap(True)
-    info.setTextFormat(Qt.RichText)
-    info.setStyleSheet("color: #444;")
-    root.addWidget(info)
+    title = QLabel("<b>Plot columns from this book</b>")
+    title.setTextFormat(Qt.RichText)
+    root.addWidget(title)
 
-    role_options = ["—", "X1", "Y1", "X2", "Y2", "X3", "Y3", "X4", "Y4",
-                    "X5", "Y5", "X6", "Y6"]
-
-    table = QTableWidget(model.columnCount(), 4, dlg)
-    table.setHorizontalHeaderLabels(["Plot?", "Letter", "Long name", "Role"])
-    table.verticalHeader().setVisible(False)
-    table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-    table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-    table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-    table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-    table.setEditTriggers(QTableWidget.NoEditTriggers)
-
-    check_widgets: list[QCheckBox] = []
-    role_widgets: list[QComboBox] = []
-
+    # X axis combo
+    x_row = QHBoxLayout()
+    x_row.addWidget(QLabel("X axis:"))
+    x_cb = QComboBox()
+    x_cb.addItem("(row index 1, 2, 3, …)", -1)
     for i, c in enumerate(model.columns):
-        # Column 0: checkbox in a centered widget.
-        cb_widget = QWidget()
-        cb_layout = QHBoxLayout(cb_widget)
-        cb_layout.setContentsMargins(8, 0, 0, 0)
-        cb = QCheckBox()
-        cb_layout.addWidget(cb)
-        cb_layout.addStretch()
-        # Pre-check rows that already have a Y role (the user is most
-        # likely going to plot existing Ys).
+        role_tag = f"  [{c.plot_role}]" if c.plot_role else ""
+        x_cb.addItem(f"{c.letter} — {c.name}{role_tag}", i)
+    # Default to the first X-tagged column or to "Time" by name.
+    default_x = -1
+    for i, c in enumerate(model.columns):
+        if (c.plot_role or "").upper().startswith("X"):
+            default_x = i
+            break
+    if default_x < 0:
+        for i, c in enumerate(model.columns):
+            if c.is_time or (c.name or "").strip().lower() == "time":
+                default_x = i
+                break
+    if default_x >= 0:
+        x_cb.setCurrentIndex(default_x + 1)  # +1 for the "(row index)" entry
+    x_row.addWidget(x_cb, stretch=1)
+    root.addLayout(x_row)
+
+    # Y axes list
+    root.addWidget(QLabel("Y axes — tick every column you want as a curve:"))
+    y_list = QListWidget()
+    y_list.setSelectionMode(QListWidget.NoSelection)
+    for i, c in enumerate(model.columns):
+        role_tag = f"  [{c.plot_role}]" if c.plot_role else ""
+        item = QListWidgetItem(f"{c.letter} — {c.name}{role_tag}")
+        item.setData(Qt.UserRole, i)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        # Pre-check Y-tagged columns.
         if (c.plot_role or "").upper().startswith("Y"):
-            cb.setChecked(True)
-        check_widgets.append(cb)
-        table.setCellWidget(i, 0, cb_widget)
+            item.setCheckState(Qt.Checked)
+        else:
+            item.setCheckState(Qt.Unchecked)
+        y_list.addItem(item)
+    root.addWidget(y_list, stretch=1)
 
-        letter_item = QTableWidgetItem(c.letter)
-        letter_item.setTextAlignment(Qt.AlignCenter)
-        table.setItem(i, 1, letter_item)
-        table.setItem(i, 2, QTableWidgetItem(c.name))
-
-        role_cb = QComboBox()
-        role_cb.addItems(role_options)
-        cur_role = (c.plot_role or "").upper()
-        if cur_role in role_options:
-            role_cb.setCurrentText(cur_role)
-        # If a Y is checked but has no role, default it to Y1 so single-X /
-        # multi-Y plotting "just works" out of the box.
-        if cb.isChecked() and role_cb.currentText() == "—":
-            role_cb.setCurrentText("Y1")
-        role_widgets.append(role_cb)
-        table.setCellWidget(i, 3, role_cb)
-
-    root.addWidget(table, stretch=1)
-
-    # Quick-action helper buttons (select all, clear).
+    # Quick selection helpers.
     helpers = QHBoxLayout()
-    sel_all = QPushButton("Select all")
-    sel_none = QPushButton("Clear selection")
-    auto_xy = QPushButton("Auto-fill X1/Y1…")
-    auto_xy.setToolTip(
-        "Tag the first checked row as X1 and every other checked row as "
-        "Y1 — the simplest single-X / multi-Y setup.",
-    )
+    sel_all = QPushButton("Tick all")
+    sel_none = QPushButton("Untick all")
+    invert = QPushButton("Invert")
     helpers.addWidget(sel_all)
     helpers.addWidget(sel_none)
-    helpers.addWidget(auto_xy)
+    helpers.addWidget(invert)
     helpers.addStretch()
     root.addLayout(helpers)
 
-    def _select_all() -> None:
-        for cb in check_widgets:
-            cb.setChecked(True)
-        # Promote any unset row to Y1.
-        for r in role_widgets:
-            if r.currentText() == "—":
-                r.setCurrentText("Y1")
+    def _set_all(state: int) -> None:
+        for r in range(y_list.count()):
+            y_list.item(r).setCheckState(state)
 
-    def _clear_all() -> None:
-        for cb in check_widgets:
-            cb.setChecked(False)
+    sel_all.clicked.connect(lambda: _set_all(Qt.Checked))
+    sel_none.clicked.connect(lambda: _set_all(Qt.Unchecked))
 
-    def _auto_xy() -> None:
-        first_x = None
-        for i, cb in enumerate(check_widgets):
-            if cb.isChecked():
-                if first_x is None:
-                    role_widgets[i].setCurrentText("X1")
-                    first_x = i
-                else:
-                    role_widgets[i].setCurrentText("Y1")
+    def _invert() -> None:
+        for r in range(y_list.count()):
+            it = y_list.item(r)
+            it.setCheckState(
+                Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked,
+            )
 
-    sel_all.clicked.connect(_select_all)
-    sel_none.clicked.connect(_clear_all)
-    auto_xy.clicked.connect(_auto_xy)
+    invert.clicked.connect(_invert)
 
-    # Draw mode + persist toggle.
+    # Multi-X/Y option.
+    use_tags = QCheckBox("Use Xₖ/Yₖ tags from columns "
+                         "(advanced — multiple X/Y pairs)")
+    use_tags.setToolTip(
+        "When checked, the X combo above is ignored. Each ticked Y "
+        "column plots against the X column with the matching index "
+        "(Y1 → X1, Y2 → X2, …) — set tags via the right-click "
+        "'Set as X<sub>k</sub> / Y<sub>k</sub>' submenu on column "
+        "headers.",
+    )
+    # Auto-enable when tags exist.
+    has_indexed = any(
+        (_plot_role_index(c.plot_role) >= 1 and c.plot_role
+         and (c.plot_role[0] in ("X", "Y") or c.plot_role[0] in ("x", "y")))
+        for c in model.columns
+    )
+    use_tags.setChecked(has_indexed)
+    root.addWidget(use_tags)
+
+    def _on_use_tags(checked: bool) -> None:
+        x_cb.setEnabled(not checked)
+
+    use_tags.toggled.connect(_on_use_tags)
+    _on_use_tags(use_tags.isChecked())
+
+    # Draw mode
     mode_box = QHBoxLayout()
     mode_box.addWidget(QLabel("Draw:"))
     mode_grp = QButtonGroup(dlg)
@@ -7489,18 +7487,13 @@ def _open_plot_picker_dialog(app, parent, model) -> None:
         mode_grp.addButton(rb)
         mode_box.addWidget(rb)
     mode_box.addStretch()
-    persist_cb = QCheckBox("Update column tags in the book")
-    persist_cb.setToolTip(
-        "When checked, the role dropdowns above replace the existing "
-        "X<sub>k</sub> / Y<sub>k</sub> tags on the columns so future "
-        "plots inherit them.",
-    )
-    persist_cb.setChecked(False)
-    mode_box.addWidget(persist_cb)
     root.addLayout(mode_box)
 
     btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     btns.button(QDialogButtonBox.Ok).setText("Plot")
+    btns.button(QDialogButtonBox.Ok).setStyleSheet(
+        "padding: 4px 18px; font-weight: 600;"
+    )
     btns.accepted.connect(dlg.accept)
     btns.rejected.connect(dlg.reject)
     root.addWidget(btns)
@@ -7508,45 +7501,16 @@ def _open_plot_picker_dialog(app, parent, model) -> None:
     if dlg.exec_() != QDialog.Accepted:
         return
 
-    # Collect picks: list of (column_index, override_role).
-    picks: list[tuple[int, str]] = []
-    for i, cb in enumerate(check_widgets):
-        if not cb.isChecked():
-            continue
-        role = role_widgets[i].currentText()
-        if role == "—":
-            role = ""
-        picks.append((i, role))
+    # Collect ticked Y columns.
+    y_indexes: list[int] = []
+    for r in range(y_list.count()):
+        it = y_list.item(r)
+        if it.checkState() == Qt.Checked:
+            y_indexes.append(int(it.data(Qt.UserRole)))
 
-    if not picks:
+    if not y_indexes:
         QMessageBox.information(parent, "Plot",
-                                "Tick at least one column to plot.")
-        return
-
-    # Optionally persist the new roles on the columns first; this also
-    # makes ``_build_plot_specs_from_selection`` see the correct tags
-    # because it reads ``column.plot_role``.
-    selected_idx = [i for i, _ in picks]
-    if persist_cb.isChecked():
-        for i, role in picks:
-            model.set_column_role(i, role)
-        specs, err = _build_plot_specs_from_selection(model, selected_idx)
-    else:
-        # Temporary override: stash the old roles, set the picked roles,
-        # build specs, restore. Avoids touching persisted state.
-        saved = [(i, model.column_at(i).plot_role) for i in selected_idx]
-        try:
-            for i, role in picks:
-                model.column_at(i).plot_role = (
-                    _normalize_plot_role(role) or ""
-                )
-            specs, err = _build_plot_specs_from_selection(model, selected_idx)
-        finally:
-            for i, old_role in saved:
-                model.column_at(i).plot_role = old_role or ""
-
-    if err:
-        QMessageBox.information(parent, "Plot", err)
+                                "Tick at least one Y column to plot.")
         return
 
     if rb_scatter.isChecked():
@@ -7556,6 +7520,70 @@ def _open_plot_picker_dialog(app, parent, model) -> None:
     else:
         draw_mode = "line"
 
+    # Build (x_label, x_arr, y_label, y_arr) specs.
+    specs: list = []
+    if use_tags.isChecked():
+        # Advanced mode — use Xk/Yk tags. The picker just controls which Ys
+        # participate; pairing comes from ``_build_plot_specs_from_selection``
+        # which reads ``column.plot_role``.
+        # Always include the matching Xk so the resolver finds it.
+        cols_for_specs: list[int] = list(y_indexes)
+        seen_x: set[int] = set()
+        for yi in y_indexes:
+            yc = model.column_at(yi)
+            if yc is None:
+                continue
+            k = _plot_role_index(yc.plot_role)
+            if k <= 0:
+                continue
+            for xi, xc in enumerate(model.columns):
+                if xc.plot_role.upper() == f"X{k}" and xi not in seen_x:
+                    cols_for_specs.append(xi)
+                    seen_x.add(xi)
+                    break
+        # Also drop any Y that has no tag — the resolver would treat it as
+        # "untagged" and pick a fallback X, which is rarely what users mean
+        # in advanced mode.
+        cols_for_specs = sorted(set(cols_for_specs))
+        specs, err = _build_plot_specs_from_selection(model, cols_for_specs)
+    else:
+        # Simple mode — one X for every checked Y.
+        x_idx = int(x_cb.currentData())
+        if x_idx < 0:
+            x_label = "Row"
+            x_arr_full = None  # will be built from each Y's length
+        else:
+            x_col = model.column_at(x_idx)
+            if x_col is None:
+                QMessageBox.warning(parent, "Plot", "X column unavailable.")
+                return
+            x_arr_full = np.asarray(x_col.data, dtype=float)
+            x_label = x_col.name or x_col.letter
+        for yi in y_indexes:
+            y_col = model.column_at(yi)
+            if y_col is None:
+                continue
+            y_arr = np.asarray(y_col.data, dtype=float)
+            if x_arr_full is None:
+                n = int(y_arr.size)
+                if n <= 0:
+                    continue
+                x_arr = np.arange(1, n + 1, dtype=float)
+            else:
+                n = int(min(x_arr_full.size, y_arr.size))
+                if n <= 0:
+                    continue
+                x_arr = x_arr_full[:n]
+                y_arr = y_arr[:n]
+            specs.append(
+                (x_label, x_arr, y_col.name or y_col.letter, y_arr),
+            )
+        err = "" if specs else "No plottable Y columns."
+
+    if err:
+        QMessageBox.information(parent, "Plot", err)
+        return
+
     ctrl = getattr(app, "data_fit_controller", None)
     book_name = (
         os.path.basename(ctrl.tdms_path)
@@ -7564,8 +7592,8 @@ def _open_plot_picker_dialog(app, parent, model) -> None:
     )
     kind_label = {"line": "line", "scatter": "scatter",
                   "both": "line + scatter"}[draw_mode]
-    title = f"Plot ({kind_label}) — {book_name}"
-    _open_book_plot_window(app, title=title, plot_specs=specs,
+    title_str = f"Plot ({kind_label}) — {book_name}"
+    _open_book_plot_window(app, title=title_str, plot_specs=specs,
                            draw_mode=draw_mode)
 
 
@@ -8913,21 +8941,25 @@ def _open_data_table_dialog(app) -> None:
                 if target.isValid():
                     m.setData(target, cell, Qt.EditRole)
 
-    # --- buttons (row 1: row/column edits + analysis) ------------------
+    # --- buttons -------------------------------------------------------
+    # The Plot button is the primary action — make it impossible to miss.
+    # Row / column edit actions (Insert / Append / Delete row, Add /
+    # Remove column) are reachable via right-click context menus on the
+    # cells (rows) and column headers (columns); they are not surfaced as
+    # bottom buttons any more, since the right-click menu is always one
+    # click away.
     actions = QHBoxLayout()
-    insert_btn = QPushButton("Insert row above")
-    insert_btn.setToolTip("Insert a blank row above the first selected data row.")
-    append_btn = QPushButton("Append row")
-    append_btn.setToolTip("Append a blank row at the end of every column.")
-    delete_btn = QPushButton("Delete rows")
-    delete_btn.setToolTip("Delete every data row that has a selected cell.")
-    add_col_btn = QPushButton("Add column…")
-    add_col_btn.setToolTip(
-        "Add a user column. Optionally provide an F(x)= expression that "
-        "references existing columns by their letter (A, B, C, …).",
+    plot_btn = QPushButton("📊 Plot…")
+    plot_btn.setStyleSheet(
+        "background-color: #cfe6ff; padding: 6px 22px; font-weight: 700; "
+        "font-size: 13px;"
     )
-    rm_col_btn = QPushButton("Remove column")
-    rm_col_btn.setToolTip("Remove the selected user column.")
+    plot_btn.setToolTip(
+        "Open the plot picker — pick an X axis and tick every Y column "
+        "you want. All ticked Ys are overlaid on one graph. Toggle "
+        "'Use X<sub>k</sub> / Y<sub>k</sub> tags' to plot multiple X/Y "
+        "pairs (X1/Y1, X2/Y2, …).",
+    )
     recalc_btn = QPushButton("Recalc F(x)")
     recalc_btn.setToolTip(
         "Re-evaluate the F(x)= formula of the selected columns against the "
@@ -8951,11 +8983,8 @@ def _open_data_table_dialog(app) -> None:
         "PCHIP, Akima or quadratic interpolation. Generates two new "
         "columns: the new X grid and the interpolated Y.",
     )
-    actions.addWidget(insert_btn)
-    actions.addWidget(append_btn)
-    actions.addWidget(delete_btn)
-    actions.addWidget(add_col_btn)
-    actions.addWidget(rm_col_btn)
+    actions.addWidget(plot_btn)
+    actions.addSpacing(12)
     actions.addWidget(recalc_btn)
     actions.addWidget(calc_btn)
     actions.addWidget(smooth_btn)
@@ -8963,18 +8992,8 @@ def _open_data_table_dialog(app) -> None:
     actions.addStretch()
     root.addLayout(actions)
 
-    # --- buttons (row 2: plot + decouple + save) ----------------------
+    # --- buttons (row 2: book-level actions + close) ------------------
     actions2 = QHBoxLayout()
-    plot_btn = QPushButton("Plot…")
-    plot_btn.setStyleSheet(
-        "background-color: #d8ecff; padding: 4px 14px; font-weight: 600;"
-    )
-    plot_btn.setToolTip(
-        "Open the plot picker — tick the columns you want, pick a role "
-        "(X1 / Y1 / X2 / Y2 / …) for each, and plot them in one window. "
-        "Multi-Y on one X, multiple Y/X pairs, or a mix — all without "
-        "Ctrl+click selection.",
-    )
     decouple_btn = QPushButton("Decouple from TDMS")
     decouple_btn.setToolTip(
         "Cut every channel-backed column free from the source TDMS so "
@@ -8988,7 +9007,6 @@ def _open_data_table_dialog(app) -> None:
         "column lands as the 'Time' channel and every other column as a "
         "channel under the chosen group.",
     )
-    actions2.addWidget(plot_btn)
     actions2.addStretch()
     actions2.addWidget(decouple_btn)
     actions2.addWidget(save_tdms_btn)
@@ -8996,11 +9014,6 @@ def _open_data_table_dialog(app) -> None:
     actions2.addWidget(close_btn)
     root.addLayout(actions2)
 
-    insert_btn.clicked.connect(_on_insert_row)
-    append_btn.clicked.connect(_on_append_row)
-    delete_btn.clicked.connect(_on_delete_rows)
-    add_col_btn.clicked.connect(_prompt_add_column)
-    rm_col_btn.clicked.connect(_on_remove_column)
     recalc_btn.clicked.connect(_on_recalc_column)
     calc_btn.clicked.connect(lambda: _open_calculus_dialog(dialog, state["model"]))
     smooth_btn.clicked.connect(lambda: _open_smooth_dialog(dialog, state["model"]))
@@ -9039,19 +9052,28 @@ def _open_data_table_dialog(app) -> None:
         title = f"Plot ({kind_label}) — {book_name}"
         _open_book_plot_window(app, title=title, plot_specs=specs, draw_mode=draw_mode)
 
-    def _show_book_context_menu(global_pos, *, header_pos=None) -> None:
+    def _show_header_context_menu(global_pos, *, header_pos=None) -> None:
+        """Right-click on a column header — column-scoped actions
+        (Set as X/Y, Plot, Add column, Remove column).
+        """
         m = state["model"]
         if m is None:
             return
         cols = _selected_columns()
-        # If the menu was raised on the header, fall back to the header's
-        # logical column when nothing is selected.
+        # If nothing is selected, fall back to the column under the click.
         if not cols and header_pos is not None:
             section = table.horizontalHeader().logicalIndexAt(header_pos)
             if section >= 0:
                 cols = [section]
         if not cols:
+            # Empty area — still allow Add column.
+            menu = QMenu(table)
+            add_act = menu.addAction("Add column…")
+            chosen = menu.exec_(global_pos)
+            if chosen is add_act:
+                _prompt_add_column()
             return
+
         menu = QMenu(table)
         sel_label = (
             f"Selected column: {m.headerData(cols[0], Qt.Horizontal)}"
@@ -9062,8 +9084,12 @@ def _open_data_table_dialog(app) -> None:
         title_act.setEnabled(False)
         menu.addSeparator()
 
-        # Highest existing X/Y index in the whole book — the "next" pair we
-        # offer is one above that so the user can keep building pairs.
+        # Plot the picker is the recommended path; expose it at the top.
+        plot_picker = menu.addAction("📊 Plot…  (multi-column picker)")
+        menu.addSeparator()
+
+        # Highest existing X/Y index — offer one above so the user can
+        # keep building pairs.
         max_x_idx = max(
             (_plot_role_index(c.plot_role)
              for c in m.columns
@@ -9094,12 +9120,28 @@ def _open_data_table_dialog(app) -> None:
 
         clear_xy = menu.addAction("Clear X/Y")
         menu.addSeparator()
-        plot_menu = menu.addMenu("Plot")
-        plot_line = plot_menu.addAction("Line")
-        plot_scatter = plot_menu.addAction("Scatter")
-        plot_both = plot_menu.addAction("Line + Scatter")
+        plot_submenu = menu.addMenu("Quick plot selection")
+        plot_line = plot_submenu.addAction("Line")
+        plot_scatter = plot_submenu.addAction("Scatter")
+        plot_both = plot_submenu.addAction("Line + Scatter")
+        menu.addSeparator()
+        # Column-edit operations live on the header right-click.
+        add_col_act = menu.addAction("Add column…")
+        rm_col_act = menu.addAction("Remove column")
+        # Disable Remove for channel-backed columns (Time, TDMS channels).
+        all_user = all(
+            (c is not None and not c.is_channel)
+            for c in (m.column_at(i) for i in cols)
+        )
+        rm_col_act.setEnabled(all_user)
+        if not all_user:
+            rm_col_act.setText("Remove column  (only user columns)")
+
         chosen = menu.exec_(global_pos)
         if chosen is None:
+            return
+        if chosen is plot_picker:
+            _open_plot_picker_dialog(app, dialog, m)
             return
         for act, role_str in set_x_actions:
             if chosen is act:
@@ -9132,12 +9174,54 @@ def _open_data_table_dialog(app) -> None:
             _do_plot("scatter", cols)
         elif chosen is plot_both:
             _do_plot("both", cols)
+        elif chosen is add_col_act:
+            _prompt_add_column()
+        elif chosen is rm_col_act:
+            _on_remove_column()
+
+    def _show_body_context_menu(global_pos) -> None:
+        """Right-click in the table body — row-scoped actions plus the
+        column ops (forwarded to the header menu when several columns are
+        selected). Row operations operate on the rows touched by the
+        current selection."""
+        m = state["model"]
+        if m is None:
+            return
+        menu = QMenu(table)
+        plot_picker = menu.addAction("📊 Plot…  (multi-column picker)")
+        menu.addSeparator()
+        insert_act = menu.addAction("Insert row above")
+        append_act = menu.addAction("Append row")
+        delete_act = menu.addAction("Delete rows")
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy")
+        copy_act.setShortcut(QKeySequence.Copy)
+        paste_act = menu.addAction("Paste")
+        paste_act.setShortcut(QKeySequence.Paste)
+        # Greying out delete when no data row is selected.
+        delete_act.setEnabled(bool(_selected_data_rows()))
+
+        chosen = menu.exec_(global_pos)
+        if chosen is None:
+            return
+        if chosen is plot_picker:
+            _open_plot_picker_dialog(app, dialog, m)
+        elif chosen is insert_act:
+            _on_insert_row()
+        elif chosen is append_act:
+            _on_append_row()
+        elif chosen is delete_act:
+            _on_delete_rows()
+        elif chosen is copy_act:
+            _on_copy()
+        elif chosen is paste_act:
+            _on_paste()
 
     table.customContextMenuRequested.connect(
-        lambda pos: _show_book_context_menu(table.viewport().mapToGlobal(pos))
+        lambda pos: _show_body_context_menu(table.viewport().mapToGlobal(pos))
     )
     table.horizontalHeader().customContextMenuRequested.connect(
-        lambda pos: _show_book_context_menu(
+        lambda pos: _show_header_context_menu(
             table.horizontalHeader().mapToGlobal(pos), header_pos=pos,
         )
     )
@@ -9146,25 +9230,28 @@ def _open_data_table_dialog(app) -> None:
     QShortcut(QKeySequence.Paste, table, activated=_on_paste)
 
     hint = QLabel(
-        "Use the <b>Active book</b> combo to switch between every TDMS file "
-        "you've loaded. Each column is named A, B, C, … like in OriginLab; "
-        "the F(x)= row above the data accepts expressions referencing other "
-        "columns by their letter (<code>A+B</code>, <code>sqrt(B**2+C**2)</code>, "
-        "<code>diff(A)</code>; <code>^</code> means power). "
-        "<b>The easiest way to plot multiple columns is the </b>"
-        "<b>'Plot…' button</b> — tick the columns, pick X<sub>k</sub> / "
-        "Y<sub>k</sub> roles per column, and every selected Y goes into a "
-        "single graph. (You can also Ctrl+click column headers and use "
-        "the right-click menu — same result.) "
-        "Plot windows are independent: zoom / autoscale / log-axis / "
-        "crosshair / Graph settings / export buttons (mouse wheel zooms, "
-        "right-drag pans). <b>Decouple from TDMS</b> cuts every channel "
-        "free from the source recording (edits stop mutating the loaded "
-        "file's cache); <b>Save as TDMS…</b> writes the whole book to a "
-        "fresh TDMS file. Ctrl+C / Ctrl+V copy and paste tab-separated "
-        "values. <b>Calculus…</b> integrates / differentiates, "
-        "<b>Smooth…</b> applies Savitzky-Golay / moving-average / median "
-        "/ Gaussian filters, <b>Interpolate…</b> resamples onto a new grid."
+        "<b>To plot</b>: click <b>📊 Plot…</b> — pick an X axis from the "
+        "combo and tick every Y column you want. All ticked Ys are "
+        "overlaid on one graph (multi-Y on a single X). For multiple X/Y "
+        "pairs (X1/Y1, X2/Y2, …) tag the columns first via <b>right-click "
+        "→ Set as X<sub>k</sub> / Y<sub>k</sub></b>, then tick "
+        "<i>'Use X<sub>k</sub>/Y<sub>k</sub> tags'</i> in the Plot dialog."
+        "<br><br>"
+        "<b>Right-click a column header</b> for column actions: Set X/Y, "
+        "Plot, Quick plot, Add column…, Remove column. "
+        "<b>Right-click a data row</b> for row actions: Insert row above, "
+        "Append row, Delete rows, Copy, Paste. "
+        "Each column is named A, B, C, …; the F(x)= row above the data "
+        "accepts expressions referencing other columns by their letter "
+        "(<code>A+B</code>, <code>sqrt(B**2+C**2)</code>, "
+        "<code>diff(A)</code>; <code>^</code> means power)."
+        "<br><br>"
+        "<b>Decouple from TDMS</b> cuts every channel free from the source "
+        "recording (edits stop mutating the loaded file's cache); "
+        "<b>Save as TDMS…</b> writes the whole book to a fresh TDMS file. "
+        "<b>Calculus…</b> integrates / differentiates, <b>Smooth…</b> "
+        "applies Savitzky-Golay / moving-average / median / Gaussian "
+        "filters, <b>Interpolate…</b> resamples onto a new grid."
     )
     hint.setStyleSheet("color: #555; font-size: 11px;")
     hint.setTextFormat(Qt.RichText)
