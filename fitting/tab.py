@@ -984,6 +984,10 @@ def _connect_data_fitting_actions(app):
         app.data_fit_cap_q_compute_btn.clicked.connect(lambda: _on_capacity_compute_clicked(app))
     if getattr(app, "data_fit_cap_save_source_btn", None) is not None:
         app.data_fit_cap_save_source_btn.clicked.connect(lambda: _on_capacitor_save_to_source(app))
+    if getattr(app, "data_fit_cap_save_source_tdms_btn", None) is not None:
+        app.data_fit_cap_save_source_tdms_btn.clicked.connect(
+            lambda: _on_capacitor_save_source_as_tdms(app)
+        )
     if getattr(app, "data_fit_cap_save_capacity_btn", None) is not None:
         app.data_fit_cap_save_capacity_btn.clicked.connect(lambda: _on_capacitor_save_capacity(app))
 
@@ -1487,6 +1491,18 @@ def _build_capacitor_testing_tab(app, layout) -> None:
     )
     app.data_fit_cap_save_source_btn.setEnabled(False)
     cap_save_layout.addWidget(app.data_fit_cap_save_source_btn, 0, 0, 1, 2)
+    app.data_fit_cap_save_source_tdms_btn = QPushButton(
+        "Save Power && Integrated Power as TDMS…"
+    )
+    app.data_fit_cap_save_source_tdms_btn.setToolTip(
+        "Open a Save-As dialog and write the source channels plus Power\n"
+        "and Integrated Power into a new TDMS file. The source file is\n"
+        "left untouched (useful for converting an ASCII recording to\n"
+        "TDMS while keeping the original). Defaults to\n"
+        "<source_basename>_with_computed.tdms in the source folder."
+    )
+    app.data_fit_cap_save_source_tdms_btn.setEnabled(False)
+    cap_save_layout.addWidget(app.data_fit_cap_save_source_tdms_btn, 1, 0, 1, 2)
     app.data_fit_cap_save_capacity_btn = QPushButton(
         f'Save "{CAPACITY_DATASET_NAME}" as TDMS…'
     )
@@ -1496,17 +1512,18 @@ def _build_capacitor_testing_tab(app, layout) -> None:
         "suffix; the user can override the location and name."
     )
     app.data_fit_cap_save_capacity_btn.setEnabled(False)
-    cap_save_layout.addWidget(app.data_fit_cap_save_capacity_btn, 1, 0, 1, 2)
+    cap_save_layout.addWidget(app.data_fit_cap_save_capacity_btn, 2, 0, 1, 2)
     app.data_fit_cap_save_status = QLabel("")
     app.data_fit_cap_save_status.setStyleSheet("color: gray;")
     app.data_fit_cap_save_status.setWordWrap(True)
-    cap_save_layout.addWidget(app.data_fit_cap_save_status, 2, 0, 1, 2)
+    cap_save_layout.addWidget(app.data_fit_cap_save_status, 3, 0, 1, 2)
     layout.addWidget(cap_save_group)
 
 
 def _refresh_capacitor_save_enabled(app) -> None:
     controller = getattr(app, "data_fit_controller", None)
     src_btn = getattr(app, "data_fit_cap_save_source_btn", None)
+    src_tdms_btn = getattr(app, "data_fit_cap_save_source_tdms_btn", None)
     cap_btn = getattr(app, "data_fit_cap_save_capacity_btn", None)
     if controller is None:
         return
@@ -1516,8 +1533,14 @@ def _refresh_capacitor_save_enabled(app) -> None:
     src_path = controller.tdms_path or ""
     ext = os.path.splitext(src_path)[1].lower()
     src_is_supported = ext == ".tdms" or ext in _ASCII_RECORDING_EXTS
+    has_computed = has_power or has_energy
     if src_btn is not None:
-        src_btn.setEnabled(src_is_supported and (has_power or has_energy))
+        src_btn.setEnabled(src_is_supported and has_computed)
+    if src_tdms_btn is not None:
+        # The Save-As-TDMS path doesn't need the source itself to be a
+        # supported recording — it only needs the in-memory data and at
+        # least one computed channel.
+        src_tdms_btn.setEnabled(has_computed)
     if cap_btn is not None:
         cap_btn.setEnabled(has_capacity)
 
@@ -1529,6 +1552,89 @@ def _suggested_capacity_save_path(controller) -> str:
         src_base = os.path.splitext(os.path.basename(src))[0]
         return os.path.join(src_dir, f"{src_base}_CapacityvsVoltage.tdms")
     return "CapacityvsVoltage.tdms"
+
+
+def _suggested_source_with_computed_path(controller) -> str:
+    src = getattr(controller, "tdms_path", "") or ""
+    if src:
+        src_dir = os.path.dirname(src)
+        src_base = os.path.splitext(os.path.basename(src))[0]
+        return os.path.join(src_dir, f"{src_base}_with_computed.tdms")
+    return "with_computed.tdms"
+
+
+def _on_capacitor_save_source_as_tdms(app) -> None:
+    """Open a Save-As dialog and write the source channels plus Power /
+    Integrated Power into a new TDMS file. The source file is left untouched.
+    """
+    status = getattr(app, "data_fit_cap_save_status", None)
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    power = controller.channel_cache.get(CAPACITOR_POWER_CHANNEL_NAME)
+    energy = controller.channel_cache.get(CAPACITOR_ENERGY_CHANNEL_NAME)
+    if power is None and energy is None:
+        if status is not None:
+            status.setText("Nothing to save — compute Power or Integrated Power first.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    suggested = _suggested_source_with_computed_path(controller)
+    out_path, _ = QFileDialog.getSaveFileName(
+        app,
+        "Save source + computed channels as TDMS",
+        suggested,
+        "TDMS Files (*.tdms);;All Files (*)",
+    )
+    if not out_path:
+        return
+    if not out_path.lower().endswith(".tdms"):
+        out_path = out_path + ".tdms"
+    try:
+        objects: list = [RootObject(), GroupObject("RawData")]
+        time_arr = controller.time_array
+        if time_arr is not None:
+            objects.append(
+                ChannelObject("RawData", "Time", np.asarray(time_arr, dtype=float))
+            )
+        # Original channels in their loaded order, skipping any prior
+        # Power / Integrated Power so re-saving stays idempotent.
+        skip_names = {CAPACITOR_POWER_CHANNEL_NAME, CAPACITOR_ENERGY_CHANNEL_NAME}
+        for name in controller.channel_names:
+            if name in skip_names:
+                continue
+            arr = controller.channel_cache.get(name)
+            if arr is not None:
+                objects.append(
+                    ChannelObject("RawData", name, np.asarray(arr, dtype=float))
+                )
+        objects.append(GroupObject("Computed"))
+        added: list[str] = []
+        if power is not None:
+            objects.append(
+                ChannelObject(
+                    "Computed", CAPACITOR_POWER_CHANNEL_NAME, np.asarray(power, dtype=float)
+                )
+            )
+            added.append(CAPACITOR_POWER_CHANNEL_NAME)
+        if energy is not None:
+            objects.append(
+                ChannelObject(
+                    "Computed", CAPACITOR_ENERGY_CHANNEL_NAME, np.asarray(energy, dtype=float)
+                )
+            )
+            added.append(CAPACITOR_ENERGY_CHANNEL_NAME)
+        with TdmsWriter(out_path) as w:
+            w.write_segment(objects)
+    except Exception as exc:
+        if status is not None:
+            status.setText(f"Save failed: {exc}")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    if status is not None:
+        status.setText(
+            f'Saved source + {", ".join(added)} to "{os.path.basename(out_path)}".'
+        )
+        status.setStyleSheet("color: #2a7a2a;")
 
 
 def _on_capacitor_save_to_source(app) -> None:
