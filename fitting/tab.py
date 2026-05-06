@@ -626,6 +626,12 @@ class DataFittingController:
         # name ("__time__" for the time column). Values: "X", "Y", or absent.
         # User-column roles live alongside their entry in ``book_user_columns``.
         self.column_roles: dict[str, str] = {}
+        # Set to True by the data book "Decouple from TDMS" action — once
+        # set, ``_build_data_book_columns`` stops re-binding the Time and
+        # channel arrays from this controller and reads everything from
+        # ``book_user_columns`` instead. The recording's ``channel_cache``
+        # is left untouched so the rest of the fitting tab keeps working.
+        self.book_decoupled: bool = False
 
     # --- data source -----------------------------------------------------
     def load_recording(self, path: str) -> tuple[bool, str]:
@@ -6671,6 +6677,39 @@ class _DataBookModel(QAbstractTableModel):
             return False
         return self._apply_formula(col)
 
+    def decouple_from_source(self) -> bool:
+        """Detach every channel-backed column from the controller's cache.
+
+        After this returns ``True``, every column in the book is an
+        independent user column: edits no longer mutate
+        ``controller.channel_cache`` / ``controller.time_array``, and the
+        next ``_build_data_book_columns`` call will not try to re-bind the
+        old ``source_key`` because the book persists everything as user
+        columns. The data values themselves are preserved (each column
+        keeps its own copy of the array).
+        """
+        try:
+            for col in self._columns:
+                if col.is_channel:
+                    col.data = np.asarray(col.data, dtype=float).copy()
+                    col.is_time = False
+                    col.source_key = None
+            self._persist_user_columns()
+            # Tell the controller to stop re-injecting Time / channel-backed
+            # columns when the dialog rebuilds the model.
+            controller = getattr(self._app, "data_fit_controller", None)
+            if controller is not None:
+                controller.book_decoupled = True
+            # The headers no longer need the channel-vs-user distinction.
+            self.headerDataChanged.emit(
+                Qt.Horizontal, 0,
+                max(0, self.columnCount() - 1),
+            )
+            return True
+        except Exception:
+            traceback.print_exc()
+            return False
+
     def set_column_role(self, col_idx: int, role: str) -> bool:
         """Tag a column as ``X``/``Xk`` / ``Y``/``Yk``, or unset (``""``).
 
@@ -7298,6 +7337,236 @@ def _column_pick_options(model) -> list[tuple[str, int]]:
         role = f" [{c.plot_role}]" if c.plot_role else ""
         out.append((f"{c.letter} — {c.name}{role}", i))
     return out
+
+
+def _open_plot_picker_dialog(app, parent, model) -> None:
+    """Explicit multi-column plot picker.
+
+    A row per column with a checkbox and a role dropdown so the user can
+    plot several Y curves at once (against one or several X columns) with
+    no Ctrl-click selection juggling. The dialog also writes the chosen
+    roles back onto the columns when "Update tags" is checked, so the
+    next plot can re-use them.
+    """
+    from PyQt5.QtWidgets import (
+        QButtonGroup,
+        QCheckBox,
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QMessageBox,
+        QRadioButton,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    if model is None or model.columnCount() == 0:
+        QMessageBox.information(parent, "Plot", "No columns available.")
+        return
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Plot from data book")
+    dlg.setModal(True)
+    dlg.resize(560, 480)
+    root = QVBoxLayout(dlg)
+
+    info = QLabel(
+        "Tick the columns you want on the plot and pick a role for each. "
+        "Several Y columns are overlaid on the same graph; Y<sub>k</sub> "
+        "uses X<sub>k</sub> as its X axis (Y2 → X2, Y1 → X1, …). Untagged "
+        "Y columns fall back to X1 or to the row index when no X is "
+        "available."
+    )
+    info.setWordWrap(True)
+    info.setTextFormat(Qt.RichText)
+    info.setStyleSheet("color: #444;")
+    root.addWidget(info)
+
+    role_options = ["—", "X1", "Y1", "X2", "Y2", "X3", "Y3", "X4", "Y4",
+                    "X5", "Y5", "X6", "Y6"]
+
+    table = QTableWidget(model.columnCount(), 4, dlg)
+    table.setHorizontalHeaderLabels(["Plot?", "Letter", "Long name", "Role"])
+    table.verticalHeader().setVisible(False)
+    table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+    table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+    table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+    table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+    table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+    check_widgets: list[QCheckBox] = []
+    role_widgets: list[QComboBox] = []
+
+    for i, c in enumerate(model.columns):
+        # Column 0: checkbox in a centered widget.
+        cb_widget = QWidget()
+        cb_layout = QHBoxLayout(cb_widget)
+        cb_layout.setContentsMargins(8, 0, 0, 0)
+        cb = QCheckBox()
+        cb_layout.addWidget(cb)
+        cb_layout.addStretch()
+        # Pre-check rows that already have a Y role (the user is most
+        # likely going to plot existing Ys).
+        if (c.plot_role or "").upper().startswith("Y"):
+            cb.setChecked(True)
+        check_widgets.append(cb)
+        table.setCellWidget(i, 0, cb_widget)
+
+        letter_item = QTableWidgetItem(c.letter)
+        letter_item.setTextAlignment(Qt.AlignCenter)
+        table.setItem(i, 1, letter_item)
+        table.setItem(i, 2, QTableWidgetItem(c.name))
+
+        role_cb = QComboBox()
+        role_cb.addItems(role_options)
+        cur_role = (c.plot_role or "").upper()
+        if cur_role in role_options:
+            role_cb.setCurrentText(cur_role)
+        # If a Y is checked but has no role, default it to Y1 so single-X /
+        # multi-Y plotting "just works" out of the box.
+        if cb.isChecked() and role_cb.currentText() == "—":
+            role_cb.setCurrentText("Y1")
+        role_widgets.append(role_cb)
+        table.setCellWidget(i, 3, role_cb)
+
+    root.addWidget(table, stretch=1)
+
+    # Quick-action helper buttons (select all, clear).
+    helpers = QHBoxLayout()
+    sel_all = QPushButton("Select all")
+    sel_none = QPushButton("Clear selection")
+    auto_xy = QPushButton("Auto-fill X1/Y1…")
+    auto_xy.setToolTip(
+        "Tag the first checked row as X1 and every other checked row as "
+        "Y1 — the simplest single-X / multi-Y setup.",
+    )
+    helpers.addWidget(sel_all)
+    helpers.addWidget(sel_none)
+    helpers.addWidget(auto_xy)
+    helpers.addStretch()
+    root.addLayout(helpers)
+
+    def _select_all() -> None:
+        for cb in check_widgets:
+            cb.setChecked(True)
+        # Promote any unset row to Y1.
+        for r in role_widgets:
+            if r.currentText() == "—":
+                r.setCurrentText("Y1")
+
+    def _clear_all() -> None:
+        for cb in check_widgets:
+            cb.setChecked(False)
+
+    def _auto_xy() -> None:
+        first_x = None
+        for i, cb in enumerate(check_widgets):
+            if cb.isChecked():
+                if first_x is None:
+                    role_widgets[i].setCurrentText("X1")
+                    first_x = i
+                else:
+                    role_widgets[i].setCurrentText("Y1")
+
+    sel_all.clicked.connect(_select_all)
+    sel_none.clicked.connect(_clear_all)
+    auto_xy.clicked.connect(_auto_xy)
+
+    # Draw mode + persist toggle.
+    mode_box = QHBoxLayout()
+    mode_box.addWidget(QLabel("Draw:"))
+    mode_grp = QButtonGroup(dlg)
+    rb_line = QRadioButton("Line")
+    rb_scatter = QRadioButton("Scatter")
+    rb_both = QRadioButton("Line + Scatter")
+    rb_line.setChecked(True)
+    for rb in (rb_line, rb_scatter, rb_both):
+        mode_grp.addButton(rb)
+        mode_box.addWidget(rb)
+    mode_box.addStretch()
+    persist_cb = QCheckBox("Update column tags in the book")
+    persist_cb.setToolTip(
+        "When checked, the role dropdowns above replace the existing "
+        "X<sub>k</sub> / Y<sub>k</sub> tags on the columns so future "
+        "plots inherit them.",
+    )
+    persist_cb.setChecked(False)
+    mode_box.addWidget(persist_cb)
+    root.addLayout(mode_box)
+
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    btns.button(QDialogButtonBox.Ok).setText("Plot")
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+    root.addWidget(btns)
+
+    if dlg.exec_() != QDialog.Accepted:
+        return
+
+    # Collect picks: list of (column_index, override_role).
+    picks: list[tuple[int, str]] = []
+    for i, cb in enumerate(check_widgets):
+        if not cb.isChecked():
+            continue
+        role = role_widgets[i].currentText()
+        if role == "—":
+            role = ""
+        picks.append((i, role))
+
+    if not picks:
+        QMessageBox.information(parent, "Plot",
+                                "Tick at least one column to plot.")
+        return
+
+    # Optionally persist the new roles on the columns first; this also
+    # makes ``_build_plot_specs_from_selection`` see the correct tags
+    # because it reads ``column.plot_role``.
+    selected_idx = [i for i, _ in picks]
+    if persist_cb.isChecked():
+        for i, role in picks:
+            model.set_column_role(i, role)
+        specs, err = _build_plot_specs_from_selection(model, selected_idx)
+    else:
+        # Temporary override: stash the old roles, set the picked roles,
+        # build specs, restore. Avoids touching persisted state.
+        saved = [(i, model.column_at(i).plot_role) for i in selected_idx]
+        try:
+            for i, role in picks:
+                model.column_at(i).plot_role = (
+                    _normalize_plot_role(role) or ""
+                )
+            specs, err = _build_plot_specs_from_selection(model, selected_idx)
+        finally:
+            for i, old_role in saved:
+                model.column_at(i).plot_role = old_role or ""
+
+    if err:
+        QMessageBox.information(parent, "Plot", err)
+        return
+
+    if rb_scatter.isChecked():
+        draw_mode = "scatter"
+    elif rb_both.isChecked():
+        draw_mode = "both"
+    else:
+        draw_mode = "line"
+
+    ctrl = getattr(app, "data_fit_controller", None)
+    book_name = (
+        os.path.basename(ctrl.tdms_path)
+        if ctrl is not None and ctrl.tdms_path
+        else "(book)"
+    )
+    kind_label = {"line": "line", "scatter": "scatter",
+                  "both": "line + scatter"}[draw_mode]
+    title = f"Plot ({kind_label}) — {book_name}"
+    _open_book_plot_window(app, title=title, plot_specs=specs,
+                           draw_mode=draw_mode)
 
 
 def _open_calculus_dialog(parent, model) -> None:
@@ -8008,20 +8277,171 @@ def _open_interpolate_dialog(parent, model) -> None:
         )
 
 
+def _decouple_book_from_tdms(app, parent, model) -> None:
+    """Convert every channel-backed column into an independent user column.
+
+    After decoupling, edits in the data book no longer mutate
+    ``controller.channel_cache`` / ``controller.time_array``: every column
+    holds its own copy of the data. This is useful when the user wants to
+    massage / interpolate / smooth / save the book without touching the
+    loaded recording.
+    """
+    from PyQt5.QtWidgets import QMessageBox
+
+    if model is None or model.columnCount() == 0:
+        QMessageBox.information(parent, "Decouple",
+                                "There are no columns to decouple.")
+        return
+
+    n_channel = sum(1 for c in model.columns if c.is_channel)
+    if n_channel == 0:
+        QMessageBox.information(
+            parent, "Decouple",
+            "Every column in this book is already a user column — nothing "
+            "to decouple.",
+        )
+        return
+
+    ans = QMessageBox.question(
+        parent, "Decouple from TDMS",
+        f"Detach {n_channel} channel-backed column(s) from the source "
+        "TDMS?\n\nFuture edits in this book will no longer touch the "
+        "loaded recording's channel cache. The data on disk is not "
+        "modified. This action cannot be undone in-session.",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No,
+    )
+    if ans != QMessageBox.Yes:
+        return
+
+    if not model.decouple_from_source():
+        QMessageBox.warning(parent, "Decouple",
+                            "Decoupling failed — see console for details.")
+        return
+
+    QMessageBox.information(
+        parent, "Decouple",
+        f"Detached {n_channel} column(s). Every column in the book is "
+        "now an independent user column.",
+    )
+
+
+def _save_book_as_tdms(app, parent, model) -> None:
+    """Write every column in the active book into a fresh TDMS file."""
+    from PyQt5.QtWidgets import (
+        QFileDialog,
+        QInputDialog,
+        QMessageBox,
+    )
+
+    if model is None or model.columnCount() == 0:
+        QMessageBox.information(parent, "Save as TDMS",
+                                "There are no columns to save.")
+        return
+
+    # Suggest a filename next to the source TDMS, if any.
+    ctrl = getattr(app, "data_fit_controller", None)
+    src = getattr(ctrl, "tdms_path", "") if ctrl is not None else ""
+    if src:
+        suggested = os.path.join(
+            os.path.dirname(src),
+            os.path.splitext(os.path.basename(src))[0] + "_book.tdms",
+        )
+    else:
+        suggested = "data_book.tdms"
+
+    path, _ = QFileDialog.getSaveFileName(
+        parent, "Save data book as TDMS", suggested,
+        "TDMS file (*.tdms)",
+    )
+    if not path:
+        return
+
+    group_name, ok = QInputDialog.getText(
+        parent, "TDMS group name",
+        "Group name for the channels:", text="RawData",
+    )
+    if not ok:
+        return
+    group_name = (group_name or "").strip() or "RawData"
+
+    try:
+        objects: list = [GroupObject(group_name)]
+        # Pad shorter columns with NaNs so every channel has the same length;
+        # interpolated columns from the Interpolate dialog can be longer than
+        # the source recording, and most TDMS readers expect channels in a
+        # group to share a length.
+        max_n = max((len(c.data) for c in model.columns), default=0)
+        seen_names: set = set()
+        for c in model.columns:
+            arr = np.asarray(c.data, dtype=float)
+            if arr.size < max_n:
+                arr = np.concatenate(
+                    [arr, np.full(max_n - arr.size, np.nan)]
+                )
+            # Time-backed columns always land on the canonical "Time"
+            # channel; everything else uses the user-set Long Name and
+            # falls back to the letter on collision.
+            if c.is_time:
+                channel_name = "Time"
+            else:
+                channel_name = (c.name or c.letter).strip() or c.letter
+            if channel_name in seen_names:
+                channel_name = f"{c.letter}_{channel_name}"
+            seen_names.add(channel_name)
+            # Preserve the role tag and formula as properties so a
+            # re-loaded book keeps its X<sub>k</sub> / Y<sub>k</sub>
+            # mapping and computed-column expression.
+            props: dict = {}
+            if c.plot_role:
+                props["plot_role"] = str(c.plot_role)
+            if c.formula:
+                props["formula"] = str(c.formula)
+            objects.append(
+                ChannelObject(group_name, channel_name, arr,
+                              properties=props)
+            )
+
+        with TdmsWriter(path) as writer:
+            writer.write_segment(objects)
+
+    except Exception as exc:
+        traceback.print_exc()
+        QMessageBox.critical(
+            parent, "Save as TDMS",
+            f"Could not write the TDMS file:\n{exc}",
+        )
+        return
+
+    QMessageBox.information(
+        parent, "Save as TDMS",
+        f"Wrote {model.columnCount()} channel(s) to:\n{path}",
+    )
+
+
 def _build_data_book_columns(app) -> list:
     """Snapshot the controller's channels (+ persisted user cols) into columns.
 
     Channel arrays are referenced live (no copy) so cell edits mutate the
-    controller's cache directly. User columns come from ``app.data_fit_book_user_columns``.
+    controller's cache directly. User columns come from
+    ``controller.book_user_columns``. Once the user has clicked "Decouple
+    from TDMS" (``controller.book_decoupled = True``), the channel-backed
+    sources are skipped and every column comes from the persisted user-
+    column snapshot, which carries copies of the data.
     """
     controller = getattr(app, "data_fit_controller", None)
     columns: list = []
+    decoupled = bool(getattr(controller, "book_decoupled", False))
     roles_map: dict = (
         getattr(controller, "column_roles", None) or {}
         if controller is not None
         else {}
     )
-    if controller is not None and controller.time_array is not None:
+    if (
+        not decoupled
+        and controller is not None
+        and controller.time_array is not None
+    ):
         columns.append(_DataBookColumn(
             letter=_data_book_column_letter(len(columns)),
             name="Time",
@@ -8029,7 +8449,7 @@ def _build_data_book_columns(app) -> list:
             is_time=True,
             plot_role=str(roles_map.get("__time__", "")),
         ))
-    if controller is not None:
+    if not decoupled and controller is not None:
         for name in controller.channel_names:
             arr = controller.channel_cache.get(name)
             if arr is None:
@@ -8493,7 +8913,7 @@ def _open_data_table_dialog(app) -> None:
                 if target.isValid():
                     m.setData(target, cell, Qt.EditRole)
 
-    # --- buttons -------------------------------------------------------
+    # --- buttons (row 1: row/column edits + analysis) ------------------
     actions = QHBoxLayout()
     insert_btn = QPushButton("Insert row above")
     insert_btn.setToolTip("Insert a blank row above the first selected data row.")
@@ -8541,9 +8961,40 @@ def _open_data_table_dialog(app) -> None:
     actions.addWidget(smooth_btn)
     actions.addWidget(interp_btn)
     actions.addStretch()
-    close_btn = QPushButton("Close")
-    actions.addWidget(close_btn)
     root.addLayout(actions)
+
+    # --- buttons (row 2: plot + decouple + save) ----------------------
+    actions2 = QHBoxLayout()
+    plot_btn = QPushButton("Plot…")
+    plot_btn.setStyleSheet(
+        "background-color: #d8ecff; padding: 4px 14px; font-weight: 600;"
+    )
+    plot_btn.setToolTip(
+        "Open the plot picker — tick the columns you want, pick a role "
+        "(X1 / Y1 / X2 / Y2 / …) for each, and plot them in one window. "
+        "Multi-Y on one X, multiple Y/X pairs, or a mix — all without "
+        "Ctrl+click selection.",
+    )
+    decouple_btn = QPushButton("Decouple from TDMS")
+    decouple_btn.setToolTip(
+        "Cut every channel-backed column free from the source TDMS so "
+        "edits in this book no longer mutate the loaded recording. The "
+        "data is preserved as user columns; the original file on disk "
+        "is untouched.",
+    )
+    save_tdms_btn = QPushButton("Save as TDMS…")
+    save_tdms_btn.setToolTip(
+        "Write every column in this book into a new TDMS file. The Time "
+        "column lands as the 'Time' channel and every other column as a "
+        "channel under the chosen group.",
+    )
+    actions2.addWidget(plot_btn)
+    actions2.addStretch()
+    actions2.addWidget(decouple_btn)
+    actions2.addWidget(save_tdms_btn)
+    close_btn = QPushButton("Close")
+    actions2.addWidget(close_btn)
+    root.addLayout(actions2)
 
     insert_btn.clicked.connect(_on_insert_row)
     append_btn.clicked.connect(_on_append_row)
@@ -8554,6 +9005,15 @@ def _open_data_table_dialog(app) -> None:
     calc_btn.clicked.connect(lambda: _open_calculus_dialog(dialog, state["model"]))
     smooth_btn.clicked.connect(lambda: _open_smooth_dialog(dialog, state["model"]))
     interp_btn.clicked.connect(lambda: _open_interpolate_dialog(dialog, state["model"]))
+    plot_btn.clicked.connect(
+        lambda: _open_plot_picker_dialog(app, dialog, state["model"])
+    )
+    decouple_btn.clicked.connect(
+        lambda: _decouple_book_from_tdms(app, dialog, state["model"])
+    )
+    save_tdms_btn.clicked.connect(
+        lambda: _save_book_as_tdms(app, dialog, state["model"])
+    )
     close_btn.clicked.connect(dialog.accept)
 
     # --- right-click context menu (Set X/Y, Plot ▸ Line/Scatter/Both) ---
@@ -8691,20 +9151,20 @@ def _open_data_table_dialog(app) -> None:
         "the F(x)= row above the data accepts expressions referencing other "
         "columns by their letter (<code>A+B</code>, <code>sqrt(B**2+C**2)</code>, "
         "<code>diff(A)</code>; <code>^</code> means power). "
-        "<b>Click a column header</b> to grab the whole column; "
-        "<b>Ctrl+click</b> additional headers to pile them up — every "
-        "selected Y is plotted in the same graph. <b>Right-click</b> the "
-        "selection to <b>Set as X<sub>k</sub> / Y<sub>k</sub></b> "
-        "(X1/Y1, X2/Y2, … pair by index — Y2 is plotted against X2, Y1 "
-        "against X1) or <b>Plot ▸ Line / Scatter / Line + Scatter</b>. "
-        "Plot windows are independent: they have zoom / autoscale / "
-        "log-axis / crosshair / export / copy buttons (mouse wheel zooms, "
-        "right-drag pans), and you can keep the data book open while "
-        "interacting with them. Ctrl+C / Ctrl+V copy and paste tab-"
-        "separated values. <b>Calculus…</b> integrates / differentiates "
-        "a column, <b>Smooth…</b> applies Savitzky-Golay / moving-average "
-        "/ median / Gaussian filters, and <b>Interpolate…</b> resamples a "
-        "column onto a uniform / custom grid."
+        "<b>The easiest way to plot multiple columns is the </b>"
+        "<b>'Plot…' button</b> — tick the columns, pick X<sub>k</sub> / "
+        "Y<sub>k</sub> roles per column, and every selected Y goes into a "
+        "single graph. (You can also Ctrl+click column headers and use "
+        "the right-click menu — same result.) "
+        "Plot windows are independent: zoom / autoscale / log-axis / "
+        "crosshair / Graph settings / export buttons (mouse wheel zooms, "
+        "right-drag pans). <b>Decouple from TDMS</b> cuts every channel "
+        "free from the source recording (edits stop mutating the loaded "
+        "file's cache); <b>Save as TDMS…</b> writes the whole book to a "
+        "fresh TDMS file. Ctrl+C / Ctrl+V copy and paste tab-separated "
+        "values. <b>Calculus…</b> integrates / differentiates, "
+        "<b>Smooth…</b> applies Savitzky-Golay / moving-average / median "
+        "/ Gaussian filters, <b>Interpolate…</b> resamples onto a new grid."
     )
     hint.setStyleSheet("color: #555; font-size: 11px;")
     hint.setTextFormat(Qt.RichText)
