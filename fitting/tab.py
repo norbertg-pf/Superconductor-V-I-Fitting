@@ -8138,9 +8138,27 @@ def _open_data_table_dialog(app) -> None:
         )
         return
 
+    # Re-show an already-open data book instead of opening a second one.
+    existing = getattr(app, "_data_fit_book_dialog", None)
+    if existing is not None:
+        try:
+            if existing.isVisible():
+                existing.raise_()
+                existing.activateWindow()
+                return
+        except RuntimeError:
+            # The previous dialog was destroyed — fall through and recreate.
+            app._data_fit_book_dialog = None
+
     dialog = QDialog(app)
     dialog.setWindowTitle("Data book — fitting")
     dialog.resize(960, 620)
+    # Keep the dialog non-modal so plot windows opened from it (which are
+    # also children of ``app``) remain interactive — application-modal
+    # dialogs (the default with exec_()) would block clicks on every other
+    # window in the app, including the plot window's toolbar and Close.
+    dialog.setModal(False)
+    dialog.setWindowFlags(dialog.windowFlags() | Qt.Window)
     root = QVBoxLayout(dialog)
 
     # --- top row: book selector + dimensions readout -------------------
@@ -8165,6 +8183,8 @@ def _open_data_table_dialog(app) -> None:
     root.addLayout(top)
 
     # --- table ---------------------------------------------------------
+    from PyQt5.QtCore import QItemSelection, QItemSelectionModel
+
     table = QTableView()
     table.setSelectionBehavior(QAbstractItemView.SelectItems)
     table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -8172,9 +8192,46 @@ def _open_data_table_dialog(app) -> None:
     table.horizontalHeader().setDefaultSectionSize(120)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
     table.horizontalHeader().setSectionsClickable(True)
-    table.horizontalHeader().sectionClicked.connect(
-        lambda idx: table.selectColumn(idx)
-    )
+
+    def _on_header_clicked(idx: int) -> None:
+        """Header-click selects a whole column; Ctrl / Shift extend the
+        selection so the user can pick several columns at once for
+        plotting."""
+        m = state["model"]
+        sm = table.selectionModel()
+        if m is None or sm is None or m.rowCount() == 0:
+            return
+        n_rows = m.rowCount()
+        col_sel = QItemSelection(m.index(0, idx), m.index(n_rows - 1, idx))
+        mods = QApplication.keyboardModifiers()
+        if mods & Qt.ControlModifier:
+            # Toggle: if column already fully or partially in the selection,
+            # remove it; otherwise add it.
+            already = any(i.column() == idx for i in sm.selectedIndexes())
+            flag = (QItemSelectionModel.Deselect if already
+                    else QItemSelectionModel.Select)
+            sm.select(col_sel, flag)
+        elif mods & Qt.ShiftModifier:
+            # Range from the leftmost-already-selected column to ``idx``.
+            cols = sorted({i.column() for i in sm.selectedIndexes()})
+            if cols:
+                lo = min(cols[0], idx)
+                hi = max(cols[-1], idx)
+            else:
+                lo, hi = idx, idx
+            range_sel = QItemSelection(
+                m.index(0, lo), m.index(n_rows - 1, hi),
+            )
+            sm.select(range_sel, QItemSelectionModel.ClearAndSelect)
+        else:
+            sm.select(col_sel, QItemSelectionModel.ClearAndSelect)
+        # Keep the table's "current" cursor on the clicked column so future
+        # Shift+click ranges anchor sensibly.
+        sm.setCurrentIndex(
+            m.index(m.META_ROWS, idx), QItemSelectionModel.NoUpdate,
+        )
+
+    table.horizontalHeader().sectionClicked.connect(_on_header_clicked)
     table.verticalHeader().setDefaultSectionSize(20)
     table.verticalHeader().setMinimumWidth(86)
     table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -8608,26 +8665,40 @@ def _open_data_table_dialog(app) -> None:
         "the F(x)= row above the data accepts expressions referencing other "
         "columns by their letter (<code>A+B</code>, <code>sqrt(B**2+C**2)</code>, "
         "<code>diff(A)</code>; <code>^</code> means power). "
-        "<b>Right-click</b> a column header (or a multi-column selection) to "
-        "<b>Set as X<sub>k</sub> / Y<sub>k</sub></b> (X1/Y1, X2/Y2, … pair "
-        "by index — Y2 is plotted against X2, Y1 against X1) or "
-        "<b>Plot ▸ Line / Scatter / Line + Scatter</b>. "
-        "Select multiple Y columns at once to overlay them on a single "
-        "graph; the plot window has zoom / autoscale / log-axis / export / "
-        "copy buttons (mouse wheel zooms, right-drag pans). "
-        "Ctrl+click selects multiple columns; click a header to grab a whole "
-        "column. Ctrl+C / Ctrl+V copy and paste tab-separated values. "
-        "<b>Calculus…</b> integrates / differentiates a column, "
-        "<b>Smooth…</b> applies Savitzky-Golay / moving-average / median / "
-        "Gaussian filters, and <b>Interpolate…</b> resamples a column onto "
-        "a uniform / custom grid."
+        "<b>Click a column header</b> to grab the whole column; "
+        "<b>Ctrl+click</b> additional headers to pile them up — every "
+        "selected Y is plotted in the same graph. <b>Right-click</b> the "
+        "selection to <b>Set as X<sub>k</sub> / Y<sub>k</sub></b> "
+        "(X1/Y1, X2/Y2, … pair by index — Y2 is plotted against X2, Y1 "
+        "against X1) or <b>Plot ▸ Line / Scatter / Line + Scatter</b>. "
+        "Plot windows are independent: they have zoom / autoscale / "
+        "log-axis / crosshair / export / copy buttons (mouse wheel zooms, "
+        "right-drag pans), and you can keep the data book open while "
+        "interacting with them. Ctrl+C / Ctrl+V copy and paste tab-"
+        "separated values. <b>Calculus…</b> integrates / differentiates "
+        "a column, <b>Smooth…</b> applies Savitzky-Golay / moving-average "
+        "/ median / Gaussian filters, and <b>Interpolate…</b> resamples a "
+        "column onto a uniform / custom grid."
     )
     hint.setStyleSheet("color: #555; font-size: 11px;")
     hint.setTextFormat(Qt.RichText)
     hint.setWordWrap(True)
     root.addWidget(hint)
 
-    dialog.exec_()
+    # Non-modal: ``show()`` returns immediately so the user can keep the
+    # data book open while plot windows opened from it stay interactive.
+    # Track the dialog on ``app`` to keep it alive and to surface it when
+    # the user clicks "Data book…" again.
+    app._data_fit_book_dialog = dialog
+
+    def _drop_book_dialog(_result):
+        if getattr(app, "_data_fit_book_dialog", None) is dialog:
+            app._data_fit_book_dialog = None
+
+    dialog.finished.connect(_drop_book_dialog)
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
 
 
 def _fit_single_curve(app, entry: dict) -> None:
