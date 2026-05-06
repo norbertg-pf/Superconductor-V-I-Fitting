@@ -969,6 +969,10 @@ def _connect_data_fitting_actions(app):
             combo.currentIndexChanged.connect(lambda _i: _refresh_capacity_compute_enabled(app))
     if getattr(app, "data_fit_cap_q_compute_btn", None) is not None:
         app.data_fit_cap_q_compute_btn.clicked.connect(lambda: _on_capacity_compute_clicked(app))
+    if getattr(app, "data_fit_cap_save_source_btn", None) is not None:
+        app.data_fit_cap_save_source_btn.clicked.connect(lambda: _on_capacitor_save_to_source(app))
+    if getattr(app, "data_fit_cap_save_capacity_btn", None) is not None:
+        app.data_fit_cap_save_capacity_btn.clicked.connect(lambda: _on_capacitor_save_capacity(app))
 
 
 
@@ -1189,6 +1193,7 @@ def _reset_data_fitting_defaults(app) -> None:
     _refresh_capacitor_compute_enabled(app)
     _refresh_capacitor_integrate_enabled(app)
     _refresh_capacity_compute_enabled(app)
+    _refresh_capacitor_save_enabled(app)
 
 
 def _curve_profile_key_from_ui(app) -> str:
@@ -1452,6 +1457,175 @@ def _build_capacitor_testing_tab(app, layout) -> None:
     cap_q_layout.addWidget(app.data_fit_cap_q_compute_status, 4, 0, 1, 2)
     layout.addWidget(cap_q_group)
 
+    # --- Save derived data ---
+    cap_save_group = QGroupBox("Save derived data")
+    cap_save_layout = QGridLayout(cap_save_group)
+    app.data_fit_cap_save_source_btn = QPushButton(
+        "Save Power && Integrated Power into source TDMS"
+    )
+    app.data_fit_cap_save_source_btn.setToolTip(
+        f'Append the in-memory "{CAPACITOR_POWER_CHANNEL_NAME}" and\n'
+        f'"{CAPACITOR_ENERGY_CHANNEL_NAME}" channels back into the loaded\n'
+        "TDMS file (under a 'Computed' group). Disabled until at least\n"
+        "one of these has been computed and the source is a TDMS file."
+    )
+    app.data_fit_cap_save_source_btn.setEnabled(False)
+    cap_save_layout.addWidget(app.data_fit_cap_save_source_btn, 0, 0, 1, 2)
+    app.data_fit_cap_save_capacity_btn = QPushButton(
+        f'Save "{CAPACITY_DATASET_NAME}" as TDMS…'
+    )
+    app.data_fit_cap_save_capacity_btn.setToolTip(
+        "Open a Save-As dialog and write the Capacity vs Voltage dataset to a\n"
+        "TDMS file. Defaults to the source folder with a '_CapacityvsVoltage'\n"
+        "suffix; the user can override the location and name."
+    )
+    app.data_fit_cap_save_capacity_btn.setEnabled(False)
+    cap_save_layout.addWidget(app.data_fit_cap_save_capacity_btn, 1, 0, 1, 2)
+    app.data_fit_cap_save_status = QLabel("")
+    app.data_fit_cap_save_status.setStyleSheet("color: gray;")
+    app.data_fit_cap_save_status.setWordWrap(True)
+    cap_save_layout.addWidget(app.data_fit_cap_save_status, 2, 0, 1, 2)
+    layout.addWidget(cap_save_group)
+
+
+def _refresh_capacitor_save_enabled(app) -> None:
+    controller = getattr(app, "data_fit_controller", None)
+    src_btn = getattr(app, "data_fit_cap_save_source_btn", None)
+    cap_btn = getattr(app, "data_fit_cap_save_capacity_btn", None)
+    if controller is None:
+        return
+    has_power = CAPACITOR_POWER_CHANNEL_NAME in (controller.channel_cache or {})
+    has_energy = CAPACITOR_ENERGY_CHANNEL_NAME in (controller.channel_cache or {})
+    has_capacity = CAPACITY_DATASET_NAME in (controller.datasets or {})
+    src_is_tdms = bool(controller.tdms_path) and controller.tdms_path.lower().endswith(".tdms")
+    if src_btn is not None:
+        src_btn.setEnabled(src_is_tdms and (has_power or has_energy))
+    if cap_btn is not None:
+        cap_btn.setEnabled(has_capacity)
+
+
+def _suggested_capacity_save_path(controller) -> str:
+    src = getattr(controller, "tdms_path", "") or ""
+    if src:
+        src_dir = os.path.dirname(src)
+        src_base = os.path.splitext(os.path.basename(src))[0]
+        return os.path.join(src_dir, f"{src_base}_CapacityvsVoltage.tdms")
+    return "CapacityvsVoltage.tdms"
+
+
+def _on_capacitor_save_to_source(app) -> None:
+    """Append the computed Power / Integrated Power channels back to the
+    loaded TDMS file under a "Computed" group.
+
+    Re-reads every channel from the source, drops any prior "Computed"
+    group, then writes the union to a temporary file before atomically
+    replacing the source — so a write failure can never corrupt the
+    original recording.
+    """
+    status = getattr(app, "data_fit_cap_save_status", None)
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    path = controller.tdms_path
+    if not path or not os.path.exists(path) or not path.lower().endswith(".tdms"):
+        if status is not None:
+            status.setText("Source file is not a TDMS recording.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    power = controller.channel_cache.get(CAPACITOR_POWER_CHANNEL_NAME)
+    energy = controller.channel_cache.get(CAPACITOR_ENERGY_CHANNEL_NAME)
+    if power is None and energy is None:
+        if status is not None:
+            status.setText("Nothing to save — compute Power or Integrated Power first.")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    try:
+        objects = [RootObject()]
+        groups_seen: set[str] = set()
+        with TdmsFile.read(path) as src:
+            for group in src.groups():
+                if group.name == "Computed":
+                    # Skip any previous Computed group; we'll rewrite it below.
+                    continue
+                if group.name not in groups_seen:
+                    objects.append(GroupObject(group.name))
+                    groups_seen.add(group.name)
+                for channel in group.channels():
+                    objects.append(
+                        ChannelObject(
+                            group.name, channel.name, np.asarray(channel[:], dtype=float)
+                        )
+                    )
+        objects.append(GroupObject("Computed"))
+        added: list[str] = []
+        if power is not None:
+            objects.append(
+                ChannelObject("Computed", CAPACITOR_POWER_CHANNEL_NAME, np.asarray(power, dtype=float))
+            )
+            added.append(CAPACITOR_POWER_CHANNEL_NAME)
+        if energy is not None:
+            objects.append(
+                ChannelObject(
+                    "Computed", CAPACITOR_ENERGY_CHANNEL_NAME, np.asarray(energy, dtype=float)
+                )
+            )
+            added.append(CAPACITOR_ENERGY_CHANNEL_NAME)
+        tmp_path = path + ".tmp"
+        with TdmsWriter(tmp_path) as w:
+            w.write_segment(objects)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        if status is not None:
+            status.setText(f"Save failed: {exc}")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    if status is not None:
+        status.setText(
+            f'Saved {", ".join(added)} into "{os.path.basename(path)}" (group "Computed").'
+        )
+        status.setStyleSheet("color: #2a7a2a;")
+
+
+def _on_capacitor_save_capacity(app) -> None:
+    """Open a Save-As dialog and write the Capacity vs Voltage dataset to a TDMS file."""
+    status = getattr(app, "data_fit_cap_save_status", None)
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return
+    dataset = controller.datasets.get(CAPACITY_DATASET_NAME) if controller.datasets else None
+    if dataset is None:
+        if status is not None:
+            status.setText("Compute capacity first (Step 4).")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    suggested = _suggested_capacity_save_path(controller)
+    out_path, _ = QFileDialog.getSaveFileName(
+        app,
+        f'Save "{CAPACITY_DATASET_NAME}"',
+        suggested,
+        "TDMS Files (*.tdms);;All Files (*)",
+    )
+    if not out_path:
+        return
+    if not out_path.lower().endswith(".tdms"):
+        out_path = out_path + ".tdms"
+    try:
+        objects = [RootObject(), GroupObject("CapacityvsVoltage")]
+        for col_name, arr in dataset["channels"].items():
+            objects.append(
+                ChannelObject("CapacityvsVoltage", col_name, np.asarray(arr, dtype=float))
+            )
+        with TdmsWriter(out_path) as w:
+            w.write_segment(objects)
+    except Exception as exc:
+        if status is not None:
+            status.setText(f"Save failed: {exc}")
+            status.setStyleSheet("color: #b35a00;")
+        return
+    if status is not None:
+        status.setText(f'Saved capacity dataset to "{os.path.basename(out_path)}".')
+        status.setStyleSheet("color: #2a7a2a;")
+
 
 def _refresh_capacitor_row_combos(app) -> None:
     """Repopulate the Capacitor Testing row dropdowns from the current channels.
@@ -1503,6 +1677,7 @@ def _refresh_capacitor_row_combos(app) -> None:
     _refresh_capacitor_compute_enabled(app)
     _refresh_capacitor_integrate_enabled(app)
     _refresh_capacity_compute_enabled(app)
+    _refresh_capacitor_save_enabled(app)
 
 
 def _refresh_capacity_compute_enabled(app) -> None:
@@ -2770,13 +2945,24 @@ def _apply_transforms(app, *, apply_trim: bool = False):
     x_original = np.asarray(x, dtype=float) if x is not None else None
     t_original = np.asarray(t, dtype=float) if t is not None else None
     y_original = np.asarray(y, dtype=float) if y is not None else None
-    trim_mask = _build_trim_mask(app, x_original) if apply_trim else None
+    # The Step-2 trim is meaningful only on the recording's time-series. For
+    # derived datasets (e.g. "Capacity vs Voltage") the columns may have
+    # different lengths from each other and from the trim mask, so skip the
+    # trim there. Even on the recording, defensively size-check before
+    # masking — a stray length mismatch otherwise raises IndexError.
+    is_recording_active = dataset is None or dataset.get("is_recording", False)
+    trim_mask = (
+        _build_trim_mask(app, x_original)
+        if (apply_trim and is_recording_active)
+        else None
+    )
     if trim_mask is not None and np.any(trim_mask):
-        if t is not None:
+        mask_size = int(trim_mask.size)
+        if t is not None and t.size == mask_size:
             t = t[trim_mask]
-        if x is not None:
+        if x is not None and x.size == mask_size:
             x = x[trim_mask]
-        if y is not None:
+        if y is not None and y.size == mask_size:
             y = y[trim_mask]
     return {
         "time": t,
@@ -4202,6 +4388,22 @@ def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
     """
     if x is None or x.size == 0:
         return
+    # Fit bands describe the V-I fitting workflow on the recording. They
+    # have no meaning on derived datasets (e.g. "Capacity vs Voltage")
+    # whose columns may also have different lengths from each other.
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is not None:
+        dataset = controller.active_dataset()
+        if dataset is not None and not dataset.get("is_recording", False):
+            return
+    if y is not None and y.size != x.size:
+        # Length mismatch — clip to common prefix so downstream boolean
+        # masks line up (avoids broadcasting traps with size-1 arrays).
+        n = int(min(x.size, y.size))
+        if n == 0:
+            return
+        x = x[:n]
+        y = y[:n]
     x_min = float(np.min(x))
     x_max = float(np.max(x))
     span = x_max - x_min
