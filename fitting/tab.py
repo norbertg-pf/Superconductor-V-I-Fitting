@@ -6946,14 +6946,13 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
 
     btn_autorange = _toolbtn(
         "⇲ Auto",
-        "Autoscale both axes to the data extent (also: double-click the plot).",
+        "Autoscale both axes to the data extent (mouse wheel zooms; "
+        "right-drag scales an axis; double-click also autoscales).",
     )
-    btn_zoom_in = _toolbtn("＋", "Zoom in (10 %).")
-    btn_zoom_out = _toolbtn("－", "Zoom out (10 %).")
-    btn_zoom_x_in = _toolbtn("X+", "Zoom X axis in.")
-    btn_zoom_x_out = _toolbtn("X−", "Zoom X axis out.")
-    btn_zoom_y_in = _toolbtn("Y+", "Zoom Y axis in.")
-    btn_zoom_y_out = _toolbtn("Y−", "Zoom Y axis out.")
+    btn_reset = _toolbtn(
+        "↺ Reset",
+        "Restore the original autoscale view.",
+    )
     btn_log_x = _toolbtn("log X", "Toggle log X axis.", checkable=True)
     btn_log_y = _toolbtn("log Y", "Toggle log Y axis.", checkable=True)
     btn_grid = _toolbtn("Grid", "Toggle grid.", checkable=True)
@@ -6980,6 +6979,12 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
         "the plot.",
     )
 
+    btn_settings = _toolbtn(
+        "⚙ Graph settings…",
+        "Open the OriginLab-style Graph settings dialog: titles, axis "
+        "scales / ticks / labels, grids, axis lines, plot title — same "
+        "dialog the main-window plot uses.",
+    )
     btn_copy = _toolbtn(
         "📋 Copy",
         "Copy the plot as an image to the clipboard.",
@@ -6992,19 +6997,13 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
         "↪ CSV",
         "Save the plotted data as a CSV file (one Y column per series).",
     )
-    btn_reset = _toolbtn(
-        "↺ Reset",
-        "Restore the original autoscale view.",
-    )
 
     for w in (
         btn_autorange, btn_reset,
-        btn_zoom_in, btn_zoom_out,
-        btn_zoom_x_in, btn_zoom_x_out,
-        btn_zoom_y_in, btn_zoom_y_out,
         btn_log_x, btn_log_y,
         btn_grid, btn_legend, btn_crosshair,
         style_lbl, style_cb,
+        btn_settings,
         btn_copy, btn_export_img, btn_export_data,
     ):
         toolbar.addWidget(w)
@@ -7083,28 +7082,8 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
         plot.setXRange(*initial_x_range, padding=0)
         plot.setYRange(*initial_y_range, padding=0)
 
-    def _scale_axis(axis: int, factor: float) -> None:
-        x_range, y_range = plot.viewRange()
-        rng = x_range if axis == 0 else y_range
-        center = 0.5 * (rng[0] + rng[1])
-        half = 0.5 * (rng[1] - rng[0]) * factor
-        if axis == 0:
-            plot.setXRange(center - half, center + half, padding=0)
-        else:
-            plot.setYRange(center - half, center + half, padding=0)
-
-    def _zoom_both(factor: float) -> None:
-        _scale_axis(0, factor)
-        _scale_axis(1, factor)
-
     btn_autorange.clicked.connect(_on_autorange)
     btn_reset.clicked.connect(_on_reset)
-    btn_zoom_in.clicked.connect(lambda: _zoom_both(0.8))
-    btn_zoom_out.clicked.connect(lambda: _zoom_both(1.25))
-    btn_zoom_x_in.clicked.connect(lambda: _scale_axis(0, 0.8))
-    btn_zoom_x_out.clicked.connect(lambda: _scale_axis(0, 1.25))
-    btn_zoom_y_in.clicked.connect(lambda: _scale_axis(1, 0.8))
-    btn_zoom_y_out.clicked.connect(lambda: _scale_axis(1, 1.25))
 
     def _on_log_x(checked: bool) -> None:
         plot.setLogMode(x=bool(checked), y=btn_log_y.isChecked())
@@ -7128,6 +7107,53 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     style_cb.currentIndexChanged.connect(
         lambda idx: _redraw(("line", "scatter", "both")[idx])
     )
+
+    # --- graph settings dialog -----------------------------------------
+    # Build a per-window GraphSettings seeded from the current X / Y labels
+    # so the dialog opens with the right starting values. The dialog is
+    # the same OriginLab-style one used by the main fitting tab.
+    from copy import deepcopy
+
+    settings_state: dict = {
+        "settings": GraphSettings(),
+    }
+    settings_state["settings"].plot_title_text = title
+    settings_state["settings"].title_bottom.text = common_x_label or "X"
+    if len({spec[2] for spec in plot_specs}) == 1 and plot_specs:
+        settings_state["settings"].title_left.text = plot_specs[0][2]
+    else:
+        settings_state["settings"].title_left.text = "Y"
+    # The dialog's "curve" tab styles a single PlotDataItem; this window
+    # has many curves and uses its own draw-mode combo, so don't let the
+    # dialog rewrite the per-curve styling — passing ``None`` for raw_curve
+    # to ``apply_graph_settings`` skips that branch entirely.
+
+    def _apply_settings_now(s) -> None:
+        try:
+            apply_graph_settings(plot, None, None, None, s)
+        except Exception as exc:
+            status.setText(f"  Graph settings failed: {exc}")
+            return
+        # Sync the toolbar checkboxes with the dialog choices.
+        btn_log_x.blockSignals(True)
+        btn_log_y.blockSignals(True)
+        btn_log_x.setChecked(s.scale_h.scale_type == "Log10")
+        btn_log_y.setChecked(s.scale_v.scale_type == "Log10")
+        btn_log_x.blockSignals(False)
+        btn_log_y.blockSignals(False)
+
+    def _on_graph_settings() -> None:
+        # Pass a deep copy so Cancel doesn't leak edits; OK / Apply use
+        # the dialog's result_settings() to commit.
+        cur = deepcopy(settings_state["settings"])
+        dialog = GraphSettingsDialog(
+            cur, dlg, on_apply=_apply_settings_now,
+        )
+        if dialog.exec_() == dialog.Accepted:
+            settings_state["settings"] = dialog.result_settings()
+            _apply_settings_now(settings_state["settings"])
+
+    btn_settings.clicked.connect(_on_graph_settings)
 
     # --- crosshair ------------------------------------------------------
     v_line = pg.InfiniteLine(angle=90, movable=False,
