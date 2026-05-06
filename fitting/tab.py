@@ -763,7 +763,9 @@ def _connect_data_fitting_actions(app):
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
     app.data_fit_help_btn.clicked.connect(lambda: _open_help_dialog(app))
     if getattr(app, "data_fit_data_book_btn", None) is not None:
-        app.data_fit_data_book_btn.clicked.connect(lambda: _open_data_table_dialog(app))
+        # Default action is the OriginLab-style MDI workspace (every book
+        # and every plot lives as a subwindow inside one big window).
+        app.data_fit_data_book_btn.clicked.connect(lambda: _open_workspace_window(app))
     app.data_fit_show_didt.toggled.connect(
         lambda _: (_update_band_states(app), _save_active_curve_profile(app))
     )
@@ -1678,10 +1680,13 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_save_preset_btn.setToolTip("Save the current fit-window preset to a JSON file.")
     app.data_fit_load_preset_btn = QPushButton("Load preset…")
     app.data_fit_load_preset_btn.setToolTip("Load a fit-window preset from a JSON file.")
-    app.data_fit_data_book_btn = QPushButton("Data book…")
+    app.data_fit_data_book_btn = QPushButton("Workspace…")
     app.data_fit_data_book_btn.setToolTip(
-        "Open an OriginLab-style book with the loaded Time/Current/Voltage values.\n"
-        "Edit cells, insert/delete rows, add user columns; edits update the plot live."
+        "Open the OriginLab-style data workspace.\n"
+        "One big window holds every loaded TDMS file as its own data-book "
+        "subwindow, and plots opened from a book also live as subwindows.\n"
+        "Tile / cascade / move / resize freely. Edit cells; right-click for "
+        "row & column actions."
     )
     app.data_fit_help_btn = QPushButton("?  Help")
     app.data_fit_help_btn.setToolTip("Open the help window with a full overview of the fitting workflow.")
@@ -6444,10 +6449,22 @@ class _DataBookModel(QAbstractTableModel):
     META_LABELS = ("Long Name", "F(x)=")
     META_BG = QColor("#eef0f7")
 
-    def __init__(self, app, columns: list, parent=None) -> None:
+    def __init__(self, app, columns: list, controller=None, parent=None) -> None:
         super().__init__(parent)
         self._app = app
         self._columns: list = columns
+        # Each model is bound to a specific controller (one TDMS book) so the
+        # MDI workspace can host several books side-by-side without their
+        # edits stomping on each other's caches. Falls back to the app's
+        # active controller for backwards compatibility (single-book dialog).
+        self._controller = (
+            controller if controller is not None
+            else getattr(app, "data_fit_controller", None)
+        )
+
+    @property
+    def controller(self):
+        return self._controller
 
     # --- introspection --------------------------------------------------
     @property
@@ -6697,7 +6714,7 @@ class _DataBookModel(QAbstractTableModel):
             self._persist_user_columns()
             # Tell the controller to stop re-injecting Time / channel-backed
             # columns when the dialog rebuilds the model.
-            controller = getattr(self._app, "data_fit_controller", None)
+            controller = self._controller
             if controller is not None:
                 controller.book_decoupled = True
             # The headers no longer need the channel-vs-user distinction.
@@ -6728,7 +6745,7 @@ class _DataBookModel(QAbstractTableModel):
         if role is None:
             return False
         col.plot_role = role
-        controller = getattr(self._app, "data_fit_controller", None)
+        controller = self._controller
         if controller is not None:
             roles_map = getattr(controller, "column_roles", None)
             if roles_map is None:
@@ -6766,7 +6783,7 @@ class _DataBookModel(QAbstractTableModel):
 
     def _store_column(self, col, new_arr: np.ndarray) -> None:
         col.data = new_arr
-        controller = getattr(self._app, "data_fit_controller", None)
+        controller = self._controller
         if controller is None:
             return
         if col.is_time:
@@ -6804,13 +6821,20 @@ class _DataBookModel(QAbstractTableModel):
                 "formula": c.formula,
                 "role": c.plot_role,
             })
-        controller = getattr(self._app, "data_fit_controller", None)
+        controller = self._controller
         if controller is not None:
             controller.book_user_columns = snapshot
 
     def _refresh_plot_if_relevant(self, col) -> None:
         app = self._app
         if not hasattr(app, "data_fit_time_cb"):
+            return
+        # Only refresh the main fitting plot when this model belongs to the
+        # currently-active controller. In the MDI workspace several books
+        # may have models open at the same time; edits in a book that is
+        # not the active fit target should not redraw the fit preview.
+        if (self._controller is not None
+                and self._controller is not getattr(app, "data_fit_controller", None)):
             return
         try:
             time_name = app.data_fit_time_cb.currentText()
@@ -6944,13 +6968,23 @@ def _build_plot_specs_from_selection(model, selected_cols):
 def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     """Open a non-modal plot window with the given (x, y) specs.
 
-    ``draw_mode`` is one of ``"line"``, ``"scatter"``, ``"both"``. The window
-    has an OriginLab-style toolbar (zoom in/out, autoscale, X/Y log toggles,
-    crosshair, marker/line toggle, copy-image, export-image, export-data,
+    ``draw_mode`` is one of ``"line"``, ``"scatter"``, ``"both"``. The
+    window has an OriginLab-style toolbar (autoscale, X/Y log toggles,
+    crosshair, copy-image, export-image, export-data, graph settings,
     legend) and remembers its draw mode so the user can flip between
-    line / scatter / both without reopening. The window is kept alive on
-    ``app._data_fit_book_plot_windows`` so the user can have several open at
-    once without them being garbage collected.
+    line / scatter / both without reopening.
+
+    Behaviour:
+
+    * When the MDI workspace is open (``app._data_fit_workspace_mdi``),
+      the plot opens as a **subwindow inside the workspace** so it
+      lives next to the data sheets — the OriginLab MDI experience.
+    * Otherwise it opens as a **top-level non-modal QDialog**, which is
+      the legacy behaviour for users who only want the Data book dialog.
+
+    The window is kept alive on ``app._data_fit_book_plot_windows`` so
+    the user can have several open at once without them being garbage
+    collected.
     """
     from PyQt5.QtWidgets import (
         QApplication,
@@ -6960,16 +6994,41 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
         QFileDialog,
         QHBoxLayout,
         QLabel,
+        QMdiSubWindow,
         QPushButton,
         QToolButton,
         QVBoxLayout,
+        QWidget,
     )
 
-    dlg = QDialog(app)
-    dlg.setWindowTitle(title)
-    dlg.resize(820, 600)
-    dlg.setModal(False)
-    layout = QVBoxLayout(dlg)
+    mdi = getattr(app, "_data_fit_workspace_mdi", None)
+    workspace_visible = False
+    if mdi is not None:
+        try:
+            workspace_visible = bool(
+                getattr(app, "_data_fit_workspace", None) is not None
+                and app._data_fit_workspace.isVisible()
+            )
+        except RuntimeError:
+            workspace_visible = False
+
+    if workspace_visible and mdi is not None:
+        # Plot lives as a subwindow inside the workspace MDI.
+        dlg = QMdiSubWindow()
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.setWindowTitle(f"📈 {title}")
+        # Mark so "Close all plots" can find these.
+        dlg.setProperty("plot_subwindow", True)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        dlg.setWidget(host)
+    else:
+        # Legacy: top-level non-modal dialog.
+        dlg = QDialog(app)
+        dlg.setWindowTitle(title)
+        dlg.resize(820, 600)
+        dlg.setModal(False)
+        layout = QVBoxLayout(dlg)
 
     # --- toolbar --------------------------------------------------------
     toolbar = QHBoxLayout()
@@ -7299,27 +7358,39 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     btn_export_data.clicked.connect(_on_export_data)
 
     # --- bottom row -----------------------------------------------------
-    btns = QHBoxLayout()
-    btns.addStretch()
-    close = QPushButton("Close")
-    close.clicked.connect(dlg.accept)
-    btns.addWidget(close)
-    layout.addLayout(btns)
+    # MDI subwindows already have a native title-bar close button, so
+    # we only add an explicit "Close" button in the standalone-dialog
+    # case where the QDialog has no chrome of its own.
+    if not workspace_visible or mdi is None:
+        btns = QHBoxLayout()
+        btns.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        btns.addWidget(close)
+        layout.addLayout(btns)
 
     if not hasattr(app, "_data_fit_book_plot_windows"):
         app._data_fit_book_plot_windows = []
     app._data_fit_book_plot_windows.append(dlg)
 
-    def _drop_when_closed(_result):
+    def _drop_when_closed(*_args):
         try:
             app._data_fit_book_plot_windows.remove(dlg)
         except (ValueError, AttributeError):
             pass
 
-    dlg.finished.connect(_drop_when_closed)
-    dlg.show()
-    dlg.raise_()
-    dlg.activateWindow()
+    if workspace_visible and mdi is not None:
+        # Add as a subwindow inside the workspace MDI area.
+        mdi.addSubWindow(dlg)
+        dlg.resize(720, 520)
+        dlg.destroyed.connect(_drop_when_closed)
+        dlg.show()
+        dlg.raise_()
+    else:
+        dlg.finished.connect(_drop_when_closed)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
     return dlg
 
 
@@ -8447,7 +8518,7 @@ def _save_book_as_tdms(app, parent, model) -> None:
     )
 
 
-def _build_data_book_columns(app) -> list:
+def _build_data_book_columns(app, controller=None) -> list:
     """Snapshot the controller's channels (+ persisted user cols) into columns.
 
     Channel arrays are referenced live (no copy) so cell edits mutate the
@@ -8456,8 +8527,13 @@ def _build_data_book_columns(app) -> list:
     from TDMS" (``controller.book_decoupled = True``), the channel-backed
     sources are skipped and every column comes from the persisted user-
     column snapshot, which carries copies of the data.
+
+    ``controller`` may be passed explicitly when the workspace hosts
+    several books simultaneously; otherwise the app's currently-active
+    controller is used (preserves the single-book behaviour).
     """
-    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        controller = getattr(app, "data_fit_controller", None)
     columns: list = []
     decoupled = bool(getattr(controller, "book_decoupled", False))
     roles_map: dict = (
@@ -8564,6 +8640,670 @@ def _set_active_data_fit_book(app, idx: int) -> bool:
     except Exception:
         traceback.print_exc()
     return True
+
+
+# ---------------------------------------------------------------------------
+# OriginLab-style MDI workspace — every loaded TDMS lives as one subwindow
+# inside a big "Data workspace" QMainWindow; plots opened from a book also
+# land as subwindows in the same MDI area, so the user can tile, cascade,
+# move, resize and minimise individual data sheets and graphs without
+# anything stealing the entire screen.
+# ---------------------------------------------------------------------------
+
+
+def _build_book_widget(app, controller, parent_window):
+    """Build a self-contained data-book widget bound to one ``controller``.
+
+    Returns ``(widget, model)``. Used by the MDI workspace to host one
+    book per subwindow. ``parent_window`` is the QDialog or QMdiSubWindow
+    that owns the widget — passed as the parent for child dialogs (Plot
+    picker, Calculus, …).
+
+    The widget contains:
+
+    * the editable table view with right-click context menus (column ops
+      on the header, row ops on the body),
+    * the action bar (Plot, Recalc F(x), Calculus, Smooth, Interpolate),
+    * the book-level actions (Decouple from TDMS, Save as TDMS).
+
+    Selection / edit shortcuts (Ctrl+C, Ctrl+V) and column-header
+    multi-select (Ctrl/Shift+click) are wired the same way as the legacy
+    Data-book dialog.
+    """
+    from PyQt5.QtWidgets import (
+        QAbstractItemView,
+        QApplication,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QInputDialog,
+        QLabel,
+        QLineEdit,
+        QMessageBox,
+        QMenu,
+        QPushButton,
+        QShortcut,
+        QTableView,
+        QVBoxLayout,
+        QWidget,
+    )
+    from PyQt5.QtGui import QKeySequence
+    from PyQt5.QtCore import QItemSelection, QItemSelectionModel
+
+    widget = QWidget(parent_window)
+    root = QVBoxLayout(widget)
+    root.setContentsMargins(6, 6, 6, 6)
+
+    # --- table -------------------------------------------------------
+    columns = _build_data_book_columns(app, controller=controller)
+    model = _DataBookModel(app, columns, controller=controller, parent=widget)
+
+    table = QTableView()
+    table.setModel(model)
+    table.setSelectionBehavior(QAbstractItemView.SelectItems)
+    table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    table.setAlternatingRowColors(True)
+    table.horizontalHeader().setDefaultSectionSize(120)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+    table.horizontalHeader().setSectionsClickable(True)
+
+    state = {"model": model}
+
+    def _on_header_clicked(idx: int) -> None:
+        m = state["model"]
+        sm = table.selectionModel()
+        if m is None or sm is None or m.rowCount() == 0:
+            return
+        n_rows = m.rowCount()
+        col_sel = QItemSelection(m.index(0, idx), m.index(n_rows - 1, idx))
+        mods = QApplication.keyboardModifiers()
+        if mods & Qt.ControlModifier:
+            already = any(i.column() == idx for i in sm.selectedIndexes())
+            flag = (QItemSelectionModel.Deselect if already
+                    else QItemSelectionModel.Select)
+            sm.select(col_sel, flag)
+        elif mods & Qt.ShiftModifier:
+            cols = sorted({i.column() for i in sm.selectedIndexes()})
+            if cols:
+                lo = min(cols[0], idx)
+                hi = max(cols[-1], idx)
+            else:
+                lo, hi = idx, idx
+            range_sel = QItemSelection(
+                m.index(0, lo), m.index(n_rows - 1, hi),
+            )
+            sm.select(range_sel, QItemSelectionModel.ClearAndSelect)
+        else:
+            sm.select(col_sel, QItemSelectionModel.ClearAndSelect)
+        sm.setCurrentIndex(
+            m.index(m.META_ROWS, idx), QItemSelectionModel.NoUpdate,
+        )
+
+    table.horizontalHeader().sectionClicked.connect(_on_header_clicked)
+    table.verticalHeader().setDefaultSectionSize(20)
+    table.verticalHeader().setMinimumWidth(86)
+    table.setContextMenuPolicy(Qt.CustomContextMenu)
+    table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+    root.addWidget(table, stretch=1)
+
+    # Status / dimensions readout.
+    info_lbl = QLabel("")
+    info_lbl.setStyleSheet("color: gray; font-size: 11px;")
+    root.addWidget(info_lbl)
+
+    def _refresh_info() -> None:
+        m = state["model"]
+        if m is None:
+            info_lbl.setText("")
+            return
+        n_data = max(0, m.rowCount() - m.META_ROWS)
+        info_lbl.setText(f"{n_data} rows  ·  {m.columnCount()} cols")
+
+    _refresh_info()
+    for sig in (model.rowsInserted, model.rowsRemoved,
+                model.columnsInserted, model.columnsRemoved,
+                model.modelReset):
+        sig.connect(lambda *_: _refresh_info())
+
+    # --- selection helpers -----------------------------------------
+    def _selected_data_rows() -> list:
+        sm = table.selectionModel()
+        m = state["model"]
+        if sm is None or m is None:
+            return []
+        return sorted({i.row() for i in sm.selectedIndexes() if i.row() >= m.META_ROWS})
+
+    def _selected_columns() -> list:
+        sm = table.selectionModel()
+        if sm is None:
+            return []
+        return sorted({i.column() for i in sm.selectedIndexes()})
+
+    # --- row operations ---------------------------------------------
+    def _on_insert_row() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        rows = _selected_data_rows()
+        target_row = rows[0] if rows else m.META_ROWS
+        m.insertRows(target_row, 1)
+
+    def _on_append_row() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        m.insertRows(m.rowCount(), 1)
+
+    def _on_delete_rows() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        rows = _selected_data_rows()
+        if not rows:
+            QMessageBox.information(
+                parent_window, "Data book",
+                "Select at least one cell in a data row first.",
+            )
+            return
+        for r in reversed(rows):
+            m.removeRows(r, 1)
+
+    def _prompt_add_column() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        sub = QDialog(parent_window)
+        sub.setWindowTitle("Add column")
+        form = QFormLayout(sub)
+        name_ed = QLineEdit()
+        name_ed.setPlaceholderText("e.g. Power, V_corr, Sample")
+        formula_ed = QLineEdit()
+        formula_ed.setPlaceholderText("optional, e.g.  A*B   sqrt(B**2+C**2)   log10(B)")
+        form.addRow("Long name:", name_ed)
+        form.addRow("F(x)= :", formula_ed)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(sub.accept)
+        btns.rejected.connect(sub.reject)
+        form.addRow(btns)
+        if sub.exec_() != QDialog.Accepted:
+            return
+        new_col = m.add_user_column(
+            name=name_ed.text(), formula=formula_ed.text(),
+        )
+        if new_col is not None:
+            new_idx = m.columnCount() - 1
+            table.scrollTo(m.index(0, new_idx))
+
+    def _on_remove_column() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        cols = _selected_columns()
+        if not cols:
+            QMessageBox.information(
+                parent_window, "Data book",
+                "Select a cell in the column you want to remove.",
+            )
+            return
+        col_idx = cols[0]
+        col = m.column_at(col_idx)
+        if col is None:
+            return
+        if col.is_channel:
+            QMessageBox.information(
+                parent_window, "Data book",
+                "Channel-backed columns (Time and TDMS channels) can't be "
+                "removed — only user-added columns can.",
+            )
+            return
+        m.remove_column_at(col_idx)
+
+    def _on_recalc_column() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        cols = _selected_columns()
+        if not cols:
+            return
+        for c in cols:
+            m.reapply_formula(c)
+
+    # --- copy / paste ----------------------------------------------
+    def _on_copy() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        sm = table.selectionModel()
+        idxs = sm.selectedIndexes() if sm is not None else []
+        if not idxs:
+            return
+        rows = sorted({i.row() for i in idxs})
+        cols = sorted({i.column() for i in idxs})
+        lines: list = []
+        for r in rows:
+            cells: list = []
+            for c in cols:
+                v = m.data(m.index(r, c), Qt.DisplayRole)
+                cells.append("" if v is None else str(v))
+            lines.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _on_paste() -> None:
+        m = state["model"]
+        if m is None:
+            return
+        sm = table.selectionModel()
+        idxs = sm.selectedIndexes() if sm is not None else []
+        if not idxs:
+            return
+        start = idxs[0]
+        text = QApplication.clipboard().text()
+        if not text:
+            return
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n").split("\n")
+        for dr, line in enumerate(lines):
+            cells = line.split("\t")
+            for dc, cell in enumerate(cells):
+                target = m.index(start.row() + dr, start.column() + dc)
+                if target.isValid():
+                    m.setData(target, cell, Qt.EditRole)
+
+    # --- buttons ----------------------------------------------------
+    actions = QHBoxLayout()
+    plot_btn = QPushButton("📊 Plot…")
+    plot_btn.setStyleSheet(
+        "background-color: #cfe6ff; padding: 6px 22px; font-weight: 700; "
+        "font-size: 13px;"
+    )
+    plot_btn.setToolTip(
+        "Open the plot picker — pick an X axis and tick every Y column "
+        "you want. All ticked Ys are overlaid on one graph in this "
+        "workspace.",
+    )
+    recalc_btn = QPushButton("Recalc F(x)")
+    recalc_btn.setToolTip(
+        "Re-evaluate the F(x)= formula of the selected columns against the "
+        "current data.",
+    )
+    calc_btn = QPushButton("Calculus…")
+    smooth_btn = QPushButton("Smooth…")
+    interp_btn = QPushButton("Interpolate…")
+    actions.addWidget(plot_btn)
+    actions.addSpacing(8)
+    actions.addWidget(recalc_btn)
+    actions.addWidget(calc_btn)
+    actions.addWidget(smooth_btn)
+    actions.addWidget(interp_btn)
+    actions.addStretch()
+    root.addLayout(actions)
+
+    actions2 = QHBoxLayout()
+    decouple_btn = QPushButton("Decouple from TDMS")
+    save_tdms_btn = QPushButton("Save as TDMS…")
+    actions2.addStretch()
+    actions2.addWidget(decouple_btn)
+    actions2.addWidget(save_tdms_btn)
+    root.addLayout(actions2)
+
+    # Plot opens as a workspace subwindow when the workspace is the
+    # parent; otherwise it falls back to a top-level dialog.
+    plot_btn.clicked.connect(
+        lambda: _open_plot_picker_dialog(app, parent_window, state["model"])
+    )
+    recalc_btn.clicked.connect(_on_recalc_column)
+    calc_btn.clicked.connect(
+        lambda: _open_calculus_dialog(parent_window, state["model"])
+    )
+    smooth_btn.clicked.connect(
+        lambda: _open_smooth_dialog(parent_window, state["model"])
+    )
+    interp_btn.clicked.connect(
+        lambda: _open_interpolate_dialog(parent_window, state["model"])
+    )
+    decouple_btn.clicked.connect(
+        lambda: _decouple_book_from_tdms(app, parent_window, state["model"])
+    )
+    save_tdms_btn.clicked.connect(
+        lambda: _save_book_as_tdms(app, parent_window, state["model"])
+    )
+
+    # --- right-click context menus ---------------------------------
+    def _do_plot(draw_mode: str, cols) -> None:
+        m = state["model"]
+        if m is None:
+            return
+        specs, err = _build_plot_specs_from_selection(m, cols)
+        if err:
+            QMessageBox.information(parent_window, "Plot from book", err)
+            return
+        ctrl = controller
+        book_name = (
+            os.path.basename(ctrl.tdms_path)
+            if ctrl is not None and ctrl.tdms_path
+            else "(book)"
+        )
+        kind_label = {"line": "line", "scatter": "scatter",
+                      "both": "line + scatter"}.get(draw_mode, draw_mode)
+        title = f"Plot ({kind_label}) — {book_name}"
+        _open_book_plot_window(app, title=title, plot_specs=specs,
+                               draw_mode=draw_mode)
+
+    def _show_header_context_menu(global_pos, *, header_pos=None) -> None:
+        m = state["model"]
+        if m is None:
+            return
+        cols = _selected_columns()
+        if not cols and header_pos is not None:
+            section = table.horizontalHeader().logicalIndexAt(header_pos)
+            if section >= 0:
+                cols = [section]
+        if not cols:
+            menu = QMenu(table)
+            add_act = menu.addAction("Add column…")
+            chosen = menu.exec_(global_pos)
+            if chosen is add_act:
+                _prompt_add_column()
+            return
+        menu = QMenu(table)
+        sel_label = (
+            f"Selected column: {m.headerData(cols[0], Qt.Horizontal)}"
+            if len(cols) == 1
+            else f"Selected {len(cols)} columns"
+        )
+        title_act = menu.addAction(sel_label)
+        title_act.setEnabled(False)
+        menu.addSeparator()
+        plot_picker = menu.addAction("📊 Plot…  (multi-column picker)")
+        menu.addSeparator()
+        max_x_idx = max(
+            (_plot_role_index(c.plot_role)
+             for c in m.columns
+             if (c.plot_role or "").upper().startswith("X")),
+            default=0,
+        )
+        max_y_idx = max(
+            (_plot_role_index(c.plot_role)
+             for c in m.columns
+             if (c.plot_role or "").upper().startswith("Y")),
+            default=0,
+        )
+        set_x_menu = menu.addMenu("Set as X")
+        set_x_actions = []
+        for k in range(1, max(max_x_idx, max_y_idx) + 2):
+            act = set_x_menu.addAction(f"X{k}")
+            set_x_actions.append((act, f"X{k}"))
+        set_x_menu.addSeparator()
+        set_x_custom = set_x_menu.addAction("Custom index…")
+        set_y_menu = menu.addMenu("Set as Y")
+        set_y_actions = []
+        for k in range(1, max(max_x_idx, max_y_idx) + 2):
+            act = set_y_menu.addAction(f"Y{k}")
+            set_y_actions.append((act, f"Y{k}"))
+        set_y_menu.addSeparator()
+        set_y_custom = set_y_menu.addAction("Custom index…")
+        clear_xy = menu.addAction("Clear X/Y")
+        menu.addSeparator()
+        plot_submenu = menu.addMenu("Quick plot selection")
+        plot_line = plot_submenu.addAction("Line")
+        plot_scatter = plot_submenu.addAction("Scatter")
+        plot_both = plot_submenu.addAction("Line + Scatter")
+        menu.addSeparator()
+        add_col_act = menu.addAction("Add column…")
+        rm_col_act = menu.addAction("Remove column")
+        all_user = all(
+            (c is not None and not c.is_channel)
+            for c in (m.column_at(i) for i in cols)
+        )
+        rm_col_act.setEnabled(all_user)
+        if not all_user:
+            rm_col_act.setText("Remove column  (only user columns)")
+        chosen = menu.exec_(global_pos)
+        if chosen is None:
+            return
+        if chosen is plot_picker:
+            _open_plot_picker_dialog(app, parent_window, m)
+            return
+        for act, role_str in set_x_actions:
+            if chosen is act:
+                for c in cols:
+                    m.set_column_role(c, role_str)
+                return
+        for act, role_str in set_y_actions:
+            if chosen is act:
+                for c in cols:
+                    m.set_column_role(c, role_str)
+                return
+        if chosen is set_x_custom or chosen is set_y_custom:
+            prefix = "X" if chosen is set_x_custom else "Y"
+            k, ok = QInputDialog.getInt(
+                parent_window, f"Set as {prefix}k",
+                f"Pair index for the {prefix} role:", 1, 1, 99, 1,
+            )
+            if ok:
+                role_str = f"{prefix}{int(k)}"
+                for c in cols:
+                    m.set_column_role(c, role_str)
+            return
+        if chosen is clear_xy:
+            for c in cols:
+                m.set_column_role(c, "")
+        elif chosen is plot_line:
+            _do_plot("line", cols)
+        elif chosen is plot_scatter:
+            _do_plot("scatter", cols)
+        elif chosen is plot_both:
+            _do_plot("both", cols)
+        elif chosen is add_col_act:
+            _prompt_add_column()
+        elif chosen is rm_col_act:
+            _on_remove_column()
+
+    def _show_body_context_menu(global_pos) -> None:
+        m = state["model"]
+        if m is None:
+            return
+        menu = QMenu(table)
+        plot_picker = menu.addAction("📊 Plot…  (multi-column picker)")
+        menu.addSeparator()
+        insert_act = menu.addAction("Insert row above")
+        append_act = menu.addAction("Append row")
+        delete_act = menu.addAction("Delete rows")
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy")
+        copy_act.setShortcut(QKeySequence.Copy)
+        paste_act = menu.addAction("Paste")
+        paste_act.setShortcut(QKeySequence.Paste)
+        delete_act.setEnabled(bool(_selected_data_rows()))
+        chosen = menu.exec_(global_pos)
+        if chosen is None:
+            return
+        if chosen is plot_picker:
+            _open_plot_picker_dialog(app, parent_window, m)
+        elif chosen is insert_act:
+            _on_insert_row()
+        elif chosen is append_act:
+            _on_append_row()
+        elif chosen is delete_act:
+            _on_delete_rows()
+        elif chosen is copy_act:
+            _on_copy()
+        elif chosen is paste_act:
+            _on_paste()
+
+    table.customContextMenuRequested.connect(
+        lambda pos: _show_body_context_menu(table.viewport().mapToGlobal(pos))
+    )
+    table.horizontalHeader().customContextMenuRequested.connect(
+        lambda pos: _show_header_context_menu(
+            table.horizontalHeader().mapToGlobal(pos), header_pos=pos,
+        )
+    )
+    QShortcut(QKeySequence.Copy, table, activated=_on_copy)
+    QShortcut(QKeySequence.Paste, table, activated=_on_paste)
+
+    return widget, model
+
+
+def _open_workspace_window(app) -> None:
+    """Open the OriginLab-style MDI workspace.
+
+    Each loaded TDMS file opens as its own subwindow inside a single big
+    "Data workspace" QMainWindow, and plots opened from a book also land
+    as subwindows in the same MDI area. The workspace lets the user
+    tile, cascade or independently resize / move / minimise every data
+    sheet and graph.
+    """
+    from PyQt5.QtWidgets import (
+        QMainWindow,
+        QMdiArea,
+        QMdiSubWindow,
+        QMessageBox,
+        QToolBar,
+    )
+
+    existing = getattr(app, "_data_fit_workspace", None)
+    if existing is not None:
+        try:
+            if existing.isVisible():
+                existing.raise_()
+                existing.activateWindow()
+                return
+        except RuntimeError:
+            app._data_fit_workspace = None
+
+    books = _data_fit_get_books(app)
+    bootstrap = getattr(app, "data_fit_controller", None)
+    if not books and bootstrap is not None and bootstrap.tdms_path:
+        books.append(bootstrap)
+    if not books:
+        QMessageBox.information(
+            app, "Workspace",
+            "Load a recording with 'Load file…' first.",
+        )
+        return
+
+    win = QMainWindow(app)
+    win.setWindowTitle("Data workspace — fitting")
+    win.resize(1280, 820)
+    win.setWindowFlags(win.windowFlags() | Qt.Window)
+    win.setAttribute(Qt.WA_DeleteOnClose, False)
+
+    mdi = QMdiArea()
+    mdi.setActivationOrder(QMdiArea.StackingOrder)
+    mdi.setTabsClosable(False)
+    win.setCentralWidget(mdi)
+
+    tb = QToolBar("Workspace")
+    tb.setMovable(False)
+    win.addToolBar(tb)
+
+    act_load = tb.addAction("📂 Load file…")
+    act_load.setToolTip("Load another TDMS recording — it appears as a new book "
+                        "subwindow in this workspace.")
+    tb.addSeparator()
+    act_tile = tb.addAction("🪟 Tile")
+    act_tile.setToolTip("Arrange every subwindow side-by-side, filling the workspace.")
+    act_cascade = tb.addAction("📚 Cascade")
+    act_cascade.setToolTip("Stack every subwindow with their title bars showing.")
+    act_close_plots = tb.addAction("✕ Close all plots")
+    act_close_plots.setToolTip("Close every plot subwindow; books stay open.")
+    tb.addSeparator()
+    tabs_act = tb.addAction("Tabs view")
+    tabs_act.setCheckable(True)
+    tabs_act.setToolTip(
+        "Switch between sub-window view (free move/resize) and tabbed "
+        "view (one document at a time).",
+    )
+
+    def _on_tabs_toggled(checked: bool) -> None:
+        if checked:
+            mdi.setViewMode(QMdiArea.TabbedView)
+        else:
+            mdi.setViewMode(QMdiArea.SubWindowView)
+
+    tabs_act.toggled.connect(_on_tabs_toggled)
+
+    # Persistent state on the app: the workspace window, its MDI area,
+    # and the list of book subwindows (so we can match a controller back
+    # to its subwindow when the user "Load file…"s a new TDMS).
+    app._data_fit_workspace = win
+    app._data_fit_workspace_mdi = mdi
+    app._data_fit_workspace_book_subs = {}  # id(controller) -> QMdiSubWindow
+
+    def _add_book_subwindow(ctrl) -> None:
+        """Create one subwindow per book."""
+        if id(ctrl) in app._data_fit_workspace_book_subs:
+            sub = app._data_fit_workspace_book_subs[id(ctrl)]
+            sub.show()
+            sub.raise_()
+            return
+        sub = QMdiSubWindow()
+        sub.setAttribute(Qt.WA_DeleteOnClose, False)
+        sub.setProperty("book_subwindow", True)
+        title = (f"📘 {os.path.basename(ctrl.tdms_path)}"
+                 if ctrl.tdms_path else "📘 (empty)")
+        sub.setWindowTitle(title)
+        widget, model = _build_book_widget(app, ctrl, sub)
+        sub.setWidget(widget)
+        mdi.addSubWindow(sub)
+        sub.resize(720, 520)
+        sub.show()
+        app._data_fit_workspace_book_subs[id(ctrl)] = sub
+
+        def _on_close(_e=None, _ctrl=ctrl, _sub=sub):
+            # Hide the subwindow on Close instead of destroying it so the
+            # underlying controller keeps its data; the user can re-open
+            # via the Window menu (or just by loading the same file).
+            _sub.hide()
+            return True
+
+        # The native close button on the subwindow title bar fires
+        # closeEvent; install a filter that just hides instead of
+        # destroying. Using a lambda avoids subclassing QMdiSubWindow.
+        old_close = sub.closeEvent
+
+        def _filter_close(event):
+            event.ignore()
+            sub.hide()
+
+        sub.closeEvent = _filter_close
+
+    for ctrl in books:
+        _add_book_subwindow(ctrl)
+
+    def _close_all_plots() -> None:
+        for sub in list(mdi.subWindowList()):
+            if sub.property("book_subwindow"):
+                continue
+            if sub.property("plot_subwindow"):
+                sub.close()
+
+    act_close_plots.triggered.connect(_close_all_plots)
+
+    def _on_load_file() -> None:
+        # Use the existing app-wide loader; it appends to data_fit_books.
+        before = list(books)
+        if hasattr(app, "data_fitting_open_file"):
+            app.data_fitting_open_file()
+        # Add subwindows for any newly-appended books.
+        for ctrl in books:
+            if ctrl not in before:
+                _add_book_subwindow(ctrl)
+
+    act_load.triggered.connect(_on_load_file)
+
+    act_tile.triggered.connect(mdi.tileSubWindows)
+    act_cascade.triggered.connect(mdi.cascadeSubWindows)
+
+    # Default arrangement: cascade so titles are visible.
+    QTimer = __import__("PyQt5.QtCore", fromlist=["QTimer"]).QTimer
+    QTimer.singleShot(0, mdi.cascadeSubWindows)
+
+    win.show()
+    win.raise_()
+    win.activateWindow()
 
 
 def _open_data_table_dialog(app) -> None:
