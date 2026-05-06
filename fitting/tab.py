@@ -6308,6 +6308,40 @@ def _data_book_column_letter(idx: int) -> str:
             return s
 
 
+def _normalize_plot_role(role: str):
+    """Validate / canonicalise a plot-role string.
+
+    Returns ``None`` if invalid. ``""`` means "no role". Bare ``X``/``Y`` are
+    accepted as ``X1``/``Y1`` aliases. Indexed forms are ``X1``, ``Y2`` …
+    ``X99`` / ``Y99`` (max two digits is plenty for a workbook).
+    """
+    s = (role or "").strip().upper()
+    if not s:
+        return ""
+    if s in ("X", "Y"):
+        return s + "1"
+    if len(s) >= 2 and s[0] in ("X", "Y") and s[1:].isdigit():
+        idx = int(s[1:])
+        if 1 <= idx <= 99:
+            return f"{s[0]}{idx}"
+    return None
+
+
+def _plot_role_index(role: str) -> int:
+    """Return the ``k`` in ``Xk``/``Yk``. ``X`` / ``Y`` map to 1; "" to 0."""
+    s = (role or "").strip().upper()
+    if not s:
+        return 0
+    if s in ("X", "Y"):
+        return 1
+    if len(s) >= 2 and s[0] in ("X", "Y") and s[1:].isdigit():
+        try:
+            return int(s[1:])
+        except ValueError:
+            return 0
+    return 0
+
+
 def _data_book_formula_namespace(columns) -> dict:
     """Build the eval namespace used by the F(x)= row.
 
@@ -6587,6 +6621,37 @@ class _DataBookModel(QAbstractTableModel):
         self._persist_user_columns()
         return new_col
 
+    def add_user_column_with_data(self, *, name: str, data, formula: str = ""):
+        """Like ``add_user_column`` but seeded with an explicit float array.
+
+        Used by the Calculus / Smooth / Interpolate dialogs which compute the
+        column data themselves and just want to commit it as a fresh
+        user-editable column.
+        """
+        idx = len(self._columns)
+        letter = _data_book_column_letter(idx)
+        clean = (name or "").strip() or f"Col_{letter}"
+        if any(c.name == clean for c in self._columns):
+            base = clean
+            k = 2
+            while any(c.name == f"{base}_{k}" for c in self._columns):
+                k += 1
+            clean = f"{base}_{k}"
+        arr = np.asarray(data, dtype=float).copy()
+        new_col = _DataBookColumn(
+            letter=letter, name=clean, data=arr,
+            formula=(formula or "").strip(),
+        )
+        self.beginInsertColumns(QModelIndex(), idx, idx)
+        self._columns.append(new_col)
+        self.endInsertColumns()
+        # Selectively notify so the table grows enough rows to show longer
+        # arrays (interpolation can produce more points than the source).
+        self.beginResetModel()
+        self.endResetModel()
+        self._persist_user_columns()
+        return new_col
+
     def remove_column_at(self, idx: int) -> bool:
         if not (0 <= idx < len(self._columns)):
             return False
@@ -6607,17 +6672,21 @@ class _DataBookModel(QAbstractTableModel):
         return self._apply_formula(col)
 
     def set_column_role(self, col_idx: int, role: str) -> bool:
-        """Tag a column as ``X``, ``Y``, or unset (``""``).
+        """Tag a column as ``X``/``Xk`` / ``Y``/``Yk``, or unset (``""``).
 
-        Channel columns persist on ``controller.column_roles`` keyed by source
-        name (or ``"__time__"`` for the time column); user columns persist via
+        ``X`` and ``Y`` are accepted as aliases for ``X1`` / ``Y1``. Indexed
+        forms (``X1``, ``Y2``, ``X3``, …) let the user pair multiple X/Y
+        columns: a ``Yk`` column is plotted against the ``Xk`` column with
+        the same index. Channel columns persist on
+        ``controller.column_roles`` keyed by source name (or ``"__time__"``
+        for the time column); user columns persist via
         ``_persist_user_columns`` so reopening the dialog restores the tag.
         """
         col = self.column_at(col_idx)
         if col is None:
             return False
-        role = (role or "").upper().strip()
-        if role not in ("X", "Y", ""):
+        role = _normalize_plot_role(role)
+        if role is None:
             return False
         col.plot_role = role
         controller = getattr(self._app, "data_fit_controller", None)
@@ -6742,13 +6811,19 @@ def _build_plot_specs_from_selection(model, selected_cols):
     """Resolve a list of selected columns into ``(specs, error)``.
 
     ``specs`` is a list of ``(x_label, x_array, y_label, y_array)`` tuples ready
-    to feed a plot. X axis precedence:
+    to feed a plot. The model supports multiple X/Y pairs via indexed roles:
+    columns tagged ``Y1`` are plotted against ``X1``, ``Y2`` against ``X2``, …
 
-    1. The first column among the selection that is tagged ``X``.
-    2. Otherwise the first column in the whole book tagged ``X``.
-    3. Otherwise — when more than one column is selected — the first selected
-       column is treated as X and the rest as Y.
-    4. Otherwise (single untagged selection) the row index becomes X.
+    Resolution rules (per Y column):
+
+    1. A selected ``Yk`` column is plotted against the first ``Xk`` column
+       found anywhere in the book (selection takes precedence over the rest
+       of the book when both have ``Xk`` columns).
+    2. A selected untyped column falls back to the first ``X`` / ``X1``
+       column in the selection, then in the book. If none exists and there
+       are at least two untyped columns selected, the first untyped column
+       becomes X and the rest are treated as Y.
+    3. If still no X column is available, the row index (1, 2, 3, …) is used.
     """
     if not selected_cols:
         return [], "Select at least one column to plot."
@@ -6757,47 +6832,73 @@ def _build_plot_specs_from_selection(model, selected_cols):
     if not cols:
         return [], "Selection holds no valid columns."
 
-    sel_x = [c for c in cols if c.plot_role == "X"]
-    sel_y = [c for c in cols if c.plot_role == "Y"]
-    sel_untyped = [c for c in cols if not c.plot_role]
+    def _x_for_index(k: int):
+        """Find the ``Xk`` column — selection first, then full book."""
+        for c in cols:
+            if _plot_role_index(c.plot_role) == k and (c.plot_role or "").upper().startswith("X"):
+                return c
+        for c in model.columns:
+            if _plot_role_index(c.plot_role) == k and (c.plot_role or "").upper().startswith("X"):
+                return c
+        return None
 
-    if sel_x:
-        x_col = sel_x[0]
-        y_cols = [c for c in (sel_y + sel_untyped) if c is not x_col]
-    else:
-        book_x = [c for c in model.columns if c.plot_role == "X"]
-        if book_x:
-            x_col = book_x[0]
-            y_cols = [c for c in (sel_y + sel_untyped) if c is not x_col]
-        elif len(cols) >= 2:
-            x_col = cols[0]
-            y_cols = [c for c in cols[1:] if c is not x_col]
+    # Bucket selected columns by role.
+    sel_y_by_idx: dict[int, list] = {}
+    sel_x_by_idx: dict[int, list] = {}
+    sel_untyped: list = []
+    for c in cols:
+        role = (c.plot_role or "").upper()
+        if role.startswith("Y"):
+            sel_y_by_idx.setdefault(_plot_role_index(role), []).append(c)
+        elif role.startswith("X"):
+            sel_x_by_idx.setdefault(_plot_role_index(role), []).append(c)
         else:
-            x_col = None  # plot vs row index
-            y_cols = list(cols)
+            sel_untyped.append(c)
 
-    if not y_cols:
-        return [], "Selection has no Y columns to plot."
+    # Fallback X for untyped selections: prefer X1 from the selection, then
+    # from the full book, then promote the first untyped column.
+    fallback_x = _x_for_index(1)
+    promoted_untyped: list = list(sel_untyped)
+    if fallback_x is None and len(promoted_untyped) >= 2:
+        fallback_x = promoted_untyped[0]
+        promoted_untyped = promoted_untyped[1:]
+    elif fallback_x in promoted_untyped:
+        promoted_untyped = [c for c in promoted_untyped if c is not fallback_x]
 
-    if x_col is None:
-        n = max((len(c.data) for c in y_cols), default=0)
-        if n == 0:
-            return [], "Selected columns are empty."
-        x_arr = np.arange(1, n + 1, dtype=float)
-        x_label = "Row"
-    else:
-        x_arr = np.asarray(x_col.data, dtype=float)
-        x_label = x_col.name or x_col.letter
+    specs: list = []
 
-    specs = []
-    for y in y_cols:
-        y_arr = np.asarray(y.data, dtype=float)
+    def _push(x_col, y_col) -> None:
+        if x_col is None:
+            n = int(np.asarray(y_col.data, dtype=float).size)
+            if n <= 0:
+                return
+            x_arr = np.arange(1, n + 1, dtype=float)
+            x_label = "Row"
+        else:
+            x_arr = np.asarray(x_col.data, dtype=float)
+            x_label = x_col.name or x_col.letter
+        y_arr = np.asarray(y_col.data, dtype=float)
         n = int(min(x_arr.size, y_arr.size))
         if n <= 0:
-            continue
-        specs.append((x_label, x_arr[:n], y.name or y.letter, y_arr[:n]))
+            return
+        specs.append((x_label, x_arr[:n], y_col.name or y_col.letter, y_arr[:n]))
+
+    # Indexed Yk selections — pair with their Xk.
+    for k in sorted(sel_y_by_idx):
+        x_col = _x_for_index(k)
+        # If the user selected an Yk but no matching Xk exists, fall back to
+        # X1 / promoted untyped X / row index — same precedence as untyped.
+        if x_col is None:
+            x_col = fallback_x
+        for y in sel_y_by_idx[k]:
+            _push(x_col, y)
+
+    # Untyped selections plotted against the fallback X.
+    for y in promoted_untyped:
+        _push(fallback_x, y)
+
     if not specs:
-        return [], "Selected columns produced no plottable rows."
+        return [], "Selection has no Y columns to plot."
     return specs, ""
 
 
@@ -6805,22 +6906,125 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     """Open a non-modal plot window with the given (x, y) specs.
 
     ``draw_mode`` is one of ``"line"``, ``"scatter"``, ``"both"``. The window
-    is kept alive on ``app._data_fit_book_plot_windows`` so the user can have
-    several open at once without them being garbage collected.
+    has an OriginLab-style toolbar (zoom in/out, autoscale, X/Y log toggles,
+    crosshair, marker/line toggle, copy-image, export-image, export-data,
+    legend) and remembers its draw mode so the user can flip between
+    line / scatter / both without reopening. The window is kept alive on
+    ``app._data_fit_book_plot_windows`` so the user can have several open at
+    once without them being garbage collected.
     """
-    from PyQt5.QtWidgets import QDialog, QHBoxLayout, QPushButton, QVBoxLayout
+    from PyQt5.QtWidgets import (
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QDialog,
+        QFileDialog,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QToolButton,
+        QVBoxLayout,
+    )
 
     dlg = QDialog(app)
     dlg.setWindowTitle(title)
-    dlg.resize(720, 540)
+    dlg.resize(820, 600)
     dlg.setModal(False)
     layout = QVBoxLayout(dlg)
 
+    # --- toolbar --------------------------------------------------------
+    toolbar = QHBoxLayout()
+    toolbar.setSpacing(2)
+
+    def _toolbtn(text: str, tip: str, *, checkable: bool = False) -> QToolButton:
+        b = QToolButton()
+        b.setText(text)
+        b.setToolTip(tip)
+        b.setCheckable(checkable)
+        b.setAutoRaise(True)
+        return b
+
+    btn_autorange = _toolbtn(
+        "⇲ Auto",
+        "Autoscale both axes to the data extent (also: double-click the plot).",
+    )
+    btn_zoom_in = _toolbtn("＋", "Zoom in (10 %).")
+    btn_zoom_out = _toolbtn("－", "Zoom out (10 %).")
+    btn_zoom_x_in = _toolbtn("X+", "Zoom X axis in.")
+    btn_zoom_x_out = _toolbtn("X−", "Zoom X axis out.")
+    btn_zoom_y_in = _toolbtn("Y+", "Zoom Y axis in.")
+    btn_zoom_y_out = _toolbtn("Y−", "Zoom Y axis out.")
+    btn_log_x = _toolbtn("log X", "Toggle log X axis.", checkable=True)
+    btn_log_y = _toolbtn("log Y", "Toggle log Y axis.", checkable=True)
+    btn_grid = _toolbtn("Grid", "Toggle grid.", checkable=True)
+    btn_grid.setChecked(True)
+    btn_legend = _toolbtn("Legend", "Toggle legend.", checkable=True)
+    btn_legend.setChecked(True)
+    btn_crosshair = _toolbtn(
+        "✛ Crosshair",
+        "Crosshair cursor with X / Y readout in the status line.",
+        checkable=True,
+    )
+
+    style_lbl = QLabel("Draw:")
+    style_cb = QComboBox()
+    style_cb.addItems(["Line", "Scatter", "Line + Scatter"])
+    if draw_mode == "scatter":
+        style_cb.setCurrentIndex(1)
+    elif draw_mode == "both":
+        style_cb.setCurrentIndex(2)
+    else:
+        style_cb.setCurrentIndex(0)
+    style_cb.setToolTip(
+        "Switch between line, scatter, and combined display without reopening "
+        "the plot.",
+    )
+
+    btn_copy = _toolbtn(
+        "📋 Copy",
+        "Copy the plot as an image to the clipboard.",
+    )
+    btn_export_img = _toolbtn(
+        "🖼 PNG",
+        "Save the plot as a PNG image.",
+    )
+    btn_export_data = _toolbtn(
+        "↪ CSV",
+        "Save the plotted data as a CSV file (one Y column per series).",
+    )
+    btn_reset = _toolbtn(
+        "↺ Reset",
+        "Restore the original autoscale view.",
+    )
+
+    for w in (
+        btn_autorange, btn_reset,
+        btn_zoom_in, btn_zoom_out,
+        btn_zoom_x_in, btn_zoom_x_out,
+        btn_zoom_y_in, btn_zoom_y_out,
+        btn_log_x, btn_log_y,
+        btn_grid, btn_legend, btn_crosshair,
+        style_lbl, style_cb,
+        btn_copy, btn_export_img, btn_export_data,
+    ):
+        toolbar.addWidget(w)
+    toolbar.addStretch()
+    layout.addLayout(toolbar)
+
+    # --- plot widget ----------------------------------------------------
     plot = pg.PlotWidget()
     plot.setBackground("w")
     plot.showGrid(x=True, y=True, alpha=0.25)
+    # PyQtGraph already supports mouse-wheel zoom and right-drag scaling out
+    # of the box; enable both axes explicitly so the toolbar buttons stay in
+    # sync with mouse interaction.
+    plot.getPlotItem().getViewBox().setMouseEnabled(x=True, y=True)
     legend = plot.addLegend(offset=(10, 10))
     layout.addWidget(plot, stretch=1)
+
+    status = QLabel(" ")
+    status.setStyleSheet("color: #555; font-size: 11px;")
+    layout.addWidget(status)
 
     common_x_label = plot_specs[0][0] if plot_specs else ""
     plot.setLabel("bottom", common_x_label)
@@ -6829,35 +7033,207 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     else:
         plot.setLabel("left", "Y")
 
-    for i, (_xlabel, x_arr, y_label, y_arr) in enumerate(plot_specs):
-        color = _BOOK_PLOT_COLORS[i % len(_BOOK_PLOT_COLORS)]
-        # Drop NaNs/infs so pyqtgraph doesn't break the line; non-finite mask.
-        mask = np.isfinite(x_arr) & np.isfinite(y_arr)
-        if not np.any(mask):
-            continue
-        x_clean = x_arr[mask]
-        y_clean = y_arr[mask]
-        if draw_mode == "scatter":
-            plot.plot(
-                x_clean, y_clean, pen=None,
-                symbol="o", symbolSize=5,
-                symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color),
-                name=y_label,
-            )
-        elif draw_mode == "both":
-            plot.plot(
-                x_clean, y_clean, pen=pg.mkPen(color, width=1.2),
-                symbol="o", symbolSize=4,
-                symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color),
-                name=y_label,
-            )
-        else:  # "line"
-            plot.plot(
-                x_clean, y_clean, pen=pg.mkPen(color, width=1.5),
-                name=y_label,
-            )
+    drawn_items: list = []
 
-    # Bottom row with Close.
+    def _redraw(mode: str) -> None:
+        for it in drawn_items:
+            try:
+                plot.removeItem(it)
+            except Exception:
+                pass
+        drawn_items.clear()
+        for i, (_xlabel, x_arr, y_label, y_arr) in enumerate(plot_specs):
+            color = _BOOK_PLOT_COLORS[i % len(_BOOK_PLOT_COLORS)]
+            mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+            if not np.any(mask):
+                continue
+            x_clean = x_arr[mask]
+            y_clean = y_arr[mask]
+            if mode == "scatter":
+                item = plot.plot(
+                    x_clean, y_clean, pen=None,
+                    symbol="o", symbolSize=5,
+                    symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color),
+                    name=y_label,
+                )
+            elif mode == "both":
+                item = plot.plot(
+                    x_clean, y_clean, pen=pg.mkPen(color, width=1.2),
+                    symbol="o", symbolSize=4,
+                    symbolBrush=pg.mkColor(color), symbolPen=pg.mkColor(color),
+                    name=y_label,
+                )
+            else:  # line
+                item = plot.plot(
+                    x_clean, y_clean, pen=pg.mkPen(color, width=1.5),
+                    name=y_label,
+                )
+            drawn_items.append(item)
+
+    _redraw(draw_mode)
+    plot.enableAutoRange()
+    initial_x_range = plot.viewRange()[0]
+    initial_y_range = plot.viewRange()[1]
+
+    # --- toolbar wiring ------------------------------------------------
+    def _on_autorange() -> None:
+        plot.enableAutoRange()
+
+    def _on_reset() -> None:
+        plot.setXRange(*initial_x_range, padding=0)
+        plot.setYRange(*initial_y_range, padding=0)
+
+    def _scale_axis(axis: int, factor: float) -> None:
+        x_range, y_range = plot.viewRange()
+        rng = x_range if axis == 0 else y_range
+        center = 0.5 * (rng[0] + rng[1])
+        half = 0.5 * (rng[1] - rng[0]) * factor
+        if axis == 0:
+            plot.setXRange(center - half, center + half, padding=0)
+        else:
+            plot.setYRange(center - half, center + half, padding=0)
+
+    def _zoom_both(factor: float) -> None:
+        _scale_axis(0, factor)
+        _scale_axis(1, factor)
+
+    btn_autorange.clicked.connect(_on_autorange)
+    btn_reset.clicked.connect(_on_reset)
+    btn_zoom_in.clicked.connect(lambda: _zoom_both(0.8))
+    btn_zoom_out.clicked.connect(lambda: _zoom_both(1.25))
+    btn_zoom_x_in.clicked.connect(lambda: _scale_axis(0, 0.8))
+    btn_zoom_x_out.clicked.connect(lambda: _scale_axis(0, 1.25))
+    btn_zoom_y_in.clicked.connect(lambda: _scale_axis(1, 0.8))
+    btn_zoom_y_out.clicked.connect(lambda: _scale_axis(1, 1.25))
+
+    def _on_log_x(checked: bool) -> None:
+        plot.setLogMode(x=bool(checked), y=btn_log_y.isChecked())
+
+    def _on_log_y(checked: bool) -> None:
+        plot.setLogMode(x=btn_log_x.isChecked(), y=bool(checked))
+
+    btn_log_x.toggled.connect(_on_log_x)
+    btn_log_y.toggled.connect(_on_log_y)
+
+    def _on_grid(checked: bool) -> None:
+        plot.showGrid(x=checked, y=checked, alpha=0.25)
+
+    btn_grid.toggled.connect(_on_grid)
+
+    def _on_legend(checked: bool) -> None:
+        legend.setVisible(bool(checked))
+
+    btn_legend.toggled.connect(_on_legend)
+
+    style_cb.currentIndexChanged.connect(
+        lambda idx: _redraw(("line", "scatter", "both")[idx])
+    )
+
+    # --- crosshair ------------------------------------------------------
+    v_line = pg.InfiniteLine(angle=90, movable=False,
+                             pen=pg.mkPen(color="#888", style=Qt.DashLine))
+    h_line = pg.InfiniteLine(angle=0, movable=False,
+                             pen=pg.mkPen(color="#888", style=Qt.DashLine))
+    v_line.setVisible(False)
+    h_line.setVisible(False)
+    plot.addItem(v_line, ignoreBounds=True)
+    plot.addItem(h_line, ignoreBounds=True)
+
+    proxy_state: dict = {"proxy": None}
+
+    def _on_mouse_moved(evt) -> None:
+        try:
+            pos = evt[0]
+        except (TypeError, IndexError):
+            pos = evt
+        scene = plot.getPlotItem().scene() if plot.getPlotItem() else None
+        if scene is None or not scene.sceneRect().contains(pos):
+            return
+        view_pt = plot.getPlotItem().vb.mapSceneToView(pos)
+        x = float(view_pt.x())
+        y = float(view_pt.y())
+        v_line.setPos(x)
+        h_line.setPos(y)
+        status.setText(f"  X = {x:.6g}    Y = {y:.6g}")
+
+    def _on_crosshair(checked: bool) -> None:
+        v_line.setVisible(bool(checked))
+        h_line.setVisible(bool(checked))
+        if checked and proxy_state["proxy"] is None:
+            proxy_state["proxy"] = pg.SignalProxy(
+                plot.scene().sigMouseMoved, rateLimit=60, slot=_on_mouse_moved,
+            )
+        elif not checked:
+            status.setText(" ")
+
+    btn_crosshair.toggled.connect(_on_crosshair)
+
+    # --- export / copy --------------------------------------------------
+    def _grab_pixmap():
+        return plot.grab()
+
+    def _on_copy() -> None:
+        try:
+            QApplication.clipboard().setPixmap(_grab_pixmap())
+            status.setText("  Plot copied to clipboard.")
+        except Exception as exc:
+            status.setText(f"  Copy failed: {exc}")
+
+    btn_copy.clicked.connect(_on_copy)
+
+    def _on_export_img() -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            dlg, "Save plot as image", title.replace(" ", "_") + ".png",
+            "PNG image (*.png);;JPEG image (*.jpg *.jpeg)",
+        )
+        if not path:
+            return
+        try:
+            _grab_pixmap().save(path)
+            status.setText(f"  Saved: {path}")
+        except Exception as exc:
+            status.setText(f"  Save failed: {exc}")
+
+    btn_export_img.clicked.connect(_on_export_img)
+
+    def _on_export_data() -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            dlg, "Save plot data as CSV",
+            title.replace(" ", "_") + ".csv",
+            "CSV file (*.csv);;Text file (*.txt)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                # Multi-spec series are written as a wide table — each X/Y
+                # pair gets two columns, padded with empty cells when their
+                # lengths differ. This mirrors how OriginLab exports a graph.
+                heads: list[str] = []
+                cols_data: list[np.ndarray] = []
+                max_n = 0
+                for x_label, x_arr, y_label, y_arr in plot_specs:
+                    heads.extend([x_label, y_label])
+                    cols_data.extend([np.asarray(x_arr, dtype=float),
+                                      np.asarray(y_arr, dtype=float)])
+                    max_n = max(max_n, x_arr.size, y_arr.size)
+                fh.write(",".join(heads) + "\n")
+                for r in range(max_n):
+                    row = []
+                    for c in cols_data:
+                        if r < c.size:
+                            v = c[r]
+                            row.append("" if not np.isfinite(v) else f"{v:.10g}")
+                        else:
+                            row.append("")
+                    fh.write(",".join(row) + "\n")
+            status.setText(f"  Saved: {path}")
+        except Exception as exc:
+            status.setText(f"  Save failed: {exc}")
+
+    btn_export_data.clicked.connect(_on_export_data)
+
+    # --- bottom row -----------------------------------------------------
     btns = QHBoxLayout()
     btns.addStretch()
     close = QPushButton("Close")
@@ -6880,6 +7256,730 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     dlg.raise_()
     dlg.activateWindow()
     return dlg
+
+
+# ---------------------------------------------------------------------------
+# Calculus / Smooth / Interpolate dialogs — each opens a small modal window
+# that picks columns and method options, computes the result, and commits it
+# as a new user column on the active book.
+# ---------------------------------------------------------------------------
+
+
+def _column_pick_options(model) -> list[tuple[str, int]]:
+    """``[(label, column-index), …]`` for every column in the model."""
+    out: list[tuple[str, int]] = []
+    for i, c in enumerate(model.columns):
+        role = f" [{c.plot_role}]" if c.plot_role else ""
+        out.append((f"{c.letter} — {c.name}{role}", i))
+    return out
+
+
+def _open_calculus_dialog(parent, model) -> None:
+    """Integrate or differentiate a Y(X) column pair into a new user column."""
+    from PyQt5.QtWidgets import (
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QLabel,
+        QLineEdit,
+        QMessageBox,
+        QRadioButton,
+        QButtonGroup,
+        QVBoxLayout,
+    )
+
+    if model is None or model.columnCount() == 0:
+        QMessageBox.information(parent, "Calculus",
+                                "No columns available — load a recording first.")
+        return
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Integrate / Differentiate")
+    dlg.setModal(True)
+    root = QVBoxLayout(dlg)
+
+    info = QLabel(
+        "Compute ∫Y dX or dY/dX from a chosen X / Y pair. The result is "
+        "stored as a new user column you can use elsewhere in the book "
+        "(formulas, plots, …)."
+    )
+    info.setWordWrap(True)
+    info.setStyleSheet("color: #444;")
+    root.addWidget(info)
+
+    op_box = QButtonGroup(dlg)
+    rb_int = QRadioButton("Integrate ∫ Y dX")
+    rb_diff = QRadioButton("Differentiate dY / dX")
+    rb_int.setChecked(True)
+    op_box.addButton(rb_int, 0)
+    op_box.addButton(rb_diff, 1)
+    root.addWidget(rb_int)
+    root.addWidget(rb_diff)
+
+    form = QFormLayout()
+    x_cb = QComboBox()
+    y_cb = QComboBox()
+    options = _column_pick_options(model)
+    for label, idx in options:
+        x_cb.addItem(label, idx)
+        y_cb.addItem(label, idx)
+    # Default: X1 → first X tagged column, Y1 → first Y tagged.
+    for i, c in enumerate(model.columns):
+        if (c.plot_role or "").upper().startswith("X"):
+            x_cb.setCurrentIndex(i)
+            break
+    for i, c in enumerate(model.columns):
+        if (c.plot_role or "").upper().startswith("Y"):
+            y_cb.setCurrentIndex(i)
+            break
+    form.addRow("X column:", x_cb)
+    form.addRow("Y column:", y_cb)
+
+    method_cb = QComboBox()
+    # Items are filled dynamically when op changes. Default = Integrate.
+    method_cb.addItem("Trapezoidal (cumulative)", "int_trapz")
+    method_cb.addItem("Simpson (cumulative, even spacing)", "int_simpson")
+    method_cb.addItem("Riemann sum (rectangular, left)", "int_riemann_left")
+    method_cb.addItem("Riemann sum (rectangular, right)", "int_riemann_right")
+    form.addRow("Method:", method_cb)
+
+    def _refill_methods() -> None:
+        method_cb.clear()
+        if rb_int.isChecked():
+            method_cb.addItem("Trapezoidal (cumulative)", "int_trapz")
+            method_cb.addItem("Simpson (cumulative, even spacing)", "int_simpson")
+            method_cb.addItem("Riemann sum (rectangular, left)", "int_riemann_left")
+            method_cb.addItem("Riemann sum (rectangular, right)", "int_riemann_right")
+        else:
+            method_cb.addItem("Central differences", "diff_central")
+            method_cb.addItem("Forward differences", "diff_forward")
+            method_cb.addItem("Backward differences", "diff_backward")
+            method_cb.addItem("Savitzky-Golay (1st derivative)", "diff_savgol")
+
+    rb_int.toggled.connect(lambda _on: _refill_methods())
+
+    sg_window_ed = QLineEdit("11")
+    sg_poly_ed = QLineEdit("3")
+    form.addRow("Savitzky-Golay window (odd ≥ poly+2):", sg_window_ed)
+    form.addRow("Savitzky-Golay polyorder:", sg_poly_ed)
+
+    name_ed = QLineEdit()
+    name_ed.setPlaceholderText("e.g. ∫B dA   or   dC/dA  (auto-named if blank)")
+    form.addRow("New column name:", name_ed)
+    root.addLayout(form)
+
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+    root.addWidget(btns)
+
+    if dlg.exec_() != QDialog.Accepted:
+        return
+
+    x_idx = x_cb.currentData()
+    y_idx = y_cb.currentData()
+    if x_idx is None or y_idx is None:
+        return
+    if x_idx == y_idx:
+        QMessageBox.warning(parent, "Calculus", "X and Y must be different columns.")
+        return
+    x_col = model.column_at(int(x_idx))
+    y_col = model.column_at(int(y_idx))
+    if x_col is None or y_col is None:
+        return
+    x = np.asarray(x_col.data, dtype=float)
+    y = np.asarray(y_col.data, dtype=float)
+    n = int(min(x.size, y.size))
+    if n < 2:
+        QMessageBox.warning(parent, "Calculus", "Need at least two paired points.")
+        return
+    x = x[:n]
+    y = y[:n]
+    mask = np.isfinite(x) & np.isfinite(y)
+    if mask.sum() < 2:
+        QMessageBox.warning(parent, "Calculus",
+                            "Selected pair has fewer than 2 finite points.")
+        return
+    x_f = x[mask]
+    y_f = y[mask]
+    order = np.argsort(x_f, kind="mergesort")
+    x_s = x_f[order]
+    y_s = y_f[order]
+
+    method_key = method_cb.currentData()
+    op_label = "∫" if rb_int.isChecked() else "d"
+
+    try:
+        if method_key == "int_trapz":
+            from scipy.integrate import cumulative_trapezoid
+            result_s = cumulative_trapezoid(y_s, x_s, initial=0.0)
+            label_default = f"∫ {y_col.name} d{x_col.name} (trapz)"
+        elif method_key == "int_simpson":
+            # Cumulative Simpson approximation: trapezoid on each pair, but
+            # we add a Simpson refinement for triples where possible.
+            from scipy.integrate import cumulative_trapezoid
+            try:
+                from scipy.integrate import cumulative_simpson  # scipy ≥ 1.12
+                result_s = cumulative_simpson(y_s, x=x_s, initial=0.0)
+            except Exception:
+                # Fallback: trapezoidal with a comment in the formula slot.
+                result_s = cumulative_trapezoid(y_s, x_s, initial=0.0)
+            label_default = f"∫ {y_col.name} d{x_col.name} (simpson)"
+        elif method_key == "int_riemann_left":
+            dx = np.diff(x_s)
+            inc = y_s[:-1] * dx
+            result_s = np.concatenate(([0.0], np.cumsum(inc)))
+            label_default = f"∫ {y_col.name} d{x_col.name} (Riemann L)"
+        elif method_key == "int_riemann_right":
+            dx = np.diff(x_s)
+            inc = y_s[1:] * dx
+            result_s = np.concatenate(([0.0], np.cumsum(inc)))
+            label_default = f"∫ {y_col.name} d{x_col.name} (Riemann R)"
+        elif method_key == "diff_central":
+            result_s = np.gradient(y_s, x_s, edge_order=2)
+            label_default = f"d{y_col.name}/d{x_col.name} (central)"
+        elif method_key == "diff_forward":
+            dx = np.diff(x_s)
+            dy = np.diff(y_s)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                d = np.where(dx != 0, dy / dx, np.nan)
+            result_s = np.concatenate((d, [d[-1] if d.size else np.nan]))
+            label_default = f"d{y_col.name}/d{x_col.name} (forward)"
+        elif method_key == "diff_backward":
+            dx = np.diff(x_s)
+            dy = np.diff(y_s)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                d = np.where(dx != 0, dy / dx, np.nan)
+            result_s = np.concatenate(([d[0] if d.size else np.nan], d))
+            label_default = f"d{y_col.name}/d{x_col.name} (backward)"
+        elif method_key == "diff_savgol":
+            from scipy.signal import savgol_filter
+            try:
+                win = int(sg_window_ed.text())
+                poly = int(sg_poly_ed.text())
+            except ValueError:
+                QMessageBox.warning(parent, "Calculus",
+                                    "Window and polyorder must be integers.")
+                return
+            if win < 3 or win % 2 == 0 or poly >= win:
+                QMessageBox.warning(parent, "Calculus",
+                                    "Savitzky-Golay window must be odd, ≥3, "
+                                    "and larger than polyorder.")
+                return
+            # Estimate spacing — use median dx (works on roughly uniform grids).
+            dx = np.median(np.diff(x_s))
+            if not np.isfinite(dx) or dx <= 0:
+                QMessageBox.warning(parent, "Calculus",
+                                    "Cannot estimate uniform spacing for "
+                                    "Savitzky-Golay.")
+                return
+            result_s = savgol_filter(y_s, window_length=win, polyorder=poly,
+                                     deriv=1, delta=dx, mode="interp")
+            label_default = f"d{y_col.name}/d{x_col.name} (S-G)"
+        else:
+            QMessageBox.warning(parent, "Calculus", "Unknown method.")
+            return
+    except Exception as exc:
+        QMessageBox.critical(parent, "Calculus", f"Computation failed:\n{exc}")
+        return
+
+    # Map the sorted result back onto the original (pre-sort, pre-mask) row
+    # order so the new column lines up with the source table.
+    out = np.full(n, np.nan, dtype=float)
+    masked_idx = np.where(mask)[0]
+    out[masked_idx[order]] = result_s
+
+    name = (name_ed.text().strip() or label_default)
+    col = model.add_user_column_with_data(name=name, data=out)
+    if col is not None:
+        QMessageBox.information(
+            parent, "Calculus",
+            f"Added column '{col.name}' ({op_label}) — "
+            f"{int(np.isfinite(out).sum())} valid samples.",
+        )
+
+
+def _open_smooth_dialog(parent, model) -> None:
+    """Apply a smoothing filter to a Y column. Result becomes a new column."""
+    from PyQt5.QtWidgets import (
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QLabel,
+        QLineEdit,
+        QMessageBox,
+        QStackedWidget,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    if model is None or model.columnCount() == 0:
+        QMessageBox.information(parent, "Smooth",
+                                "No columns available — load a recording first.")
+        return
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Smooth column")
+    dlg.setModal(True)
+    root = QVBoxLayout(dlg)
+
+    info = QLabel(
+        "Smooth one column using one of the available filters. The smoothed "
+        "result is added as a new user column; the original column is "
+        "untouched."
+    )
+    info.setWordWrap(True)
+    info.setStyleSheet("color: #444;")
+    root.addWidget(info)
+
+    form = QFormLayout()
+    src_cb = QComboBox()
+    for label, idx in _column_pick_options(model):
+        src_cb.addItem(label, idx)
+    # Default to first Y-tagged column or the second column overall.
+    for i, c in enumerate(model.columns):
+        if (c.plot_role or "").upper().startswith("Y"):
+            src_cb.setCurrentIndex(i)
+            break
+    else:
+        if model.columnCount() > 1:
+            src_cb.setCurrentIndex(1)
+    form.addRow("Source column:", src_cb)
+
+    filter_cb = QComboBox()
+    filter_cb.addItem("Savitzky-Golay (preserves shape)", "savgol")
+    filter_cb.addItem("Adaptive Ec-window (Savitzky-Golay, IEC-aware)", "adaptive")
+    filter_cb.addItem("Moving average (boxcar)", "moving_avg")
+    filter_cb.addItem("Median filter (outlier rejection)", "median")
+    filter_cb.addItem("Gaussian filter", "gaussian")
+    form.addRow("Filter:", filter_cb)
+
+    # Per-method parameter pages.
+    pages = QStackedWidget()
+
+    # Savitzky-Golay
+    sg_widget = QWidget()
+    sg_form = QFormLayout(sg_widget)
+    sg_window = QLineEdit("11")
+    sg_poly = QLineEdit("3")
+    sg_form.addRow("Window length (odd):", sg_window)
+    sg_form.addRow("Polynomial order:", sg_poly)
+    pages.addWidget(sg_widget)
+
+    # Adaptive
+    adapt_widget = QWidget()
+    adapt_form = QFormLayout(adapt_widget)
+    adapt_ec1 = QLineEdit("1e-7")
+    adapt_ec2 = QLineEdit("1e-6")
+    adapt_form.addRow("Ec1 (V or V/cm):", adapt_ec1)
+    adapt_form.addRow("Ec2 (V or V/cm):", adapt_ec2)
+    pages.addWidget(adapt_widget)
+
+    # Moving average
+    ma_widget = QWidget()
+    ma_form = QFormLayout(ma_widget)
+    ma_window = QLineEdit("5")
+    ma_form.addRow("Window length:", ma_window)
+    pages.addWidget(ma_widget)
+
+    # Median
+    med_widget = QWidget()
+    med_form = QFormLayout(med_widget)
+    med_window = QLineEdit("5")
+    med_form.addRow("Window length (odd):", med_window)
+    pages.addWidget(med_widget)
+
+    # Gaussian
+    g_widget = QWidget()
+    g_form = QFormLayout(g_widget)
+    g_sigma = QLineEdit("1.5")
+    g_form.addRow("σ (samples):", g_sigma)
+    pages.addWidget(g_widget)
+
+    filter_cb.currentIndexChanged.connect(pages.setCurrentIndex)
+    pages.setCurrentIndex(0)
+
+    name_ed = QLineEdit()
+    name_ed.setPlaceholderText("blank → '<source> smoothed (<filter>)'")
+    form.addRow("New column name:", name_ed)
+    root.addLayout(form)
+    root.addWidget(pages)
+
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+    root.addWidget(btns)
+
+    if dlg.exec_() != QDialog.Accepted:
+        return
+
+    src_idx = src_cb.currentData()
+    if src_idx is None:
+        return
+    src = model.column_at(int(src_idx))
+    if src is None:
+        return
+    y = np.asarray(src.data, dtype=float).copy()
+    if y.size < 3:
+        QMessageBox.warning(parent, "Smooth",
+                            "Source column has fewer than 3 samples.")
+        return
+
+    method = filter_cb.currentData()
+    method_label = filter_cb.currentText().split(" (")[0]
+    try:
+        if method == "savgol":
+            from scipy.signal import savgol_filter
+            win = int(sg_window.text())
+            poly = int(sg_poly.text())
+            if win < 3 or win % 2 == 0 or poly >= win:
+                raise ValueError("window must be odd ≥ 3 and > polyorder")
+            # Operate only on finite samples.
+            mask = np.isfinite(y)
+            out = y.copy()
+            if mask.sum() >= win:
+                out[mask] = savgol_filter(
+                    y[mask], window_length=win, polyorder=poly, mode="interp",
+                )
+        elif method == "adaptive":
+            ec1 = float(adapt_ec1.text())
+            ec2 = float(adapt_ec2.text())
+            mask = np.isfinite(y)
+            out = y.copy()
+            if mask.sum() >= 7:
+                out[mask] = adaptive_smooth_for_ec_window(y[mask], ec1, ec2)
+        elif method == "moving_avg":
+            win = int(ma_window.text())
+            if win < 1:
+                raise ValueError("window must be ≥ 1")
+            kernel = np.ones(win, dtype=float) / float(win)
+            mask = np.isfinite(y)
+            out = y.copy()
+            if mask.sum() >= win:
+                out[mask] = np.convolve(y[mask], kernel, mode="same")
+        elif method == "median":
+            from scipy.signal import medfilt
+            win = int(med_window.text())
+            if win < 1 or win % 2 == 0:
+                raise ValueError("window must be odd ≥ 1")
+            mask = np.isfinite(y)
+            out = y.copy()
+            if mask.sum() >= win:
+                out[mask] = medfilt(y[mask], kernel_size=win)
+        elif method == "gaussian":
+            from scipy.ndimage import gaussian_filter1d
+            sigma = float(g_sigma.text())
+            if sigma <= 0:
+                raise ValueError("σ must be > 0")
+            mask = np.isfinite(y)
+            out = y.copy()
+            if mask.sum() >= 3:
+                out[mask] = gaussian_filter1d(y[mask], sigma=sigma, mode="nearest")
+        else:
+            QMessageBox.warning(parent, "Smooth", "Unknown filter.")
+            return
+    except Exception as exc:
+        QMessageBox.critical(parent, "Smooth", f"Computation failed:\n{exc}")
+        return
+
+    name = (name_ed.text().strip()
+            or f"{src.name} smoothed ({method_label})")
+    col = model.add_user_column_with_data(name=name, data=out)
+    if col is not None:
+        QMessageBox.information(
+            parent, "Smooth",
+            f"Added column '{col.name}' from {src.name} via "
+            f"{method_label}.",
+        )
+
+
+def _open_interpolate_dialog(parent, model) -> None:
+    """Resample a Y(X) pair onto a new grid via several interpolation methods."""
+    from PyQt5.QtWidgets import (
+        QCheckBox,
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QLabel,
+        QLineEdit,
+        QMessageBox,
+        QRadioButton,
+        QButtonGroup,
+        QVBoxLayout,
+    )
+
+    if model is None or model.columnCount() == 0:
+        QMessageBox.information(parent, "Interpolate",
+                                "No columns available — load a recording first.")
+        return
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Interpolate column")
+    dlg.setModal(True)
+    root = QVBoxLayout(dlg)
+
+    info = QLabel(
+        "Resample a Y(X) pair onto a new grid. The new X grid and the "
+        "interpolated Y are added as two user columns; the originals are "
+        "untouched. Methods: linear, nearest, cubic spline, PCHIP "
+        "(monotone), Akima."
+    )
+    info.setWordWrap(True)
+    info.setStyleSheet("color: #444;")
+    root.addWidget(info)
+
+    form = QFormLayout()
+    x_cb = QComboBox()
+    y_cb = QComboBox()
+    for label, idx in _column_pick_options(model):
+        x_cb.addItem(label, idx)
+        y_cb.addItem(label, idx)
+    for i, c in enumerate(model.columns):
+        if (c.plot_role or "").upper().startswith("X"):
+            x_cb.setCurrentIndex(i)
+            break
+    for i, c in enumerate(model.columns):
+        if (c.plot_role or "").upper().startswith("Y"):
+            y_cb.setCurrentIndex(i)
+            break
+    form.addRow("X column:", x_cb)
+    form.addRow("Y column:", y_cb)
+
+    method_cb = QComboBox()
+    method_cb.addItem("Linear", "linear")
+    method_cb.addItem("Nearest neighbour", "nearest")
+    method_cb.addItem("Cubic spline (smooth, may overshoot)", "cubic")
+    method_cb.addItem("PCHIP (monotone, no overshoot)", "pchip")
+    method_cb.addItem("Akima (monotone-like, robust)", "akima")
+    method_cb.addItem("Quadratic", "quadratic")
+    form.addRow("Method:", method_cb)
+
+    extrap_cb = QComboBox()
+    extrap_cb.addItem("Clip outside (NaN)", "nan")
+    extrap_cb.addItem("Hold endpoints (constant extrapolation)", "hold")
+    extrap_cb.addItem("Extrapolate (use the method)", "extrap")
+    form.addRow("Outside source range:", extrap_cb)
+    root.addLayout(form)
+
+    grid_box = QButtonGroup(dlg)
+    rb_uniform = QRadioButton("Uniform grid: number of points")
+    rb_step = QRadioButton("Uniform grid: step size")
+    rb_target = QRadioButton("Use existing column as target X")
+    rb_uniform.setChecked(True)
+    grid_box.addButton(rb_uniform)
+    grid_box.addButton(rb_step)
+    grid_box.addButton(rb_target)
+    root.addWidget(rb_uniform)
+    root.addWidget(rb_step)
+    root.addWidget(rb_target)
+
+    grid_form = QFormLayout()
+    n_pts = QLineEdit("500")
+    grid_form.addRow("Number of points (uniform):", n_pts)
+    step_ed = QLineEdit("")
+    step_ed.setPlaceholderText("auto = (max-min) / (N-1)")
+    grid_form.addRow("Step size (uniform):", step_ed)
+    target_cb = QComboBox()
+    for label, idx in _column_pick_options(model):
+        target_cb.addItem(label, idx)
+    grid_form.addRow("Target X column:", target_cb)
+    range_min = QLineEdit("")
+    range_min.setPlaceholderText("auto = min of source X")
+    range_max = QLineEdit("")
+    range_max.setPlaceholderText("auto = max of source X")
+    grid_form.addRow("Min X (uniform):", range_min)
+    grid_form.addRow("Max X (uniform):", range_max)
+    root.addLayout(grid_form)
+
+    name_x_ed = QLineEdit()
+    name_x_ed.setPlaceholderText("blank → '<X> resampled'")
+    name_y_ed = QLineEdit()
+    name_y_ed.setPlaceholderText("blank → '<Y> interpolated (<method>)'")
+    end_form = QFormLayout()
+    end_form.addRow("New X column name:", name_x_ed)
+    end_form.addRow("New Y column name:", name_y_ed)
+    root.addLayout(end_form)
+
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+    root.addWidget(btns)
+
+    if dlg.exec_() != QDialog.Accepted:
+        return
+
+    x_idx = x_cb.currentData()
+    y_idx = y_cb.currentData()
+    if x_idx is None or y_idx is None or x_idx == y_idx:
+        QMessageBox.warning(parent, "Interpolate", "Pick distinct X and Y columns.")
+        return
+    x_col = model.column_at(int(x_idx))
+    y_col = model.column_at(int(y_idx))
+    if x_col is None or y_col is None:
+        return
+    x = np.asarray(x_col.data, dtype=float)
+    y = np.asarray(y_col.data, dtype=float)
+    n = int(min(x.size, y.size))
+    if n < 2:
+        QMessageBox.warning(parent, "Interpolate", "Need at least 2 paired samples.")
+        return
+    x = x[:n]
+    y = y[:n]
+    mask = np.isfinite(x) & np.isfinite(y)
+    if mask.sum() < 2:
+        QMessageBox.warning(parent, "Interpolate",
+                            "Pair has fewer than 2 finite samples.")
+        return
+    xs = x[mask]
+    ys = y[mask]
+    order = np.argsort(xs, kind="mergesort")
+    xs = xs[order]
+    ys = ys[order]
+    # Drop duplicate X values (keep mean Y) to allow cubic / pchip.
+    xs_unique, inv = np.unique(xs, return_inverse=True)
+    if xs_unique.size != xs.size:
+        ys_avg = np.zeros_like(xs_unique)
+        counts = np.zeros_like(xs_unique)
+        for i, k in enumerate(inv):
+            ys_avg[k] += ys[i]
+            counts[k] += 1
+        ys = ys_avg / np.maximum(counts, 1.0)
+        xs = xs_unique
+
+    # Build target X grid.
+    x_min_src = float(xs[0])
+    x_max_src = float(xs[-1])
+    try:
+        if rb_target.isChecked():
+            tgt_idx = target_cb.currentData()
+            if tgt_idx is None:
+                QMessageBox.warning(parent, "Interpolate",
+                                    "Choose a target column.")
+                return
+            tgt_col = model.column_at(int(tgt_idx))
+            if tgt_col is None:
+                return
+            tgt = np.asarray(tgt_col.data, dtype=float)
+            tgt = tgt[np.isfinite(tgt)]
+            if tgt.size < 1:
+                QMessageBox.warning(parent, "Interpolate",
+                                    "Target X column has no finite values.")
+                return
+            new_x = np.sort(tgt)
+        else:
+            r_min = (float(range_min.text())
+                     if range_min.text().strip() else x_min_src)
+            r_max = (float(range_max.text())
+                     if range_max.text().strip() else x_max_src)
+            if r_max <= r_min:
+                QMessageBox.warning(parent, "Interpolate",
+                                    "Max X must be greater than Min X.")
+                return
+            if rb_step.isChecked():
+                step_text = step_ed.text().strip()
+                if not step_text:
+                    QMessageBox.warning(parent, "Interpolate",
+                                        "Provide a step size.")
+                    return
+                step = float(step_text)
+                if step <= 0:
+                    QMessageBox.warning(parent, "Interpolate",
+                                        "Step must be > 0.")
+                    return
+                new_x = np.arange(r_min, r_max + 0.5 * step, step)
+            else:
+                k = int(n_pts.text())
+                if k < 2:
+                    QMessageBox.warning(parent, "Interpolate",
+                                        "Number of points must be ≥ 2.")
+                    return
+                new_x = np.linspace(r_min, r_max, k)
+    except ValueError:
+        QMessageBox.warning(parent, "Interpolate",
+                            "Could not parse one of the grid inputs.")
+        return
+
+    method = method_cb.currentData()
+    extrap = extrap_cb.currentData()
+    try:
+        if method == "linear":
+            new_y = np.interp(new_x, xs, ys, left=np.nan, right=np.nan)
+        elif method == "nearest":
+            from scipy.interpolate import interp1d
+            f = interp1d(xs, ys, kind="nearest",
+                         bounds_error=False,
+                         fill_value=(ys[0], ys[-1]) if extrap == "hold" else np.nan)
+            new_y = f(new_x)
+        elif method == "cubic":
+            from scipy.interpolate import CubicSpline
+            f = CubicSpline(xs, ys, extrapolate=(extrap == "extrap"))
+            new_y = f(new_x)
+        elif method == "pchip":
+            from scipy.interpolate import PchipInterpolator
+            f = PchipInterpolator(xs, ys, extrapolate=(extrap == "extrap"))
+            new_y = f(new_x)
+        elif method == "akima":
+            from scipy.interpolate import Akima1DInterpolator
+            f = Akima1DInterpolator(xs, ys)
+            new_y = f(new_x)
+            if extrap != "extrap":
+                outside = (new_x < xs[0]) | (new_x > xs[-1])
+                if extrap == "hold":
+                    new_y = np.where(new_x < xs[0], ys[0], new_y)
+                    new_y = np.where(new_x > xs[-1], ys[-1], new_y)
+                else:
+                    new_y = np.where(outside, np.nan, new_y)
+        elif method == "quadratic":
+            from scipy.interpolate import interp1d
+            f = interp1d(xs, ys, kind="quadratic",
+                         bounds_error=False,
+                         fill_value=(
+                             (ys[0], ys[-1]) if extrap == "hold"
+                             else (np.nan, np.nan)
+                         ))
+            new_y = f(new_x)
+        else:
+            QMessageBox.warning(parent, "Interpolate", "Unknown method.")
+            return
+    except Exception as exc:
+        QMessageBox.critical(parent, "Interpolate", f"Computation failed:\n{exc}")
+        return
+
+    # Linear leaves NaNs outside; honour the "hold" / "extrap" choice for it.
+    if method == "linear" and extrap != "nan":
+        if extrap == "hold":
+            new_y = np.where(new_x < xs[0], ys[0], new_y)
+            new_y = np.where(new_x > xs[-1], ys[-1], new_y)
+        elif extrap == "extrap":
+            # Linear extrapolation through the first/last segment.
+            slope_lo = (ys[1] - ys[0]) / (xs[1] - xs[0]) if xs.size >= 2 else 0.0
+            slope_hi = ((ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
+                        if xs.size >= 2 else 0.0)
+            below = new_x < xs[0]
+            above = new_x > xs[-1]
+            new_y = np.where(below, ys[0] + slope_lo * (new_x - xs[0]), new_y)
+            new_y = np.where(above, ys[-1] + slope_hi * (new_x - xs[-1]), new_y)
+
+    method_label = method_cb.currentText().split(" (")[0]
+    new_x_name = (name_x_ed.text().strip()
+                  or f"{x_col.name} resampled")
+    new_y_name = (name_y_ed.text().strip()
+                  or f"{y_col.name} interpolated ({method_label})")
+
+    # The two new columns may be longer/shorter than every existing column.
+    # ``add_user_column_with_data`` triggers a model reset so the table
+    # adapts.
+    col_x = model.add_user_column_with_data(name=new_x_name, data=new_x)
+    col_y = model.add_user_column_with_data(name=new_y_name, data=new_y)
+    if col_x is not None and col_y is not None:
+        QMessageBox.information(
+            parent, "Interpolate",
+            f"Added '{col_x.name}' and '{col_y.name}' "
+            f"({new_x.size} points, {method_label}).",
+        )
 
 
 def _build_data_book_columns(app) -> list:
@@ -7330,12 +8430,33 @@ def _open_data_table_dialog(app) -> None:
         "Re-evaluate the F(x)= formula of the selected columns against the "
         "current data.",
     )
+    calc_btn = QPushButton("Calculus…")
+    calc_btn.setToolTip(
+        "Open a dialog to integrate ∫Y dX (trapezoidal / Simpson / Riemann) "
+        "or differentiate dY/dX (central / forward / backward / "
+        "Savitzky-Golay) of any X / Y column pair.",
+    )
+    smooth_btn = QPushButton("Smooth…")
+    smooth_btn.setToolTip(
+        "Smooth a column using Savitzky-Golay, the IEC-aware adaptive "
+        "Ec-window filter, a moving average, a median filter, or a Gaussian "
+        "filter.",
+    )
+    interp_btn = QPushButton("Interpolate…")
+    interp_btn.setToolTip(
+        "Resample a Y(X) pair onto a new grid with linear, nearest, cubic, "
+        "PCHIP, Akima or quadratic interpolation. Generates two new "
+        "columns: the new X grid and the interpolated Y.",
+    )
     actions.addWidget(insert_btn)
     actions.addWidget(append_btn)
     actions.addWidget(delete_btn)
     actions.addWidget(add_col_btn)
     actions.addWidget(rm_col_btn)
     actions.addWidget(recalc_btn)
+    actions.addWidget(calc_btn)
+    actions.addWidget(smooth_btn)
+    actions.addWidget(interp_btn)
     actions.addStretch()
     close_btn = QPushButton("Close")
     actions.addWidget(close_btn)
@@ -7347,6 +8468,9 @@ def _open_data_table_dialog(app) -> None:
     add_col_btn.clicked.connect(_prompt_add_column)
     rm_col_btn.clicked.connect(_on_remove_column)
     recalc_btn.clicked.connect(_on_recalc_column)
+    calc_btn.clicked.connect(lambda: _open_calculus_dialog(dialog, state["model"]))
+    smooth_btn.clicked.connect(lambda: _open_smooth_dialog(dialog, state["model"]))
+    interp_btn.clicked.connect(lambda: _open_interpolate_dialog(dialog, state["model"]))
     close_btn.clicked.connect(dialog.accept)
 
     # --- right-click context menu (Set X/Y, Plot ▸ Line/Scatter/Both) ---
@@ -7394,8 +8518,37 @@ def _open_data_table_dialog(app) -> None:
         title_act = menu.addAction(sel_label)
         title_act.setEnabled(False)
         menu.addSeparator()
-        set_x = menu.addAction("Set as X")
-        set_y = menu.addAction("Set as Y")
+
+        # Highest existing X/Y index in the whole book — the "next" pair we
+        # offer is one above that so the user can keep building pairs.
+        max_x_idx = max(
+            (_plot_role_index(c.plot_role)
+             for c in m.columns
+             if (c.plot_role or "").upper().startswith("X")),
+            default=0,
+        )
+        max_y_idx = max(
+            (_plot_role_index(c.plot_role)
+             for c in m.columns
+             if (c.plot_role or "").upper().startswith("Y")),
+            default=0,
+        )
+        set_x_menu = menu.addMenu("Set as X")
+        set_x_actions: list = []
+        for k in range(1, max(max_x_idx, max_y_idx) + 2):
+            act = set_x_menu.addAction(f"X{k}")
+            set_x_actions.append((act, f"X{k}"))
+        set_x_menu.addSeparator()
+        set_x_custom = set_x_menu.addAction("Custom index…")
+
+        set_y_menu = menu.addMenu("Set as Y")
+        set_y_actions: list = []
+        for k in range(1, max(max_x_idx, max_y_idx) + 2):
+            act = set_y_menu.addAction(f"Y{k}")
+            set_y_actions.append((act, f"Y{k}"))
+        set_y_menu.addSeparator()
+        set_y_custom = set_y_menu.addAction("Custom index…")
+
         clear_xy = menu.addAction("Clear X/Y")
         menu.addSeparator()
         plot_menu = menu.addMenu("Plot")
@@ -7405,13 +8558,29 @@ def _open_data_table_dialog(app) -> None:
         chosen = menu.exec_(global_pos)
         if chosen is None:
             return
-        if chosen is set_x:
-            for c in cols:
-                m.set_column_role(c, "X")
-        elif chosen is set_y:
-            for c in cols:
-                m.set_column_role(c, "Y")
-        elif chosen is clear_xy:
+        for act, role_str in set_x_actions:
+            if chosen is act:
+                for c in cols:
+                    m.set_column_role(c, role_str)
+                return
+        for act, role_str in set_y_actions:
+            if chosen is act:
+                for c in cols:
+                    m.set_column_role(c, role_str)
+                return
+        if chosen is set_x_custom or chosen is set_y_custom:
+            from PyQt5.QtWidgets import QInputDialog
+            prefix = "X" if chosen is set_x_custom else "Y"
+            k, ok = QInputDialog.getInt(
+                dialog, f"Set as {prefix}k",
+                f"Pair index for the {prefix} role:", 1, 1, 99, 1,
+            )
+            if ok:
+                role_str = f"{prefix}{int(k)}"
+                for c in cols:
+                    m.set_column_role(c, role_str)
+            return
+        if chosen is clear_xy:
             for c in cols:
                 m.set_column_role(c, "")
         elif chosen is plot_line:
@@ -7440,10 +8609,18 @@ def _open_data_table_dialog(app) -> None:
         "columns by their letter (<code>A+B</code>, <code>sqrt(B**2+C**2)</code>, "
         "<code>diff(A)</code>; <code>^</code> means power). "
         "<b>Right-click</b> a column header (or a multi-column selection) to "
-        "<b>Set as X / Set as Y</b> or to <b>Plot ▸ Line / Scatter / "
-        "Line + Scatter</b> in a new window — the plot honors the X/Y tags. "
+        "<b>Set as X<sub>k</sub> / Y<sub>k</sub></b> (X1/Y1, X2/Y2, … pair "
+        "by index — Y2 is plotted against X2, Y1 against X1) or "
+        "<b>Plot ▸ Line / Scatter / Line + Scatter</b>. "
+        "Select multiple Y columns at once to overlay them on a single "
+        "graph; the plot window has zoom / autoscale / log-axis / export / "
+        "copy buttons (mouse wheel zooms, right-drag pans). "
         "Ctrl+click selects multiple columns; click a header to grab a whole "
-        "column. Ctrl+C / Ctrl+V copy and paste tab-separated values."
+        "column. Ctrl+C / Ctrl+V copy and paste tab-separated values. "
+        "<b>Calculus…</b> integrates / differentiates a column, "
+        "<b>Smooth…</b> applies Savitzky-Golay / moving-average / median / "
+        "Gaussian filters, and <b>Interpolate…</b> resamples a column onto "
+        "a uniform / custom grid."
     )
     hint.setStyleSheet("color: #555; font-size: 11px;")
     hint.setTextFormat(Qt.RichText)
