@@ -578,15 +578,21 @@ def _read_ascii_recording(path: str):
             break
     if not header_line:
         raise ValueError("File is empty or has no header line.")
-    # Comma vs whitespace: detect from the extension first, then from the
-    # header line as a fallback.
-    use_comma = path.lower().endswith(".csv") or (
-        "," in header_line and "\t" not in header_line
-    )
-    delim = "," if use_comma else None  # None → any whitespace
-    column_names = [c.strip() for c in (
-        header_line.split(",") if use_comma else header_line.split()
-    )]
+    # Pick the column delimiter once and use it for both the header split
+    # and np.loadtxt. CSV is always comma; otherwise prefer literal TAB
+    # whenever the header contains any (so column names with embedded
+    # spaces survive intact, e.g. "Power on a Resistor (W)"); fall back to
+    # any whitespace.
+    if path.lower().endswith(".csv") or ("," in header_line and "\t" not in header_line):
+        delim = ","
+    elif "\t" in header_line:
+        delim = "\t"
+    else:
+        delim = None  # any whitespace
+    if delim is None:
+        column_names = [c.strip() for c in header_line.split()]
+    else:
+        column_names = [c.strip() for c in header_line.split(delim)]
     column_names = [c for c in column_names if c]
     if not column_names:
         raise ValueError("Could not parse header columns.")
@@ -609,6 +615,7 @@ def _read_ascii_recording(path: str):
             time_idx = k
             break
     time_array = data[:, time_idx] if time_idx >= 0 else None
+    time_name = column_names[time_idx] if time_idx >= 0 else "time"
     channels: dict[str, np.ndarray] = {}
     metadata: dict[str, dict] = {}
     for k, name in enumerate(column_names):
@@ -616,7 +623,7 @@ def _read_ascii_recording(path: str):
             continue
         channels[name] = np.asarray(data[:, k], dtype=float)
         metadata[name] = {"scale": 1.0, "offset": 0.0, "voltage_tap_cm": None}
-    return time_array, channels, metadata
+    return time_array, channels, metadata, time_name
 
 
 _VTAP_KEYS = ("VTap_Distance_cm", "Voltage_Tap_Distance_cm",
@@ -678,6 +685,10 @@ class DataFittingController:
         self.app = app
         self.tdms_path: str = ""
         self.time_array = None
+        # Original header text for the time column. TDMS recordings always use
+        # "Time"; ASCII recordings preserve the literal first-row token (e.g.
+        # "time(s)") so save-back rewrites the same header.
+        self.time_column_name: str = "Time"
         self.channel_cache: dict[str, np.ndarray] = {}
         self.channel_names: list[str] = []
         self.channel_metadata: dict[str, dict] = {}
@@ -728,6 +739,7 @@ class DataFittingController:
         self.channel_metadata.clear()
         self.channel_names = []
         self.time_array = None
+        self.time_column_name = "Time"
         self.saved_fit_results = {}
         self.datasets = {}
         self.active_dataset_name = ""
@@ -785,8 +797,9 @@ class DataFittingController:
             self.channel_names = names
 
     def _load_recording_from_ascii(self, path: str) -> None:
-        time_arr, channels, metadata = _read_ascii_recording(path)
+        time_arr, channels, metadata, time_name = _read_ascii_recording(path)
         self.time_array = time_arr
+        self.time_column_name = time_name
         self.channel_cache.update(channels)
         self.channel_metadata.update(metadata)
         self.channel_names = list(channels.keys())
@@ -1461,13 +1474,16 @@ def _build_capacitor_testing_tab(app, layout) -> None:
     cap_save_group = QGroupBox("Save derived data")
     cap_save_layout = QGridLayout(cap_save_group)
     app.data_fit_cap_save_source_btn = QPushButton(
-        "Save Power && Integrated Power into source TDMS"
+        "Save Power && Integrated Power into source file"
     )
     app.data_fit_cap_save_source_btn.setToolTip(
         f'Append the in-memory "{CAPACITOR_POWER_CHANNEL_NAME}" and\n'
         f'"{CAPACITOR_ENERGY_CHANNEL_NAME}" channels back into the loaded\n'
-        "TDMS file (under a 'Computed' group). Disabled until at least\n"
-        "one of these has been computed and the source is a TDMS file."
+        "recording. TDMS files get a separate 'Computed' group; ASCII\n"
+        "files (.txt/.dat/.csv/.tsv/.asc) get two new columns appended\n"
+        "to every row, with the same delimiter and header layout as the\n"
+        "original. Disabled until at least one of these has been\n"
+        "computed and the source is a supported recording."
     )
     app.data_fit_cap_save_source_btn.setEnabled(False)
     cap_save_layout.addWidget(app.data_fit_cap_save_source_btn, 0, 0, 1, 2)
@@ -1497,9 +1513,11 @@ def _refresh_capacitor_save_enabled(app) -> None:
     has_power = CAPACITOR_POWER_CHANNEL_NAME in (controller.channel_cache or {})
     has_energy = CAPACITOR_ENERGY_CHANNEL_NAME in (controller.channel_cache or {})
     has_capacity = CAPACITY_DATASET_NAME in (controller.datasets or {})
-    src_is_tdms = bool(controller.tdms_path) and controller.tdms_path.lower().endswith(".tdms")
+    src_path = controller.tdms_path or ""
+    ext = os.path.splitext(src_path)[1].lower()
+    src_is_supported = ext == ".tdms" or ext in _ASCII_RECORDING_EXTS
     if src_btn is not None:
-        src_btn.setEnabled(src_is_tdms and (has_power or has_energy))
+        src_btn.setEnabled(src_is_supported and (has_power or has_energy))
     if cap_btn is not None:
         cap_btn.setEnabled(has_capacity)
 
@@ -1515,21 +1533,29 @@ def _suggested_capacity_save_path(controller) -> str:
 
 def _on_capacitor_save_to_source(app) -> None:
     """Append the computed Power / Integrated Power channels back to the
-    loaded TDMS file under a "Computed" group.
+    loaded source file (TDMS or ASCII).
 
-    Re-reads every channel from the source, drops any prior "Computed"
-    group, then writes the union to a temporary file before atomically
-    replacing the source — so a write failure can never corrupt the
-    original recording.
+    For TDMS the recording is re-read, any prior "Computed" group is
+    dropped, and the union (originals + Power + Integrated Power) is
+    written to a temp file before atomically replacing the source so a
+    write failure can never corrupt the original.
+
+    For ASCII (.txt/.dat/.csv/.tsv/.asc) the file is rewritten with the
+    same delimiter (CSV → comma, otherwise tab) and the same header row
+    (preserving the original time-column header), with two new columns
+    appended on the right.
     """
     status = getattr(app, "data_fit_cap_save_status", None)
     controller = getattr(app, "data_fit_controller", None)
     if controller is None:
         return
     path = controller.tdms_path
-    if not path or not os.path.exists(path) or not path.lower().endswith(".tdms"):
+    ext = os.path.splitext(path)[1].lower() if path else ""
+    if not path or not os.path.exists(path) or (
+        ext != ".tdms" and ext not in _ASCII_RECORDING_EXTS
+    ):
         if status is not None:
-            status.setText("Source file is not a TDMS recording.")
+            status.setText("Source file is not a supported recording.")
             status.setStyleSheet("color: #b35a00;")
         return
     power = controller.channel_cache.get(CAPACITOR_POWER_CHANNEL_NAME)
@@ -1540,50 +1566,92 @@ def _on_capacitor_save_to_source(app) -> None:
             status.setStyleSheet("color: #b35a00;")
         return
     try:
-        objects = [RootObject()]
-        groups_seen: set[str] = set()
-        with TdmsFile.read(path) as src:
-            for group in src.groups():
-                if group.name == "Computed":
-                    # Skip any previous Computed group; we'll rewrite it below.
-                    continue
-                if group.name not in groups_seen:
-                    objects.append(GroupObject(group.name))
-                    groups_seen.add(group.name)
-                for channel in group.channels():
-                    objects.append(
-                        ChannelObject(
-                            group.name, channel.name, np.asarray(channel[:], dtype=float)
-                        )
-                    )
-        objects.append(GroupObject("Computed"))
-        added: list[str] = []
-        if power is not None:
-            objects.append(
-                ChannelObject("Computed", CAPACITOR_POWER_CHANNEL_NAME, np.asarray(power, dtype=float))
-            )
-            added.append(CAPACITOR_POWER_CHANNEL_NAME)
-        if energy is not None:
-            objects.append(
-                ChannelObject(
-                    "Computed", CAPACITOR_ENERGY_CHANNEL_NAME, np.asarray(energy, dtype=float)
-                )
-            )
-            added.append(CAPACITOR_ENERGY_CHANNEL_NAME)
-        tmp_path = path + ".tmp"
-        with TdmsWriter(tmp_path) as w:
-            w.write_segment(objects)
-        os.replace(tmp_path, path)
+        if ext == ".tdms":
+            added = _save_computed_into_tdms_source(controller, path, power, energy)
+            location = f'group "Computed" of "{os.path.basename(path)}"'
+        else:
+            added = _save_computed_into_ascii_source(controller, path, power, energy)
+            location = f'"{os.path.basename(path)}"'
     except Exception as exc:
         if status is not None:
             status.setText(f"Save failed: {exc}")
             status.setStyleSheet("color: #b35a00;")
         return
     if status is not None:
-        status.setText(
-            f'Saved {", ".join(added)} into "{os.path.basename(path)}" (group "Computed").'
-        )
+        status.setText(f'Saved {", ".join(added)} into {location}.')
         status.setStyleSheet("color: #2a7a2a;")
+
+
+def _save_computed_into_tdms_source(controller, path, power, energy):
+    objects = [RootObject()]
+    groups_seen: set[str] = set()
+    with TdmsFile.read(path) as src:
+        for group in src.groups():
+            if group.name == "Computed":
+                # Skip any previous Computed group; rewritten below.
+                continue
+            if group.name not in groups_seen:
+                objects.append(GroupObject(group.name))
+                groups_seen.add(group.name)
+            for channel in group.channels():
+                objects.append(
+                    ChannelObject(
+                        group.name, channel.name, np.asarray(channel[:], dtype=float)
+                    )
+                )
+    objects.append(GroupObject("Computed"))
+    added: list[str] = []
+    if power is not None:
+        objects.append(
+            ChannelObject("Computed", CAPACITOR_POWER_CHANNEL_NAME, np.asarray(power, dtype=float))
+        )
+        added.append(CAPACITOR_POWER_CHANNEL_NAME)
+    if energy is not None:
+        objects.append(
+            ChannelObject("Computed", CAPACITOR_ENERGY_CHANNEL_NAME, np.asarray(energy, dtype=float))
+        )
+        added.append(CAPACITOR_ENERGY_CHANNEL_NAME)
+    tmp_path = path + ".tmp"
+    with TdmsWriter(tmp_path) as w:
+        w.write_segment(objects)
+    os.replace(tmp_path, path)
+    return added
+
+
+def _save_computed_into_ascii_source(controller, path, power, energy):
+    delim = "," if path.lower().endswith(".csv") else "\t"
+    time_arr = controller.time_array
+    if time_arr is None:
+        raise RuntimeError("source has no time array to align against")
+    columns: list[tuple[str, np.ndarray]] = [
+        (controller.time_column_name or "time", np.asarray(time_arr, dtype=float)),
+    ]
+    # Original channels in their loaded order, skipping any previously saved
+    # Power / Integrated Power so the file stays idempotent on repeat saves.
+    skip_names = {CAPACITOR_POWER_CHANNEL_NAME, CAPACITOR_ENERGY_CHANNEL_NAME}
+    for name in controller.channel_names:
+        if name in skip_names:
+            continue
+        arr = controller.channel_cache.get(name)
+        if arr is None:
+            continue
+        columns.append((name, np.asarray(arr, dtype=float)))
+    added: list[str] = []
+    if power is not None:
+        columns.append((CAPACITOR_POWER_CHANNEL_NAME, np.asarray(power, dtype=float)))
+        added.append(CAPACITOR_POWER_CHANNEL_NAME)
+    if energy is not None:
+        columns.append((CAPACITOR_ENERGY_CHANNEL_NAME, np.asarray(energy, dtype=float)))
+        added.append(CAPACITOR_ENERGY_CHANNEL_NAME)
+    n = int(min(arr.size for _, arr in columns))
+    if n == 0:
+        raise RuntimeError("aligned column length is zero")
+    matrix = np.column_stack([arr[:n] for _, arr in columns])
+    header = delim.join(name for name, _ in columns)
+    tmp_path = path + ".tmp"
+    np.savetxt(tmp_path, matrix, delimiter=delim, header=header, comments="", fmt="%.15e")
+    os.replace(tmp_path, path)
+    return added
 
 
 def _on_capacitor_save_capacity(app) -> None:
