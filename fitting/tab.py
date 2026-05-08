@@ -763,8 +763,8 @@ def _connect_data_fitting_actions(app):
     app.data_fit_load_preset_btn.clicked.connect(lambda: _load_preset(app))
     app.data_fit_help_btn.clicked.connect(lambda: _open_help_dialog(app))
     if getattr(app, "data_fit_data_book_btn", None) is not None:
-        # Default action is the OriginLab-style MDI workspace (every book
-        # and every plot lives as a subwindow inside one big window).
+        # The Workspace is a thin-toolbar window; every loaded TDMS book
+        # and every plot opens as its own free-floating top-level window.
         app.data_fit_data_book_btn.clicked.connect(lambda: _open_workspace_window(app))
     app.data_fit_show_didt.toggled.connect(
         lambda _: (_update_band_states(app), _save_active_curve_profile(app))
@@ -1682,11 +1682,13 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_load_preset_btn.setToolTip("Load a fit-window preset from a JSON file.")
     app.data_fit_data_book_btn = QPushButton("Workspace…")
     app.data_fit_data_book_btn.setToolTip(
-        "Open the OriginLab-style data workspace.\n"
-        "One big window holds every loaded TDMS file as its own data-book "
-        "subwindow, and plots opened from a book also live as subwindows.\n"
-        "Tile / cascade / move / resize freely. Edit cells; right-click for "
-        "row & column actions."
+        "Open the Data Workspace — a thin-toolbar window with all the "
+        "table / plot / book actions.\n"
+        "Every loaded TDMS book and every plot opens as its own free-"
+        "floating top-level window.\n"
+        "Tile / Cascade arrange them; toolbar actions (Plot, Recalc F(x), "
+        "Calculus, Smooth, Interpolate, Decouple, Save as TDMS) target "
+        "the last-active book."
     )
     app.data_fit_help_btn = QPushButton("?  Help")
     app.data_fit_help_btn.setToolTip("Open the help window with a full overview of the fitting workflow.")
@@ -6454,7 +6456,7 @@ class _DataBookModel(QAbstractTableModel):
         self._app = app
         self._columns: list = columns
         # Each model is bound to a specific controller (one TDMS book) so the
-        # MDI workspace can host several books side-by-side without their
+        # workspace can host several book windows side-by-side without their
         # edits stomping on each other's caches. Falls back to the app's
         # active controller for backwards compatibility (single-book dialog).
         self._controller = (
@@ -6830,9 +6832,9 @@ class _DataBookModel(QAbstractTableModel):
         if not hasattr(app, "data_fit_time_cb"):
             return
         # Only refresh the main fitting plot when this model belongs to the
-        # currently-active controller. In the MDI workspace several books
-        # may have models open at the same time; edits in a book that is
-        # not the active fit target should not redraw the fit preview.
+        # currently-active controller. The workspace can host several book
+        # windows at the same time; edits in a book that is not the active
+        # fit target should not redraw the fit preview.
         if (self._controller is not None
                 and self._controller is not getattr(app, "data_fit_controller", None)):
             return
@@ -6969,18 +6971,13 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
     """Open a non-modal plot window with the given (x, y) specs.
 
     ``draw_mode`` is one of ``"line"``, ``"scatter"``, ``"both"``. The
-    window has an OriginLab-style toolbar (autoscale, X/Y log toggles,
-    crosshair, copy-image, export-image, export-data, graph settings,
-    legend) and remembers its draw mode so the user can flip between
-    line / scatter / both without reopening.
-
-    Behaviour:
-
-    * When the MDI workspace is open (``app._data_fit_workspace_mdi``),
-      the plot opens as a **subwindow inside the workspace** so it
-      lives next to the data sheets — the OriginLab MDI experience.
-    * Otherwise it opens as a **top-level non-modal QDialog**, which is
-      the legacy behaviour for users who only want the Data book dialog.
+    plot is a free-floating top-level QDialog (no MDI sub-windows) so the
+    user can tile / cascade / move / resize / minimise it independently
+    of the data-book windows it was launched from. The toolbar exposes
+    autoscale, X/Y log toggles, crosshair, copy-image, export-image,
+    export-data, graph settings and a legend toggle, plus a draw-mode
+    combo (line / scatter / both) that flips the curve style without
+    reopening.
 
     The window is kept alive on ``app._data_fit_book_plot_windows`` so
     the user can have several open at once without them being garbage
@@ -6994,41 +6991,24 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
         QFileDialog,
         QHBoxLayout,
         QLabel,
-        QMdiSubWindow,
         QPushButton,
         QToolButton,
         QVBoxLayout,
         QWidget,
     )
 
-    mdi = getattr(app, "_data_fit_workspace_mdi", None)
-    workspace_visible = False
-    if mdi is not None:
-        try:
-            workspace_visible = bool(
-                getattr(app, "_data_fit_workspace", None) is not None
-                and app._data_fit_workspace.isVisible()
-            )
-        except RuntimeError:
-            workspace_visible = False
-
-    if workspace_visible and mdi is not None:
-        # Plot lives as a subwindow inside the workspace MDI.
-        dlg = QMdiSubWindow()
-        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
-        dlg.setWindowTitle(f"📈 {title}")
-        # Mark so "Close all plots" can find these.
-        dlg.setProperty("plot_subwindow", True)
-        host = QWidget()
-        layout = QVBoxLayout(host)
-        dlg.setWidget(host)
-    else:
-        # Legacy: top-level non-modal dialog.
-        dlg = QDialog(app)
-        dlg.setWindowTitle(title)
-        dlg.resize(820, 600)
-        dlg.setModal(False)
-        layout = QVBoxLayout(dlg)
+    # Top-level non-modal dialog. Parent it to the workspace window when
+    # one exists so the plot inherits the correct screen / window-manager
+    # group; falls back to ``app`` (the host) when the workspace was
+    # never opened.
+    parent = getattr(app, "_data_fit_workspace", None) or app
+    dlg = QDialog(parent if isinstance(parent, QWidget) else None)
+    dlg.setWindowTitle(f"📈 {title}")
+    dlg.setWindowFlags(dlg.windowFlags() | Qt.Window)
+    dlg.resize(820, 600)
+    dlg.setModal(False)
+    dlg.setProperty("data_fit_plot_window", True)
+    layout = QVBoxLayout(dlg)
 
     # --- toolbar --------------------------------------------------------
     toolbar = QHBoxLayout()
@@ -7359,15 +7339,12 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
 
     # --- bottom row -----------------------------------------------------
     # MDI subwindows already have a native title-bar close button, so
-    # we only add an explicit "Close" button in the standalone-dialog
-    # case where the QDialog has no chrome of its own.
-    if not workspace_visible or mdi is None:
-        btns = QHBoxLayout()
-        btns.addStretch()
-        close = QPushButton("Close")
-        close.clicked.connect(dlg.accept)
-        btns.addWidget(close)
-        layout.addLayout(btns)
+    btns = QHBoxLayout()
+    btns.addStretch()
+    close = QPushButton("Close")
+    close.clicked.connect(dlg.accept)
+    btns.addWidget(close)
+    layout.addLayout(btns)
 
     if not hasattr(app, "_data_fit_book_plot_windows"):
         app._data_fit_book_plot_windows = []
@@ -7379,18 +7356,10 @@ def _open_book_plot_window(app, *, title: str, plot_specs, draw_mode: str):
         except (ValueError, AttributeError):
             pass
 
-    if workspace_visible and mdi is not None:
-        # Add as a subwindow inside the workspace MDI area.
-        mdi.addSubWindow(dlg)
-        dlg.resize(720, 520)
-        dlg.destroyed.connect(_drop_when_closed)
-        dlg.show()
-        dlg.raise_()
-    else:
-        dlg.finished.connect(_drop_when_closed)
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+    dlg.finished.connect(_drop_when_closed)
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
     return dlg
 
 
@@ -8643,21 +8612,21 @@ def _set_active_data_fit_book(app, idx: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# OriginLab-style MDI workspace — every loaded TDMS lives as one subwindow
-# inside a big "Data workspace" QMainWindow; plots opened from a book also
-# land as subwindows in the same MDI area, so the user can tile, cascade,
-# move, resize and minimise individual data sheets and graphs without
-# anything stealing the entire screen.
+# Data Workspace — every loaded TDMS book and every plot opens as its own
+# free-floating top-level window. A thin-toolbar QMainWindow ("Data
+# workspace") owns the cross-book actions; per-book widgets focus on the
+# editable table and right-click context menus. Operations from the
+# workspace toolbar target the last-active book.
 # ---------------------------------------------------------------------------
 
 
 def _build_book_widget(app, controller, parent_window):
     """Build a self-contained data-book widget bound to one ``controller``.
 
-    Returns ``(widget, model)``. Used by the MDI workspace to host one
-    book per subwindow. ``parent_window`` is the QDialog or QMdiSubWindow
-    that owns the widget — passed as the parent for child dialogs (Plot
-    picker, Calculus, …).
+    Returns ``(widget, model)``. Used by the workspace to host one book
+    per top-level QMainWindow. ``parent_window`` is the QMainWindow that
+    owns the widget — passed as the parent for child dialogs (Plot
+    picker, Calculus, …) and for QInputDialogs / QMessageBoxes.
 
     The widget contains:
 
@@ -8910,64 +8879,26 @@ def _build_book_widget(app, controller, parent_window):
                 if target.isValid():
                     m.setData(target, cell, Qt.EditRole)
 
-    # --- buttons ----------------------------------------------------
-    actions = QHBoxLayout()
-    plot_btn = QPushButton("📊 Plot…")
-    plot_btn.setStyleSheet(
-        "background-color: #cfe6ff; padding: 6px 22px; font-weight: 700; "
-        "font-size: 13px;"
-    )
-    plot_btn.setToolTip(
-        "Open the plot picker — pick an X axis and tick every Y column "
-        "you want. All ticked Ys are overlaid on one graph in this "
-        "workspace.",
-    )
-    recalc_btn = QPushButton("Recalc F(x)")
-    recalc_btn.setToolTip(
-        "Re-evaluate the F(x)= formula of the selected columns against the "
-        "current data.",
-    )
-    calc_btn = QPushButton("Calculus…")
-    smooth_btn = QPushButton("Smooth…")
-    interp_btn = QPushButton("Interpolate…")
-    actions.addWidget(plot_btn)
-    actions.addSpacing(8)
-    actions.addWidget(recalc_btn)
-    actions.addWidget(calc_btn)
-    actions.addWidget(smooth_btn)
-    actions.addWidget(interp_btn)
-    actions.addStretch()
-    root.addLayout(actions)
-
-    actions2 = QHBoxLayout()
-    decouple_btn = QPushButton("Decouple from TDMS")
-    save_tdms_btn = QPushButton("Save as TDMS…")
-    actions2.addStretch()
-    actions2.addWidget(decouple_btn)
-    actions2.addWidget(save_tdms_btn)
-    root.addLayout(actions2)
-
-    # Plot opens as a workspace subwindow when the workspace is the
-    # parent; otherwise it falls back to a top-level dialog.
-    plot_btn.clicked.connect(
-        lambda: _open_plot_picker_dialog(app, parent_window, state["model"])
-    )
-    recalc_btn.clicked.connect(_on_recalc_column)
-    calc_btn.clicked.connect(
-        lambda: _open_calculus_dialog(parent_window, state["model"])
-    )
-    smooth_btn.clicked.connect(
-        lambda: _open_smooth_dialog(parent_window, state["model"])
-    )
-    interp_btn.clicked.connect(
-        lambda: _open_interpolate_dialog(parent_window, state["model"])
-    )
-    decouple_btn.clicked.connect(
-        lambda: _decouple_book_from_tdms(app, parent_window, state["model"])
-    )
-    save_tdms_btn.clicked.connect(
-        lambda: _save_book_as_tdms(app, parent_window, state["model"])
-    )
+    # Plot, Recalc F(x), Calculus, Smooth, Interpolate, Decouple, Save as
+    # TDMS used to live as a button row at the bottom of every book widget.
+    # In the new top-level-window workspace they all sit on the workspace's
+    # thin toolbar and operate on the *last-active* book — keeping the per-
+    # book widget itself focused on the editable table. Right-click on a
+    # column header / data row still exposes Plot, Set X/Y, Add / Remove
+    # column and the row ops.
+    #
+    # Expose the table, selection helpers, controller and the per-book
+    # action callables on the widget so the workspace toolbar can target
+    # whichever book was last activated.
+    widget._book_state = {
+        "model": model,
+        "table": table,
+        "controller": controller,
+        "selected_cols": _selected_columns,
+        "selected_rows": _selected_data_rows,
+        "recalc_selected": _on_recalc_column,
+        "prompt_add_column": _prompt_add_column,
+    }
 
     # --- right-click context menus ---------------------------------
     def _do_plot(draw_mode: str, cols) -> None:
@@ -9146,161 +9077,529 @@ def _build_book_widget(app, controller, parent_window):
     return widget, model
 
 
-def _open_workspace_window(app) -> None:
-    """Open the OriginLab-style MDI workspace.
+def _workspace_book_windows(app) -> list:
+    """Return the live list of book QMainWindow instances on ``app``.
 
-    Each loaded TDMS file opens as its own subwindow inside a single big
-    "Data workspace" QMainWindow, and plots opened from a book also land
-    as subwindows in the same MDI area. The workspace lets the user
-    tile, cascade or independently resize / move / minimise every data
-    sheet and graph.
+    The list is created lazily so callers don't need to guard against the
+    attribute being absent on freshly-bootstrapped controllers / hosts.
     """
-    from PyQt5.QtWidgets import (
-        QMainWindow,
-        QMdiArea,
-        QMdiSubWindow,
-        QMessageBox,
-        QToolBar,
+    book_windows = getattr(app, "_data_fit_workspace_book_windows", None)
+    if book_windows is None:
+        book_windows = {}
+        app._data_fit_workspace_book_windows = book_windows
+    return book_windows
+
+
+def _workspace_active_book_window(app):
+    """Return the most-recently-activated visible book QMainWindow, or None.
+
+    Falls back to the last-added visible book when nothing has been focused
+    yet, so the toolbar still does something useful immediately after the
+    first ``Load file…``.
+    """
+    win = getattr(app, "_data_fit_active_book_window", None)
+    if win is not None:
+        try:
+            if win.isVisible():
+                return win
+        except RuntimeError:
+            app._data_fit_active_book_window = None
+    book_windows = list(_workspace_book_windows(app).values())
+    book_windows = [w for w in book_windows if _qt_alive_and_visible(w)]
+    return book_windows[-1] if book_windows else None
+
+
+def _qt_alive_and_visible(widget) -> bool:
+    try:
+        return bool(widget.isVisible())
+    except RuntimeError:
+        return False
+
+
+def _workspace_active_book_state(app):
+    """Return the ``_book_state`` dict of the active book window, or None.
+
+    The dict is attached to each book widget by ``_build_book_widget``
+    and exposes the model, table, controller and selection helpers the
+    workspace toolbar needs.
+    """
+    win = _workspace_active_book_window(app)
+    if win is None:
+        return None
+    central = win.centralWidget()
+    state = getattr(central, "_book_state", None)
+    if state is None:
+        return None
+    state = dict(state)
+    state["window"] = win
+    return state
+
+
+def _no_active_book_message(app, action_name: str) -> None:
+    from PyQt5.QtWidgets import QMessageBox
+    parent = getattr(app, "_data_fit_workspace", app)
+    QMessageBox.information(
+        parent, "Workspace",
+        f"{action_name}: open a book window first — click 'Load file…' "
+        "to open a TDMS recording or '➕ New table' for a blank book.",
     )
 
-    existing = getattr(app, "_data_fit_workspace", None)
+
+def _add_book_window(app, controller):
+    """Create and register a top-level book QMainWindow for ``controller``.
+
+    The book is wrapped in its own QMainWindow so the user can tile,
+    cascade, move, resize and minimise every data sheet independently.
+    Existing windows are reused — clicking Load file… on an already-loaded
+    TDMS just brings the matching book to the front.
+    """
+    from PyQt5.QtCore import QEvent, QObject
+    from PyQt5.QtWidgets import QMainWindow
+
+    book_windows = _workspace_book_windows(app)
+    existing = book_windows.get(id(controller))
     if existing is not None:
         try:
-            if existing.isVisible():
-                existing.raise_()
-                existing.activateWindow()
-                return
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return existing
         except RuntimeError:
-            app._data_fit_workspace = None
+            book_windows.pop(id(controller), None)
 
+    title = (
+        f"📘 {os.path.basename(controller.tdms_path)}"
+        if controller.tdms_path else "📘 (untitled book)"
+    )
+    win = QMainWindow()
+    win.setWindowTitle(title)
+    win.setAttribute(Qt.WA_DeleteOnClose, False)
+    win.setProperty("data_fit_book_window", True)
+
+    widget, model = _build_book_widget(app, controller, win)
+    win.setCentralWidget(widget)
+    win.resize(720, 520)
+
+    # Track focus so the workspace toolbar can target the most recently
+    # activated book even after the user has clicked through plot windows.
+    class _BookActivateFilter(QObject):
+        def eventFilter(self, _watched, event):
+            if event.type() == QEvent.WindowActivate:
+                app._data_fit_active_book_window = win
+            return False
+
+    flt = _BookActivateFilter(win)
+    win._book_activate_filter = flt
+    win.installEventFilter(flt)
+
+    # Closing the book hides it but preserves the controller and any
+    # column edits — the user can re-open via Load file… on the same path
+    # or by toggling visibility from the workspace.
+    def _filter_close(event):
+        event.ignore()
+        win.hide()
+
+    win.closeEvent = _filter_close
+
+    book_windows[id(controller)] = win
+    win.show()
+    win.raise_()
+    app._data_fit_active_book_window = win
+    return win
+
+
+def _create_empty_book(app):
+    """Create a fresh decoupled book and open its top-level window.
+
+    The new controller has no TDMS source — every column is a user column
+    so the user can paste data, type values, or apply Calculus / Smooth /
+    Interpolate without touching any recording on disk. Two empty user
+    columns (X, Y) are pre-seeded so the table is immediately editable.
+    """
+    books = _data_fit_get_books(app)
+    ctrl = DataFittingController(app)
+    ctrl.book_decoupled = True
+    # Seed two columns so the first data row is reachable. ``data`` carries
+    # ten NaN slots — the model trims / extends as the user types.
+    blank = np.full(10, np.nan, dtype=float)
+    ctrl.book_user_columns = [
+        {"name": "X", "data": blank.copy(), "formula": "", "role": "X1"},
+        {"name": "Y", "data": blank.copy(), "formula": "", "role": "Y1"},
+    ]
+    books.append(ctrl)
+    app.data_fit_controller = ctrl
+    return _add_book_window(app, ctrl)
+
+
+def _close_all_workspace_plots(app) -> None:
+    plots = list(getattr(app, "_data_fit_book_plot_windows", []) or [])
+    for w in plots:
+        try:
+            w.close()
+        except RuntimeError:
+            pass
+
+
+def _arrange_workspace_windows(app, *, mode: str) -> None:
+    """Tile or cascade every visible book and plot top-level window.
+
+    ``mode`` is ``"tile"`` or ``"cascade"``. Tiling fills the available
+    screen area outside the workspace toolbar with a roughly-square grid
+    of windows; cascade stair-steps them from the upper-left.
+    """
+    import math
+
+    from PyQt5.QtWidgets import QApplication
+
+    windows: list = []
+    windows.extend(_workspace_book_windows(app).values())
+    windows.extend(getattr(app, "_data_fit_book_plot_windows", []) or [])
+    windows = [w for w in windows if _qt_alive_and_visible(w)]
+    if not windows:
+        return
+
+    workspace_win = getattr(app, "_data_fit_workspace", None)
+    screen = QApplication.primaryScreen()
+    if workspace_win is not None:
+        try:
+            screen = workspace_win.windowHandle().screen() or screen
+        except Exception:
+            pass
+    geom = screen.availableGeometry()
+
+    # Reserve the workspace toolbar strip across the top of the work area
+    # so tiled / cascaded windows don't cover it.
+    toolbar_h = 0
+    if workspace_win is not None:
+        try:
+            toolbar_h = max(0, workspace_win.frameGeometry().bottom() - geom.top()) + 4
+        except Exception:
+            toolbar_h = 0
+    work_top = geom.top() + max(toolbar_h, 0)
+    work_h = max(160, geom.height() - max(toolbar_h, 0))
+    work_x = geom.left()
+    work_w = geom.width()
+
+    if mode == "tile":
+        n = len(windows)
+        cols = max(1, int(math.ceil(math.sqrt(n))))
+        rows = max(1, int(math.ceil(n / cols)))
+        cell_w = max(320, work_w // cols)
+        cell_h = max(220, work_h // rows)
+        for i, w in enumerate(windows):
+            r, c = divmod(i, cols)
+            w.showNormal()
+            w.move(work_x + c * cell_w, work_top + r * cell_h)
+            w.resize(cell_w - 8, cell_h - 8)
+            w.raise_()
+        return
+
+    # Cascade: stair-step from the upper-left of the work area.
+    step = 32
+    base_w = max(480, min(820, work_w - step * len(windows) - 40))
+    base_h = max(360, min(560, work_h - step * len(windows) - 40))
+    for i, w in enumerate(windows):
+        w.showNormal()
+        w.move(work_x + 20 + i * step, work_top + 20 + i * step)
+        w.resize(base_w, base_h)
+        w.raise_()
+
+
+def _build_workspace_ui(app, win) -> None:
+    """Build the thin-toolbar workspace UI on the given QMainWindow.
+
+    ``win`` becomes the workspace window — the toolbar is added to it,
+    every existing book gets a top-level window, and ``app._data_fit_*``
+    bookkeeping attributes are populated. The function is idempotent: if
+    the toolbar is already in place it just rebuilds the book windows.
+    """
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtWidgets import (
+        QApplication,
+        QLabel,
+        QSizePolicy,
+        QToolBar,
+        QToolButton,
+        QWidget,
+    )
+
+    app._data_fit_workspace = win
+    _workspace_book_windows(app)  # ensure dict exists
+    if not hasattr(app, "_data_fit_book_plot_windows"):
+        app._data_fit_book_plot_windows = []
+
+    # If a previous toolbar already exists on this window, drop it first
+    # so re-entering ``_open_workspace_window`` doesn't stack toolbars.
+    for old in list(win.findChildren(QToolBar, "data_fit_workspace_toolbar")):
+        win.removeToolBar(old)
+        old.deleteLater()
+
+    tb = QToolBar("Data workspace", win)
+    tb.setObjectName("data_fit_workspace_toolbar")
+    tb.setMovable(False)
+    tb.setIconSize(QSize(18, 18))
+    tb.setStyleSheet(
+        "QToolBar { spacing: 2px; padding: 2px 4px; }"
+        "QToolButton { padding: 3px 8px; }"
+    )
+    win.addToolBar(tb)
+
+    # File / book creation -------------------------------------------------
+    act_load = tb.addAction("📂 Load file…")
+    act_load.setToolTip(
+        "Open a TDMS recording — every loaded file becomes its own data-book "
+        "window."
+    )
+    act_new_table = tb.addAction("➕ New table")
+    act_new_table.setToolTip(
+        "Create a blank data-book window with two user columns (X, Y). "
+        "The new book is decoupled from any TDMS source — paste or type "
+        "data straight into the cells."
+    )
+    tb.addSeparator()
+
+    # Window arrangement --------------------------------------------------
+    act_tile = tb.addAction("🪟 Tile")
+    act_tile.setToolTip(
+        "Arrange every visible book and plot window in a grid filling the "
+        "available screen area."
+    )
+    act_cascade = tb.addAction("📚 Cascade")
+    act_cascade.setToolTip(
+        "Stack every visible book and plot window with a small offset so "
+        "each title bar stays visible."
+    )
+    act_close_plots = tb.addAction("✕ Close plots")
+    act_close_plots.setToolTip(
+        "Close every plot window — book windows stay open."
+    )
+    tb.addSeparator()
+
+    # Actions on the last-active book ------------------------------------
+    act_plot = tb.addAction("📊 Plot…")
+    act_plot.setToolTip(
+        "Open the multi-column plot picker for the last-active book. Each "
+        "Y plots against the chosen X (or against the per-column "
+        "Xₖ tag in advanced mode)."
+    )
+    act_recalc = tb.addAction("Recalc F(x)")
+    act_recalc.setToolTip(
+        "Re-evaluate the F(x)= formula of the columns selected in the "
+        "last-active book."
+    )
+    act_calc = tb.addAction("Calculus…")
+    act_calc.setToolTip(
+        "Integrate ∫Y dX or differentiate dY/dX of any X / Y pair in the "
+        "last-active book."
+    )
+    act_smooth = tb.addAction("Smooth…")
+    act_smooth.setToolTip(
+        "Smooth a column in the last-active book with Savitzky-Golay, "
+        "moving average, median, Gaussian, or the IEC-aware Ec-window filter."
+    )
+    act_interp = tb.addAction("Interpolate…")
+    act_interp.setToolTip(
+        "Resample a Y(X) pair onto a new grid in the last-active book."
+    )
+    tb.addSeparator()
+
+    # Decouple / Save as TDMS as small icons ------------------------------
+    btn_decouple = QToolButton(tb)
+    btn_decouple.setText("🔓")
+    btn_decouple.setToolTip(
+        "Decouple the last-active book from its source TDMS so edits stop "
+        "mutating the loaded recording."
+    )
+    btn_decouple.setAutoRaise(True)
+    btn_decouple.setFixedWidth(28)
+    tb.addWidget(btn_decouple)
+
+    btn_save_tdms = QToolButton(tb)
+    btn_save_tdms.setText("💾")
+    btn_save_tdms.setToolTip(
+        "Save the last-active book to a fresh TDMS file (every column is "
+        "written as a channel)."
+    )
+    btn_save_tdms.setAutoRaise(True)
+    btn_save_tdms.setFixedWidth(28)
+    tb.addWidget(btn_save_tdms)
+    tb.addSeparator()
+
+    # Spacer + V-I fitting launcher (right-aligned) ----------------------
+    spacer = QWidget(tb)
+    spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    tb.addWidget(spacer)
+
+    fitting_opener = getattr(app, "_data_fit_open_fitting_window", None)
+    if callable(fitting_opener):
+        act_fitting = tb.addAction("🔬 Superconductor V-I fitting")
+        act_fitting.setToolTip(
+            "Open the V-I curve fitting window (Run fit, Ec / IEC, presets, "
+            "fit-window editing)."
+        )
+        act_fitting.triggered.connect(lambda: fitting_opener())
+
+    # Status line below the toolbar --------------------------------------
+    status_lbl = QLabel("")
+    status_lbl.setStyleSheet("color: #555; padding: 2px 6px; font-size: 11px;")
+    win.statusBar().addPermanentWidget(status_lbl, 1)
+
+    def _refresh_status() -> None:
+        active = _workspace_active_book_window(app)
+        if active is None:
+            status_lbl.setText(
+                "No book open — Load file… or ➕ New table to start."
+            )
+            return
+        title = active.windowTitle()
+        n_books = sum(
+            1 for w in _workspace_book_windows(app).values()
+            if _qt_alive_and_visible(w)
+        )
+        status_lbl.setText(
+            f"Active book: {title}    ·    {n_books} book window(s) open"
+        )
+
+    # --- toolbar wiring -------------------------------------------------
+    def _ensure_active_state(action_name: str):
+        st = _workspace_active_book_state(app)
+        if st is None:
+            _no_active_book_message(app, action_name)
+            return None
+        return st
+
+    def _on_load_file() -> None:
+        before = list(_data_fit_get_books(app))
+        if hasattr(app, "data_fitting_open_file"):
+            app.data_fitting_open_file()
+        for ctrl in _data_fit_get_books(app):
+            if ctrl not in before:
+                _add_book_window(app, ctrl)
+        _refresh_status()
+
+    def _on_new_table() -> None:
+        _create_empty_book(app)
+        _refresh_status()
+
+    def _on_plot() -> None:
+        st = _ensure_active_state("Plot")
+        if st is None:
+            return
+        _open_plot_picker_dialog(app, st["window"], st["model"])
+
+    def _on_recalc() -> None:
+        st = _ensure_active_state("Recalc F(x)")
+        if st is None:
+            return
+        st["recalc_selected"]()
+
+    def _on_calc() -> None:
+        st = _ensure_active_state("Calculus")
+        if st is None:
+            return
+        _open_calculus_dialog(st["window"], st["model"])
+
+    def _on_smooth() -> None:
+        st = _ensure_active_state("Smooth")
+        if st is None:
+            return
+        _open_smooth_dialog(st["window"], st["model"])
+
+    def _on_interp() -> None:
+        st = _ensure_active_state("Interpolate")
+        if st is None:
+            return
+        _open_interpolate_dialog(st["window"], st["model"])
+
+    def _on_decouple() -> None:
+        st = _ensure_active_state("Decouple from TDMS")
+        if st is None:
+            return
+        _decouple_book_from_tdms(app, st["window"], st["model"])
+
+    def _on_save_tdms() -> None:
+        st = _ensure_active_state("Save as TDMS")
+        if st is None:
+            return
+        _save_book_as_tdms(app, st["window"], st["model"])
+
+    act_load.triggered.connect(_on_load_file)
+    act_new_table.triggered.connect(_on_new_table)
+    act_tile.triggered.connect(lambda: (_arrange_workspace_windows(app, mode="tile"),
+                                        _refresh_status()))
+    act_cascade.triggered.connect(lambda: (_arrange_workspace_windows(app, mode="cascade"),
+                                           _refresh_status()))
+    act_close_plots.triggered.connect(lambda: (_close_all_workspace_plots(app),
+                                               _refresh_status()))
+    act_plot.triggered.connect(_on_plot)
+    act_recalc.triggered.connect(_on_recalc)
+    act_calc.triggered.connect(_on_calc)
+    act_smooth.triggered.connect(_on_smooth)
+    act_interp.triggered.connect(_on_interp)
+    btn_decouple.clicked.connect(_on_decouple)
+    btn_save_tdms.clicked.connect(_on_save_tdms)
+
+    # Track focus app-wide so the toolbar always knows the active book.
+    qapp = QApplication.instance()
+    if qapp is not None and not getattr(app, "_data_fit_focus_hook_installed", False):
+        def _on_focus_changed(_old, new):
+            if new is None:
+                return
+            try:
+                top = new.window()
+            except Exception:
+                return
+            if top is None:
+                return
+            if top.property("data_fit_book_window"):
+                app._data_fit_active_book_window = top
+                _refresh_status()
+
+        qapp.focusChanged.connect(_on_focus_changed)
+        app._data_fit_focus_hook_installed = True
+
+    # Spawn book windows for every loaded controller.
     books = _data_fit_get_books(app)
     bootstrap = getattr(app, "data_fit_controller", None)
     if not books and bootstrap is not None and bootstrap.tdms_path:
         books.append(bootstrap)
-    if not books:
-        QMessageBox.information(
-            app, "Workspace",
-            "Load a recording with 'Load file…' first.",
-        )
-        return
+    for ctrl in books:
+        _add_book_window(app, ctrl)
+    _refresh_status()
 
-    win = QMainWindow(app)
-    win.setWindowTitle("Data workspace — fitting")
-    win.resize(1280, 820)
+
+def _open_workspace_window(app) -> None:
+    """Open the Data Workspace as a separate top-level QMainWindow.
+
+    The workspace is a thin-toolbar window: every loaded TDMS book and
+    every plot opens as its own free-floating top-level window — no MDI
+    sub-windows. The toolbar exposes Load file…, ➕ New table, window
+    arrangement (Tile / Cascade / ✕ Close plots), table actions
+    (Plot, Recalc F(x), Calculus, Smooth, Interpolate), Decouple / Save
+    as TDMS as small icons, and the Superconductor V-I fitting launcher.
+    Every table-scoped action operates on the *last-active* book window.
+    """
+    from PyQt5.QtWidgets import QMainWindow
+
+    existing = getattr(app, "_data_fit_workspace", None)
+    if existing is not None:
+        # ``existing is app`` covers the standalone case where the host
+        # window itself owns the workspace toolbar; otherwise it's a
+        # separate top-level QMainWindow created by an earlier call.
+        try:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        except RuntimeError:
+            app._data_fit_workspace = None
+
+    win = QMainWindow(app if isinstance(app, QWidget) else None)
+    win.setWindowTitle("Data workspace")
     win.setWindowFlags(win.windowFlags() | Qt.Window)
     win.setAttribute(Qt.WA_DeleteOnClose, False)
-
-    mdi = QMdiArea()
-    mdi.setActivationOrder(QMdiArea.StackingOrder)
-    mdi.setTabsClosable(False)
-    win.setCentralWidget(mdi)
-
-    tb = QToolBar("Workspace")
-    tb.setMovable(False)
-    win.addToolBar(tb)
-
-    act_load = tb.addAction("📂 Load file…")
-    act_load.setToolTip("Load another TDMS recording — it appears as a new book "
-                        "subwindow in this workspace.")
-    tb.addSeparator()
-    act_tile = tb.addAction("🪟 Tile")
-    act_tile.setToolTip("Arrange every subwindow side-by-side, filling the workspace.")
-    act_cascade = tb.addAction("📚 Cascade")
-    act_cascade.setToolTip("Stack every subwindow with their title bars showing.")
-    act_close_plots = tb.addAction("✕ Close all plots")
-    act_close_plots.setToolTip("Close every plot subwindow; books stay open.")
-    tb.addSeparator()
-    tabs_act = tb.addAction("Tabs view")
-    tabs_act.setCheckable(True)
-    tabs_act.setToolTip(
-        "Switch between sub-window view (free move/resize) and tabbed "
-        "view (one document at a time).",
-    )
-
-    def _on_tabs_toggled(checked: bool) -> None:
-        if checked:
-            mdi.setViewMode(QMdiArea.TabbedView)
-        else:
-            mdi.setViewMode(QMdiArea.SubWindowView)
-
-    tabs_act.toggled.connect(_on_tabs_toggled)
-
-    # Persistent state on the app: the workspace window, its MDI area,
-    # and the list of book subwindows (so we can match a controller back
-    # to its subwindow when the user "Load file…"s a new TDMS).
-    app._data_fit_workspace = win
-    app._data_fit_workspace_mdi = mdi
-    app._data_fit_workspace_book_subs = {}  # id(controller) -> QMdiSubWindow
-
-    def _add_book_subwindow(ctrl) -> None:
-        """Create one subwindow per book."""
-        if id(ctrl) in app._data_fit_workspace_book_subs:
-            sub = app._data_fit_workspace_book_subs[id(ctrl)]
-            sub.show()
-            sub.raise_()
-            return
-        sub = QMdiSubWindow()
-        sub.setAttribute(Qt.WA_DeleteOnClose, False)
-        sub.setProperty("book_subwindow", True)
-        title = (f"📘 {os.path.basename(ctrl.tdms_path)}"
-                 if ctrl.tdms_path else "📘 (empty)")
-        sub.setWindowTitle(title)
-        widget, model = _build_book_widget(app, ctrl, sub)
-        sub.setWidget(widget)
-        mdi.addSubWindow(sub)
-        sub.resize(720, 520)
-        sub.show()
-        app._data_fit_workspace_book_subs[id(ctrl)] = sub
-
-        def _on_close(_e=None, _ctrl=ctrl, _sub=sub):
-            # Hide the subwindow on Close instead of destroying it so the
-            # underlying controller keeps its data; the user can re-open
-            # via the Window menu (or just by loading the same file).
-            _sub.hide()
-            return True
-
-        # The native close button on the subwindow title bar fires
-        # closeEvent; install a filter that just hides instead of
-        # destroying. Using a lambda avoids subclassing QMdiSubWindow.
-        old_close = sub.closeEvent
-
-        def _filter_close(event):
-            event.ignore()
-            sub.hide()
-
-        sub.closeEvent = _filter_close
-
-    for ctrl in books:
-        _add_book_subwindow(ctrl)
-
-    def _close_all_plots() -> None:
-        for sub in list(mdi.subWindowList()):
-            if sub.property("book_subwindow"):
-                continue
-            if sub.property("plot_subwindow"):
-                sub.close()
-
-    act_close_plots.triggered.connect(_close_all_plots)
-
-    def _on_load_file() -> None:
-        # Use the existing app-wide loader; it appends to data_fit_books.
-        before = list(books)
-        if hasattr(app, "data_fitting_open_file"):
-            app.data_fitting_open_file()
-        # Add subwindows for any newly-appended books.
-        for ctrl in books:
-            if ctrl not in before:
-                _add_book_subwindow(ctrl)
-
-    act_load.triggered.connect(_on_load_file)
-
-    act_tile.triggered.connect(mdi.tileSubWindows)
-    act_cascade.triggered.connect(mdi.cascadeSubWindows)
-
-    # Default arrangement: cascade so titles are visible.
-    QTimer = __import__("PyQt5.QtCore", fromlist=["QTimer"]).QTimer
-    QTimer.singleShot(0, mdi.cascadeSubWindows)
-
+    win.resize(960, 96)
+    _build_workspace_ui(app, win)
     win.show()
     win.raise_()
     win.activateWindow()
