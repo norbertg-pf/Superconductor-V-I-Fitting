@@ -9210,6 +9210,20 @@ def _open_workspace_window(app) -> None:
     act_close_plots = tb.addAction("✕ Close all plots")
     act_close_plots.setToolTip("Close every plot subwindow; books stay open.")
     tb.addSeparator()
+    act_capacitor = tb.addAction("🔋 Capacitor Testing")
+    act_capacitor.setToolTip(
+        "Open the standalone Capacitor Testing window: load a TDMS or ASCII\n"
+        "recording, compute Power = Row A × Row B, integrate over time for\n"
+        "energy (J), and capacity vs voltage at every 10 V step. Saves\n"
+        "derived data back to the source or to a new TDMS."
+    )
+
+    def _open_capacitor() -> None:
+        from .capacitor import open_capacitor_testing_window
+        open_capacitor_testing_window(app)
+
+    act_capacitor.triggered.connect(_open_capacitor)
+    tb.addSeparator()
     tabs_act = tb.addAction("Tabs view")
     tabs_act.setCheckable(True)
     tabs_act.setToolTip(
