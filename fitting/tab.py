@@ -9425,10 +9425,24 @@ def _build_workspace_ui(app, win) -> None:
     tb.addWidget(btn_save_tdms)
     tb.addSeparator()
 
-    # Spacer + V-I fitting launcher (right-aligned) ----------------------
+    # Spacer + tool launchers (right-aligned) ----------------------------
     spacer = QWidget(tb)
     spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
     tb.addWidget(spacer)
+
+    act_capacitor = tb.addAction("🔋 Capacitor Testing")
+    act_capacitor.setToolTip(
+        "Open the standalone Capacitor Testing window: load a TDMS or ASCII\n"
+        "recording, compute Power = Row A × Row B, integrate over time for\n"
+        "energy (J), and capacity vs voltage at every 10 V step. Saves\n"
+        "derived data back to the source or to a new TDMS."
+    )
+
+    def _open_capacitor() -> None:
+        from .capacitor import open_capacitor_testing_window
+        open_capacitor_testing_window(app)
+
+    act_capacitor.triggered.connect(_open_capacitor)
 
     fitting_opener = getattr(app, "_data_fit_open_fitting_window", None)
     if callable(fitting_opener):
