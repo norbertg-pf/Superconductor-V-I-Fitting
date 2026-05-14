@@ -9373,8 +9373,19 @@ def _apply_preset(app, preset: FitPreset) -> None:
     _set_silently(app.data_fit_didt_high, f"{preset.didt_high:g}")
     _set_silently(app.data_fit_linear_low, f"{preset.linear_low:g}")
     _set_silently(app.data_fit_linear_high, f"{preset.linear_high:g}")
-    _set_silently(app.data_fit_power_low, f"{preset.power_low:g}")
-    _set_silently(app.data_fit_power_vfrac, f"{preset.power_vfrac:g}")
+    # Step 5 power_low / power_vfrac are double-duty: % of Imax in non-linear
+    # mode, Ec1/Ec2 (µV/cm) in log-log mode. Older preset files written before
+    # the log-log defaults landed still hold the % values (5.0 / 80.0); when
+    # the active method is log-log those would land in the textboxes as
+    # nonsensical Ec values, so fall back to the IEC defaults instead.
+    preset_method = getattr(preset, "fit_method", FIT_METHOD_LOG_LOG)
+    power_low_val = float(preset.power_low)
+    power_vfrac_val = float(preset.power_vfrac)
+    if preset_method == FIT_METHOD_LOG_LOG and power_vfrac_val > 10.0:
+        power_low_val = DEFAULT_EC1_V_PER_CM * 1.0e6
+        power_vfrac_val = DEFAULT_EC2_V_PER_CM * 1.0e6
+    _set_silently(app.data_fit_power_low, f"{power_low_val:g}")
+    _set_silently(app.data_fit_power_vfrac, f"{power_vfrac_val:g}")
     _set_silently(app.data_fit_max_iter, f"{preset.max_iter}")
     _set_silently(app.data_fit_ic_tol, f"{preset.ic_tol_pct:g}")
     _set_silently(app.data_fit_chi_tol, f"{preset.chi_tol:g}")

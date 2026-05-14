@@ -1068,8 +1068,8 @@ class FitPreset:
     didt_high: float = 60.0
     linear_low: float = 5.0
     linear_high: float = 40.0
-    power_low: float = 5.0
-    power_vfrac: float = 80.0
+    power_low: float = 0.1
+    power_vfrac: float = 1.0
     max_iter: int = 10
     ic_tol_pct: float = 0.1
     chi_tol: float = 1.0e-9
