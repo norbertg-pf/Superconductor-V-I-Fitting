@@ -925,7 +925,7 @@ def _reset_data_fitting_defaults(app) -> None:
     if getattr(app, "data_fit_trim_start_abs", None) is not None:
         app.data_fit_trim_start_abs.setText("30")
     if getattr(app, "data_fit_trim_start_pct", None) is not None:
-        app.data_fit_trim_start_pct.setText("10.00")
+        app.data_fit_trim_start_pct.setText("5.00")
     if getattr(app, "data_fit_trim_quench_cb", None) is not None:
         app.data_fit_trim_quench_cb.setChecked(True)
     app.data_fit_didt_low.setText(f"{DEFAULT_DIDT_LOW_FRAC * 100:.2f}")
@@ -1336,13 +1336,13 @@ def setup_data_fitting_tab_layout(app):
 
     trim_group = QGroupBox("Step 2: Trim noisy start and quench tail")
     trim_layout = QGridLayout(trim_group)
-    trim_layout.addWidget(QLabel("Trim start by smaller of:"), 0, 0, 1, 2)
+    trim_layout.addWidget(QLabel("Trim start by larger of:"), 0, 0, 1, 2)
     trim_layout.addWidget(QLabel("Current (A):"), 1, 0)
     app.data_fit_trim_start_abs = QLineEdit("30")
     app.data_fit_trim_start_abs.setMaximumWidth(80)
     trim_layout.addWidget(app.data_fit_trim_start_abs, 1, 1)
     trim_layout.addWidget(QLabel("Current (% of Imax):"), 1, 2)
-    app.data_fit_trim_start_pct = _percent_edit(0.10)
+    app.data_fit_trim_start_pct = _percent_edit(0.05)
     trim_layout.addWidget(app.data_fit_trim_start_pct, 1, 3)
     app.data_fit_trim_quench_cb = QCheckBox("Auto-trim quench drop and cut 2% before drop")
     app.data_fit_trim_quench_cb.setChecked(True)
@@ -2028,10 +2028,10 @@ def _build_trim_mask(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if not np.any(mask):
         return None
     x_fin = np.asarray(x, dtype=float)
-    keep_low_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_start_abs", None), 10.0))
+    keep_low_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_start_abs", None), 30.0))
     keep_low_pct = max(0.0, _float_from(getattr(app, "data_fit_trim_start_pct", None), 5.0, as_fraction=True))
     x_max = float(np.nanmax(x_fin[mask]))
-    start_cut = min(keep_low_abs, keep_low_pct * max(x_max, 0.0))
+    start_cut = max(keep_low_abs, keep_low_pct * max(x_max, 0.0))
     if start_cut > 0:
         mask &= x_fin >= start_cut
     if bool(getattr(app, "data_fit_trim_quench_cb", None) and app.data_fit_trim_quench_cb.isChecked()):

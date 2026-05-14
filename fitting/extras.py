@@ -1118,7 +1118,7 @@ class FitPreset:
     zero_i_frac_pct: float = 2.0
     # Step 2 — trim noisy start and quench tail.
     trim_start_abs: float = 30.0
-    trim_start_pct: float = 10.0
+    trim_start_pct: float = 5.0
     trim_quench: bool = True
     # Step 3 — di/dt window editors and slope estimator.
     show_didt: bool = False

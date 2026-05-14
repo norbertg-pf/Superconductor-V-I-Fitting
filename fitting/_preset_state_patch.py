@@ -162,7 +162,7 @@ _CHECKBOX_WIDGETS = (
 _FLOAT_WIDGETS = (
     ("data_fit_zero_i_frac", "zero_i_frac_pct", 2.0),
     ("data_fit_trim_start_abs", "trim_start_abs", 30.0),
-    ("data_fit_trim_start_pct", "trim_start_pct", 10.0),
+    ("data_fit_trim_start_pct", "trim_start_pct", 5.0),
 )
 
 # Step 3/4/5 estimator/weighting combos. The combo data string ("ols",
