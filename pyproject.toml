@@ -21,3 +21,10 @@ vi-fitting = "fitting.standalone:main"
 
 [tool.setuptools]
 packages = ["fitting"]
+
+[tool.uv]
+# pyqt5-qt5 5.15.19 ships no win_amd64 wheel; declaring the Windows target as a
+# required environment forces uv to backtrack to a version that has one.
+required-environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
