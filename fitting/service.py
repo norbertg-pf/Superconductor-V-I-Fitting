@@ -1,7 +1,8 @@
 """Superconductor V-I fitting service (IEC 61788 power-law criterion: y = L*di/dt + R*x + Vc*(x/Ic)**n).
 
 Exports: estimate_di_dt, fit_linear_baseline, fit_power_law, fit_n_value_log_log,
-run_full_fit, robust_view_range, FitSettings, FitResult.
+run_full_fit, robust_view_range, FitSettings, FitResult, window_average_stats,
+find_current_plateaus, fit_reduced_ic, ReducedFitResult.
 """
 from __future__ import annotations
 
@@ -664,10 +665,18 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
             f"Data never reaches Ec2 = {Ec2:.3g} on the corrected+smoothed curve; "
             "ramp further or lower Ec2."
         )
+    # Contiguous transition window: walk backward from the Ec2 crossing to
+    # the nearest point at/below Ec1 (same algorithm the Step-5 UI uses to
+    # draw the Low(X)/High(X) band). A plain (Ec1 <= E <= Ec2) threshold
+    # mask instead would also pick up any earlier, disconnected noise-driven
+    # excursion above Ec1 elsewhere in the ramp, mixing unrelated points
+    # into the regression alongside the true transition segment.
+    I_lo, I_hi = pick_loglog_i_window_from_thresholds(
+        xs, e_sc_bounds, ec1=Ec1, ec2=Ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
+    )
     mask = (
-        (e_sc_bounds >= Ec1)
-        & (e_sc_bounds <= Ec2)
-        & in_guard
+        (xs >= I_lo)
+        & (xs <= I_hi)
         & np.isfinite(e_sc_bounds)
         & np.isfinite(xs)
     )
@@ -759,9 +768,6 @@ def fit_n_value_log_log(x: np.ndarray, y: np.ndarray,
     # σ(Ic) ≈ Ic · ln(10) · σ(log10 Ic) for small relative error.
     sigma_Ic = float(Ic_at_crit * np.log(10.0) * sigma_log_Ic)
     sigma_n = float(sigma_slope)
-    I_lo, I_hi = pick_loglog_i_window_from_thresholds(
-        xs, e_sc_bounds, ec1=Ec1, ec2=Ec2, guard_fraction=DEFAULT_EC_WINDOW_GUARD_FRAC,
-    )
     return (Ic_at_crit, n_val, chi_sqr, n_pts, (I_lo, I_hi),
             sigma_Ic, sigma_n, r_squared)
 
@@ -1405,4 +1411,176 @@ def run_full_fit(t: np.ndarray, x: np.ndarray, y: np.ndarray,
         weighting_mode=weight_mode,
         baseline_mode=baseline_mode,
         sample_length_cm=settings.sample_length_cm if uses_length else None,
+    )
+
+
+def window_average_stats(
+    time: np.ndarray,
+    current: Optional[np.ndarray],
+    voltage_channels: dict,
+    t0: float,
+    t1: float,
+) -> dict:
+    """Summarize a time window for the Plateau R calculation tab.
+
+    Returns ``{"n_points": int, "avg_i": float|None, "channels": {name:
+    {"avg_v": float|None, "avg_r": float|None}}}`` for samples with
+    ``t0 <= time <= t1`` (``t0``/``t1`` need not be ordered). ``avg_i``,
+    ``avg_v`` and ``avg_r`` are ``None`` when the window is empty or
+    ``current`` is unavailable/zero.
+    """
+    lo, hi = (t0, t1) if t0 <= t1 else (t1, t0)
+    time = np.asarray(time, dtype=float)
+    mask = (time >= lo) & (time <= hi)
+    n_points = int(np.count_nonzero(mask))
+
+    avg_i = None
+    if current is not None and n_points:
+        avg_i = float(np.mean(np.asarray(current, dtype=float)[mask]))
+
+    channels: dict = {}
+    for name, values in voltage_channels.items():
+        if not n_points:
+            channels[name] = {"avg_v": None, "avg_r": None}
+            continue
+        avg_v = float(np.mean(np.asarray(values, dtype=float)[mask]))
+        avg_r = (avg_v / avg_i) if avg_i else None
+        channels[name] = {"avg_v": avg_v, "avg_r": avg_r}
+
+    return {"n_points": n_points, "avg_i": avg_i, "channels": channels}
+
+
+DEFAULT_PLATEAU_CURRENT_BAND_A = 20.0   # current stability tolerance: +/- this many amps
+DEFAULT_PLATEAU_MIN_DURATION_S = 10.0   # minimum plateau duration (s)
+DEFAULT_PLATEAU_MIN_CURRENT_A = 50.0    # ignore plateaus below this |current| (A)
+
+
+def find_current_plateaus(
+    time: np.ndarray,
+    current: np.ndarray,
+    band: float = DEFAULT_PLATEAU_CURRENT_BAND_A,
+    min_duration: float = DEFAULT_PLATEAU_MIN_DURATION_S,
+    min_current: float = DEFAULT_PLATEAU_MIN_CURRENT_A,
+) -> list:
+    """Detect stable current plateaus for the Plateau R tab's auto-window feature.
+
+    A plateau is the longest run of consecutive samples starting at some
+    index whose current stays within a ``2*band`` peak-to-peak envelope
+    (i.e. every sample within ``band`` of the run's own min/max), whose
+    duration is at least ``min_duration`` seconds, and whose mean |current|
+    is at least ``min_current`` (skips low-current dwells, e.g. near zero
+    between ramps). Returns one ``(t_start, t_end)`` pair per detected
+    plateau, covering only the *second half* of each plateau's duration
+    (early samples are more likely to still be settling after a current
+    step).
+    """
+    time = np.asarray(time, dtype=float)
+    current = np.asarray(current, dtype=float)
+    n = len(current)
+    band_width = 2.0 * band
+
+    windows = []
+    start = 0
+    while start < n - 1:
+        end = start
+        lo = hi = current[start]
+        while end + 1 < n:
+            nxt = current[end + 1]
+            new_lo = min(lo, nxt)
+            new_hi = max(hi, nxt)
+            if new_hi - new_lo > band_width:
+                break
+            end += 1
+            lo, hi = new_lo, new_hi
+        duration = time[end] - time[start]
+        if duration >= min_duration:
+            seg_mean = float(np.mean(current[start:end + 1]))
+            if abs(seg_mean) >= min_current:
+                mid_time = (time[start] + time[end]) / 2.0
+                windows.append((float(mid_time), float(time[end])))
+            start = end + 1
+        else:
+            start += 1
+    return windows
+
+
+@dataclass
+class ReducedFitResult:
+    """Result of :func:`fit_reduced_ic` — a lightweight sibling of
+    :class:`FitResult` for the Plateau R tab's sparse-point Ic fit."""
+
+    ok: bool
+    message: str = ""
+    V0: float = 0.0
+    R: float = 0.0
+    Ic: float = 0.0
+    n_value: float = 0.0
+    criterion: float = 0.0
+    sigma_Ic: float = 0.0
+    sigma_n: float = 0.0
+    r_squared: float = 0.0
+    n_points_used: int = 0
+    fit_x: Optional[np.ndarray] = None
+    fit_y: Optional[np.ndarray] = None
+
+
+def fit_reduced_ic(
+    current: np.ndarray,
+    voltage: np.ndarray,
+    criterion_voltage: float,
+    initial_n: float = 20.0,
+) -> ReducedFitResult:
+    """Fit V = V0 + R*I + Vc*(I/Ic)^n to sparse plateau-averaged (I, V) points.
+
+    Used by the Plateau R tab's "Derived V vs I" fit, where there are only a
+    handful of points (one per detected plateau) rather than a dense ramp —
+    so V0, R, Ic and n are solved simultaneously in one ``curve_fit`` call,
+    unlike ``run_full_fit``'s Step 1-5 pipeline (built for continuous
+    sweeps: separate di/dt, baseline and power-law windows). ``criterion_voltage``
+    (Vc) is fixed, not fitted — it's the voltage that defines Ic, typically
+    tap-length x 1 uV/cm (IEC 61788).
+    """
+    I, V = _clean_arrays(current, voltage)
+    order = np.argsort(I)
+    I, V = I[order], V[order]
+    if I.size < 4:
+        return ReducedFitResult(ok=False, message="Need at least 4 plateau points to fit.")
+
+    Vc = float(criterion_voltage)
+    n_lin = max(2, I.size // 3)
+    (R0, V0_0), *_ = np.linalg.lstsq(
+        np.vstack([I[:n_lin], np.ones(n_lin)]).T, V[:n_lin], rcond=None
+    )
+    Ic0 = max(float(np.max(I)) * 0.9, 1e-9)
+
+    def model(x, V0, R, Ic, n):
+        return V0 + R * x + Vc * np.power(np.clip(x / max(Ic, 1e-30), 1e-30, None), n)
+
+    p0 = [float(V0_0), float(R0), Ic0, float(initial_n)]
+    bounds = (
+        [-np.inf, -np.inf, max(float(np.min(I)), 1e-9) * 0.1, 1.0],
+        [np.inf, np.inf, float(np.max(I)) * 10.0, 200.0],
+    )
+    try:
+        popt, pcov = curve_fit(model, I, V, p0=p0, bounds=bounds, maxfev=20000)
+    except (ValueError, RuntimeError) as exc:
+        return ReducedFitResult(ok=False, message=f"Fit failed: {exc}")
+
+    V0, R, Ic, n_val = (float(v) for v in popt)
+    model_y = model(I, V0, R, Ic, n_val)
+    residuals = V - model_y
+    chi_sqr = float(np.sum(residuals ** 2))
+    ss_tot = float(np.sum((V - np.mean(V)) ** 2))
+    r_squared = float(1.0 - chi_sqr / ss_tot) if ss_tot > 0 else 0.0
+    diag = np.clip(np.diag(pcov), 0.0, None)
+    _sigma_V0, _sigma_R, sigma_Ic, sigma_n = (float(np.sqrt(d)) for d in diag)
+
+    fit_x = np.linspace(float(np.min(I)), float(np.max(I)), 200)
+    fit_y = model(fit_x, V0, R, Ic, n_val)
+
+    return ReducedFitResult(
+        ok=True, message="Fit succeeded.",
+        V0=V0, R=R, Ic=Ic, n_value=n_val, criterion=Vc,
+        sigma_Ic=sigma_Ic, sigma_n=sigma_n, r_squared=r_squared,
+        n_points_used=int(I.size), fit_x=fit_x, fit_y=fit_y,
     )
