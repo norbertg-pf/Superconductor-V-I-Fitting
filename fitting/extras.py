@@ -394,6 +394,47 @@ def apply_graph_settings(plot_widget, raw_curve, x, y, settings: GraphSettings) 
     _apply_custom_grid(plot_item, settings.grid_v, settings.grid_h)
 
 
+def apply_plot_font_size(
+    plot_widget, base_pt: int, *, style_titles: bool = True, style_legend: bool = True,
+) -> None:
+    """Scale one plot's text to ``base_pt`` — the Settings dialog's single,
+    global "Font size" preference, since screen size/DPI varies per user
+    rather than per plot.
+
+    Tick labels are always sized to ``base_pt``. When ``style_titles`` is
+    True, axis titles are sized to ``base_pt + 2`` and the plot title (if
+    any) to ``base_pt + 4`` — the tab's own Graph-settings dialog already
+    owns axis/plot-title size for the Ic-fitting tab's main plot, so callers
+    pass ``style_titles=False`` there to avoid fighting that per-plot
+    control; plots with no such dialog (e.g. the Plateau tab) pass the
+    default so titles scale too. When ``style_legend`` is True and the plot
+    has a legend, its entries are sized to ``base_pt`` as well.
+    """
+    plot_item = plot_widget.getPlotItem()
+    size = max(4, int(base_pt))
+    tick_font = QFont()
+    tick_font.setPointSize(size)
+    for axis_name in ("bottom", "top", "left", "right"):
+        axis = plot_item.getAxis(axis_name)
+        axis.setStyle(tickFont=tick_font)
+        if style_titles:
+            # Merge into the existing labelStyle dict (rather than calling
+            # setLabel(), which would wipe the axis's current text/units)
+            # so only the size changes.
+            style = dict(getattr(axis, "labelStyle", None) or {})
+            style["font-size"] = f"{size + 2}pt"
+            axis.labelStyle = style
+            axis._updateLabel()
+    if style_titles:
+        title_label = getattr(plot_item, "titleLabel", None)
+        if title_label is not None and getattr(title_label, "text", ""):
+            plot_item.setTitle(title_label.text, size=f"{size + 4}pt")
+    if style_legend:
+        legend = getattr(plot_item, "legend", None)
+        if legend is not None:
+            legend.setLabelTextSize(f"{size}pt")
+
+
 def _html_for_title(text: str, color: str, size: int, font_family: str) -> str:
     parts = [f"color:{_parse_color(color).name()}", f"font-size:{int(size)}pt"]
     if font_family:
@@ -514,8 +555,20 @@ class _PlotGridOverlay(QGraphicsObject):
         self._grid_h: Optional[GridConfig] = None
         self.setZValue(-100)  # Behind data curves.
         vb = plot_item.getViewBox()
-        vb.sigRangeChanged.connect(lambda *_: self.update())
-        vb.sigResized.connect(lambda *_: self.update())
+        vb.sigRangeChanged.connect(lambda *_: self._on_view_changed())
+        vb.sigResized.connect(lambda *_: self._on_view_changed())
+
+    def _on_view_changed(self) -> None:
+        # boundingRect() tracks the live view range, which changes on every
+        # pan/zoom/resize. Qt requires prepareGeometryChange() to be called
+        # *before* a QGraphicsItem's geometry changes so the scene discards
+        # its stale cached bounding rect/exposed region — skipping it left
+        # interactive pan/zoom repainting only the portion of the grid that
+        # happened to overlap the previous view, leaving stale gridline
+        # fragments from earlier zoom states behind (visible as disjoint,
+        # inconsistently-spaced clusters rather than one coherent grid).
+        self.prepareGeometryChange()
+        self.update()
 
     def set_config(self, grid_v: GridConfig, grid_h: GridConfig) -> None:
         self._grid_v = grid_v
@@ -1088,7 +1141,7 @@ class FitPreset:
     save_fit_in_same_group: bool = True
     # When True, loading a TDMS or finishing an acquisition auto-populates
     # the Data Fitting tab with the source curves and any saved fit overlays.
-    auto_load_after_acquisition: bool = True
+    auto_load_after_acquisition: bool = False
     # When True, every fit attempt (success or failure) is automatically
     # written into the loaded TDMS as fit metadata. When False, fits run
     # silently and the user must press the Save metadata button to persist.
@@ -1135,6 +1188,11 @@ class FitPreset:
     weight_mode: str = "weighted"
     power_low_x: str = ""
     power_high_x: str = ""
+    # Global plot font size (points), applied to tick labels/axis titles/
+    # legends across every plot in both tabs (Settings dialog) — screens
+    # vary enough in size/DPI that a single shared preference beats
+    # per-plot styling for this.
+    plot_font_pt: int = 9
 
 
 def preset_to_dict(preset: FitPreset) -> dict[str, Any]:

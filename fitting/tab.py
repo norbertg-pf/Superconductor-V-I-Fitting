@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -95,6 +96,7 @@ from .extras import (
     GraphSettings,
     GraphSettingsDialog,
     apply_graph_settings,
+    apply_plot_font_size,
     load_preset_from_file,
     save_preset_to_file,
 )
@@ -107,6 +109,8 @@ class _FitParamTable(pg.TextItem):
 
     def __init__(self):
         super().__init__(text="", anchor=(0, 0), color=(30, 30, 30))
+        self._font_pt = 10
+        self._last_results: list[tuple[str, object]] = []
         self.setHtml(self._empty_html())
         self.setZValue(50)
         self._dragging = False
@@ -114,14 +118,23 @@ class _FitParamTable(pg.TextItem):
         self._user_positioned = False
         self.setFlag(self.ItemIsMovable, True) if hasattr(self, "setFlag") else None
 
-    @staticmethod
-    def _empty_html() -> str:
-        return "<i style='color:#777'>Run a fit to see parameters here.</i>"
+    def _empty_html(self) -> str:
+        return f"<i style='color:#777; font-size:{self._font_pt}pt'>Run a fit to see parameters here.</i>"
+
+    def set_font_size(self, pt: int) -> None:
+        """Rescale the table's text — driven by the Settings dialog's global
+        plot-font-size preference, same as tick labels and axis titles."""
+        self._font_pt = max(4, int(pt))
+        if self._last_results:
+            self.set_parameters_for_curves(self._last_results)
+        else:
+            self.setHtml(self._empty_html())
 
     def set_parameters(self, result) -> None:
         self.set_parameters_for_curves([("Fit", result)])
 
     def set_parameters_for_curves(self, results: list[tuple[str, object]]) -> None:
+        self._last_results = list(results)
         if not results:
             self.clear_parameters()
             return
@@ -154,7 +167,8 @@ class _FitParamTable(pg.TextItem):
                 f"<tr><td style='padding-right:10px;'><b>{row_name}</b></td>{''.join(row_cells)}</tr>"
             )
         self.setHtml(
-            "<div style='background:rgba(255,255,255,200); border:1px solid #999; padding:5px 8px;'>"
+            f"<div style='background:rgba(255,255,255,200); border:1px solid #999; "
+            f"padding:5px 8px; font-size:{self._font_pt}pt;'>"
             "<table cellspacing='0'>"
             f"<tr><th></th>{header_cells}</tr>"
             + "".join(body_rows)
@@ -162,6 +176,7 @@ class _FitParamTable(pg.TextItem):
         )
 
     def clear_parameters(self) -> None:
+        self._last_results = []
         self.setHtml(self._empty_html())
 
     # Mouse-drag support ---------------------------------------------------
@@ -266,7 +281,6 @@ def _capture_fit_window_profile(app, prior: Optional[dict] = None) -> dict:
         "max_iter": app.data_fit_max_iter.text(),
         "ic_tol": app.data_fit_ic_tol.text(),
         "chi_tol": app.data_fit_chi_tol.text(),
-        "vc": app.data_fit_vc_input.text(),
         "auto_ec_adjust": (
             app.data_fit_auto_ec_cb.isChecked()
             if getattr(app, "data_fit_auto_ec_cb", None) is not None
@@ -413,7 +427,6 @@ def _apply_fit_window_profile(app, profile: dict) -> None:
         (app.data_fit_max_iter, "max_iter"),
         (app.data_fit_ic_tol, "ic_tol"),
         (app.data_fit_chi_tol, "chi_tol"),
-        (app.data_fit_vc_input, "vc"),
         (getattr(app, "data_fit_auto_ec1_min", None), "auto_ec1_min"),
         (getattr(app, "data_fit_auto_ec2_min", None), "auto_ec2_min"),
         (getattr(app, "data_fit_auto_ec1_max", None), "auto_ec1_max"),
@@ -547,7 +560,8 @@ def _read_time_channel(tdms_file):
 
 
 _VTAP_KEYS = ("VTap_Distance_cm", "Voltage_Tap_Distance_cm",
-              "Voltage_Tap_Distance", "Voltage_Tab_Distance")
+              "Voltage_Tap_Distance", "Voltage_Tab_Distance",
+              "Voltage_Tab_Distance_cm")
 
 
 def _read_channel_metadata(channel) -> dict:
@@ -999,7 +1013,7 @@ def _reset_data_fitting_defaults(app) -> None:
     # user a clean slate for the next session. ``hasattr`` is not enough —
     # the Python attribute can outlive its C++ QCheckBox after a Settings
     # dialog round-trip, so use the safe setter that swallows RuntimeError.
-    _safe_checkbox_set_checked(app, "data_fit_auto_load_cb", True)
+    _safe_checkbox_set_checked(app, "data_fit_auto_load_cb", False)
     _safe_checkbox_set_checked(app, "data_fit_autosave_cb", True)
     _safe_checkbox_set_checked(app, "data_fit_save_separate_cb", False)
     _safe_checkbox_set_checked(app, "data_fit_same_group_cb", True)
@@ -1022,7 +1036,16 @@ def _save_active_curve_profile(app) -> None:
     key = _curve_profile_key_from_ui(app)
     profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
     prior = profiles.get(key, {}) if isinstance(profiles, dict) else {}
-    profiles[key] = _capture_fit_window_profile(app, prior=prior)
+    snapshot = _capture_fit_window_profile(app, prior=prior)
+    # Steps 1-5 (trim, thermal offset, di/dt, linear, Ic/n-value windows) are
+    # meant to apply to every plotted curve — they're all fit against the
+    # same shared current ramp — so broadcast the freshly edited values to
+    # every curve's stored profile (and the live-preview slot), not just
+    # whichever curve happens to be active in the selector. Without this,
+    # editing a window only ever affected the last-selected curve.
+    for existing_key in list(profiles.keys()):
+        profiles[existing_key] = dict(snapshot)
+    profiles[key] = snapshot
     app.data_fit_curve_profiles = profiles
 
 
@@ -1082,12 +1105,25 @@ def _find_curve_for_profile_key(app, key: str) -> Optional[dict]:
 
 
 def _sync_active_length_settings(app, *, use_length: bool, length_cm: float) -> None:
+    """Silently sync the "use length" checkbox/input to a stored curve profile.
+
+    Called whenever the active curve profile changes (e.g. selecting a
+    different curve, or every time Plot Summary opens) purely to keep
+    dependent labels/units in sync — it is not a user-initiated toggle, so
+    the view range is snapshotted/restored around ``_on_use_length_changed``
+    to avoid resetting the user's zoom via its ``refresh_preview`` call.
+    """
     app.data_fit_use_length_cb.blockSignals(True)
     app.data_fit_use_length_cb.setChecked(bool(use_length))
     app.data_fit_use_length_cb.blockSignals(False)
     if length_cm > 0:
         _set_silently(app.data_fit_length_input, f"{float(length_cm):g}")
+    vb = app.data_fit_plot.getPlotItem().getViewBox()
+    saved_x = tuple(vb.viewRange()[0])
+    saved_y = tuple(vb.viewRange()[1])
     _on_use_length_changed(app)
+    vb.setXRange(saved_x[0], saved_x[1], padding=0)
+    vb.setYRange(saved_y[0], saved_y[1], padding=0)
 
 
 def _sync_active_length_settings_from_profile_key(app, key: str) -> None:
@@ -1145,19 +1181,24 @@ def setup_data_fitting_tab_layout(app):
     # Settings checkboxes live in the Settings dialog (constructed lazily when
     # the user clicks the button) but the QCheckBox instances themselves are
     # kept on ``app`` so the rest of the tab can read their state directly.
-    # All four default to "checked" — i.e. metadata is saved automatically,
-    # in the same group/channel, and the tab auto-loads the fitted recording.
+    # Metadata-saving defaults to "checked" (autosave/same-group), but
+    # auto-loading previously saved fits defaults to OFF — replaying a
+    # cached fit alongside a freshly-added curve for the same channel
+    # creates two visually-identical entries in "Curve label", which made
+    # it easy to edit the wrong one's Step 1-5 settings. Fitting fresh each
+    # time is the safer default; this box lets you opt back into replay.
     app.data_fit_auto_load_cb = QCheckBox(
         "Auto-load fitted recording into plot after acquisition or on file load"
     )
-    app.data_fit_auto_load_cb.setChecked(True)
+    app.data_fit_auto_load_cb.setChecked(False)
     app.data_fit_auto_load_cb.setToolTip(
-        "Checked (default): after Stop Read, the just-finished TDMS is loaded\n"
-        "into the Data Fitting tab and every fit-enabled voltage channel is\n"
-        "plotted with its fitted curve. Loading a previously fitted TDMS also\n"
-        "redraws the saved fit overlays.\n"
-        "Unchecked: post-acquisition fits are still written to the TDMS as\n"
-        "channel metadata, but the Data Fitting plot is not refreshed."
+        "Unchecked (default): fits are generated fresh each time — loading a\n"
+        "previously fitted TDMS does not replay its saved fit overlays.\n"
+        "Checked: after Stop Read, the just-finished TDMS is loaded into the\n"
+        "Data Fitting tab and every fit-enabled voltage channel is plotted\n"
+        "with its fitted curve; loading a previously fitted TDMS also redraws\n"
+        "the saved fit overlays. Post-acquisition fits are always written to\n"
+        "the TDMS as channel metadata regardless of this setting."
     )
     app.data_fit_autosave_cb = QCheckBox(
         "Automatically save fitting parameters as metadata"
@@ -1192,6 +1233,22 @@ def setup_data_fitting_tab_layout(app):
         "one channel per fitted curve. Useful when several fits with different\n"
         "settings should coexist without overwriting each other.\n"
         "Greyed out when 'Save fit results to a separate TDMS file' is checked."
+    )
+
+    # Global plot font size — one shared preference (not per-plot) since
+    # what's hard to read depends on the user's screen, not which plot it is.
+    # Applies to tick labels/axis titles/legends on every plot in both tabs.
+    app.data_fit_font_spin = QSpinBox()
+    app.data_fit_font_spin.setRange(6, 24)
+    app.data_fit_font_spin.setValue(9)
+    app.data_fit_font_spin.setSuffix(" pt")
+    app.data_fit_font_spin.setToolTip(
+        "Font size for tick labels, axis titles and legends across every\n"
+        "plot in both tabs — one shared size, since readability depends on\n"
+        "your screen rather than which plot you're looking at."
+    )
+    app.data_fit_font_spin.valueChanged.connect(
+        lambda v: _on_plot_font_size_changed(app, v)
     )
 
     app.data_fit_channels_group = QGroupBox("Channels (displayed = raw * scale - offset)")
@@ -1344,7 +1401,7 @@ def setup_data_fitting_tab_layout(app):
     trim_layout.addWidget(QLabel("Current (% of Imax):"), 1, 2)
     app.data_fit_trim_start_pct = _percent_edit(0.05)
     trim_layout.addWidget(app.data_fit_trim_start_pct, 1, 3)
-    app.data_fit_trim_quench_cb = QCheckBox("Auto-trim quench drop and cut 2% before drop")
+    app.data_fit_trim_quench_cb = QCheckBox("Auto-trim quench drop and cut 1% before drop")
     app.data_fit_trim_quench_cb.setChecked(True)
     trim_layout.addWidget(app.data_fit_trim_quench_cb, 2, 0, 1, 4)
     left.addWidget(trim_group)
@@ -1744,6 +1801,10 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_plot.setLabel("bottom", "Current (A)")
     app.data_fit_plot.setLabel("left", "Voltage (V)")
     app.data_fit_plot.showGrid(x=True, y=True)
+    # A small margin keeps the top/right axis border lines from sitting flush
+    # against the widget's own edge — at the default 0px margin they can be
+    # clipped away entirely by DPI-scaling pixel rounding.
+    app.data_fit_plot.getPlotItem().setContentsMargins(4, 4, 4, 4)
     app.data_fit_plot.getPlotItem().getViewBox().setMouseMode(pg.ViewBox.PanMode)
     app.data_fit_raw_curve = app.data_fit_plot.plot(pen=pg.mkPen("b", width=1.5), name="Raw")
     app.data_fit_model_curve = app.data_fit_plot.plot(pen=pg.mkPen("r", width=2), name="Fit")
@@ -1818,6 +1879,7 @@ def setup_data_fitting_tab_layout(app):
     app.data_fit_resid_plot.setLabel("bottom", "Current (A)")
     app.data_fit_resid_plot.setLabel("left", "Residual")
     app.data_fit_resid_plot.showGrid(x=True, y=True)
+    app.data_fit_resid_plot.getPlotItem().setContentsMargins(4, 4, 4, 4)
     app.data_fit_resid_plot.setXLink(app.data_fit_plot)
     app.data_fit_resid_curve = app.data_fit_resid_plot.plot(
         pen=None, symbol="o", symbolSize=3,
@@ -1944,8 +2006,20 @@ def _apply_transforms(app, *, apply_trim: bool = False):
 
 
 
-def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndarray] = None):
-    """Apply Step 2 mask to arrays and return trimmed copies."""
+def _trim_xyz_with_step15(
+    app,
+    x: np.ndarray,
+    y: np.ndarray,
+    t: Optional[np.ndarray] = None,
+    *,
+    trim_start_abs: Optional[float] = None,
+    trim_start_pct: Optional[float] = None,
+    trim_quench: Optional[bool] = None,
+):
+    """Apply Step 2 mask to arrays and return trimmed copies.
+
+    See :func:`_build_trim_mask` for the optional per-call overrides.
+    """
     x_arr = np.asarray(x, dtype=float)
     y_arr = np.asarray(y, dtype=float)
     t_arr = np.asarray(t, dtype=float) if t is not None else None
@@ -1956,7 +2030,13 @@ def _trim_xyz_with_step15(app, x: np.ndarray, y: np.ndarray, t: Optional[np.ndar
     y_arr = y_arr[:n]
     if t_arr is not None:
         t_arr = t_arr[:n]
-    mask = _build_trim_mask(app, x_arr)
+    mask = _build_trim_mask(
+        app,
+        x_arr,
+        trim_start_abs=trim_start_abs,
+        trim_start_pct=trim_start_pct,
+        trim_quench=trim_quench,
+    )
     if mask is None or not np.any(mask):
         return x_arr, y_arr, t_arr
     x_out = x_arr[mask]
@@ -2021,23 +2101,49 @@ def _trim_active_curve_entry_in_place(app) -> bool:
         _refresh_curve_item(entry)
         return True
     return False
-def _build_trim_mask(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
+def _build_trim_mask(
+    app,
+    x: Optional[np.ndarray],
+    *,
+    trim_start_abs: Optional[float] = None,
+    trim_start_pct: Optional[float] = None,
+    trim_quench: Optional[bool] = None,
+) -> Optional[np.ndarray]:
+    """Build the Step 2 keep-mask for ``x``.
+
+    ``trim_start_abs``/``trim_start_pct``/``trim_quench`` let a caller pin
+    the Step 2 settings explicitly (e.g. a specific curve's own stored
+    profile during a multi-curve Run Fit) instead of reading whatever the
+    live widgets currently show — which reflects only whichever curve is
+    active in the "Active fitting settings selector", not necessarily the
+    curve being trimmed.
+    """
     if x is None or x.size == 0:
         return None
     mask = np.isfinite(x)
     if not np.any(mask):
         return None
     x_fin = np.asarray(x, dtype=float)
-    keep_low_abs = max(0.0, _float_from(getattr(app, "data_fit_trim_start_abs", None), 30.0))
-    keep_low_pct = max(0.0, _float_from(getattr(app, "data_fit_trim_start_pct", None), 5.0, as_fraction=True))
+    if trim_start_abs is None:
+        trim_start_abs = _float_from(getattr(app, "data_fit_trim_start_abs", None), 30.0)
+    if trim_start_pct is None:
+        trim_start_pct = _float_from(
+            getattr(app, "data_fit_trim_start_pct", None), 5.0, as_fraction=True
+        )
+    if trim_quench is None:
+        trim_quench = bool(
+            getattr(app, "data_fit_trim_quench_cb", None) and app.data_fit_trim_quench_cb.isChecked()
+        )
+    keep_low_abs = max(0.0, trim_start_abs)
+    keep_low_pct = max(0.0, trim_start_pct)
     x_max = float(np.nanmax(x_fin[mask]))
     start_cut = max(keep_low_abs, keep_low_pct * max(x_max, 0.0))
     if start_cut > 0:
         mask &= x_fin >= start_cut
-    if bool(getattr(app, "data_fit_trim_quench_cb", None) and app.data_fit_trim_quench_cb.isChecked()):
+    if trim_quench:
         stop_idx = _detect_quench_drop_index(x_fin)
         if stop_idx is not None and stop_idx > 3:
-            margin_pts = max(1, int(0.02 * x_fin.size))
+            margin_pts = max(1, int(0.01 * x_fin.size))
             stop_idx = max(0, stop_idx - margin_pts)
             idx = np.arange(x_fin.size)
             mask &= idx <= stop_idx
@@ -2325,6 +2431,14 @@ def _settings_for_entry(app, entry: dict) -> FitSettings:
 
     Looks up the curve's stored profile (or the preview profile, or finally
     the live UI) so each curve can carry its own fit method and windows.
+
+    Ec1/Ec2 are the exception: they define the IEC decade *criterion*
+    window, which is meant to apply uniformly to every plotted curve rather
+    than vary per curve like the Step 3/4 windows do. Whatever a curve's
+    profile happens to have stored for Ec1/Ec2 (e.g. from whenever it was
+    added, or last active) is overridden with whatever the Ec1/Ec2 boxes
+    currently show, so editing them affects every curve in the next Run Fit
+    — not just whichever curve happened to be selected when you typed them.
     """
     profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
     key = _profile_key_for_entry(entry)
@@ -2332,7 +2446,35 @@ def _settings_for_entry(app, entry: dict) -> FitSettings:
     if not profile:
         return _settings_from_inputs(app)
     use_length, length_cm = _entry_length_settings(app, entry)
-    return _settings_from_profile(profile, use_length=use_length, length_cm=length_cm)
+    settings = _settings_from_profile(profile, use_length=use_length, length_cm=length_cm)
+    if settings.fit_method == FIT_METHOD_LOG_LOG:
+        to_si = 1.0e-6 if use_length else 1.0e-3
+        settings.ec1 = _float_from(app.data_fit_power_low, DEFAULT_EC1_V_PER_CM * 1.0e6) * to_si
+        settings.ec2 = _float_from(app.data_fit_power_vfrac, DEFAULT_EC2_V_PER_CM * 1.0e6) * to_si
+    return settings
+
+
+def _step2_overrides_for_entry(app, entry: dict) -> dict:
+    """Step 2 (trim start / quench-tail) settings for one fit entry.
+
+    Unlike Steps 1/3/4/5 (carried entirely by the ``FitSettings`` a curve's
+    stored profile produces), Step 2 trimming is applied earlier via
+    :func:`_build_trim_mask`, which otherwise reads the live Step 2 widgets
+    directly. Those widgets show whichever curve is currently active in the
+    "Active fitting settings selector" — so without this lookup, a
+    multi-curve Run Fit would trim every curve using just one curve's Step 2
+    settings instead of each curve's own.
+    """
+    profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
+    key = _profile_key_for_entry(entry)
+    profile = profiles.get(key) if isinstance(profiles, dict) else None
+    if not profile:
+        return {}
+    return {
+        "trim_start_abs": _profile_text_float(profile, "trim_start_abs", 30.0),
+        "trim_start_pct": _profile_text_float(profile, "trim_start_pct", 5.0, as_fraction=True),
+        "trim_quench": bool(profile.get("trim_quench", True)),
+    }
 
 
 def _populate_channel_combos(app):
@@ -2482,29 +2624,19 @@ def open_file_dialog(app):
     if not path:
         return
 
+    # Every load starts from a clean slate — previously plotted curves
+    # (including any from other loaded files) are cleared rather than
+    # accumulating, so "Load File..." always shows just the new recording.
+    _reset_data_fitting_defaults(app)
+    _clear_plot_state_for_new_recording(app)
     books = _data_fit_get_books(app)
+    books.clear()
     current = getattr(app, "data_fit_controller", None)
-    is_first_book = not books and (current is None or not current.tdms_path)
-
-    if is_first_book:
-        # First book — start from a clean slate (preserves the historical UX)
-        # and load into the bootstrap controller so existing pointers stay valid.
-        _reset_data_fitting_defaults(app)
-        _clear_plot_state_for_new_recording(app)
-        target = current if current is not None else DataFittingController(app)
-        ok, msg = target.load_recording(path)
-        if ok:
-            app.data_fit_controller = target
-            books.append(target)
-    else:
-        # Subsequent loads add a new book without wiping settings or plotted
-        # curves — the user can switch back to a previous book or delete one
-        # from the Data book dialog.
-        target = DataFittingController(app)
-        ok, msg = target.load_recording(path)
-        if ok:
-            books.append(target)
-            app.data_fit_controller = target
+    target = current if current is not None else DataFittingController(app)
+    ok, msg = target.load_recording(path)
+    if ok:
+        app.data_fit_controller = target
+        books.append(target)
 
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
@@ -2512,7 +2644,7 @@ def open_file_dialog(app):
         # Auto-load checkbox controls whether we also redraw any saved fit
         # overlays into the plot — separate from whether the preview itself
         # is shown, which always happens on a successful load.
-        auto_load = _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=True)
+        auto_load = _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=False)
         _post_load_setup(app, auto_plot_fits=auto_load)
 
 
@@ -2541,7 +2673,7 @@ def refresh_current_recording(app, path: Optional[str] = None):
     app.data_fit_path_label.setText(msg)
     app.data_fit_path_label.setStyleSheet("color: black;" if ok else "color: #b35a00;")
     if ok:
-        auto_load = _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=True)
+        auto_load = _safe_checkbox_checked(app, "data_fit_auto_load_cb", default=False)
         _post_load_setup(app, auto_plot_fits=auto_load)
 
 
@@ -2848,9 +2980,9 @@ def _guess_current_channel(controller, *, exclude: str) -> str:
         n for n in (controller.channel_names or [])
         if n and n != exclude and not n.endswith(_FITTED_CHANNEL_SUFFIX)
     ]
-    for needle in ("Current", "current", "_I", "AI0", "Ic"):
+    for needle in ("current", "imon", "dcct", "_i", "ai0", "ic"):
         for name in candidates:
-            if needle in name:
+            if needle in name.lower():
                 return name
     return candidates[0] if candidates else ""
 
@@ -3201,6 +3333,7 @@ def _on_use_length_changed(app):
     _update_method_mode_ui(app)
     if hasattr(app, "data_fit_curve_profile_cb"):
         _save_active_curve_profile(app)
+    refresh_preview(app)
 
 
 def refresh_preview(app):
@@ -3274,6 +3407,33 @@ def _xform_from_view(val: float, is_log: bool) -> float:
     if not is_log:
         return float(val)
     return float(10.0 ** float(val))
+
+
+def _set_power_band_region(app, lo: float, hi: float) -> None:
+    """Move the Step-5 (Ec1/Ec2) yellow band to match a freshly fitted I-window.
+
+    ``_update_fit_bands`` only redraws this band from whatever Low(X)/High(X)
+    currently show, and it's only called from ``refresh_preview`` — which
+    ``run_fit`` invokes at its own *start*, before the fit recomputes the
+    window. Without this, the band stays visually one "Run Fit" click behind
+    Low(X)/High(X): the first click after editing Ec1/Ec2 draws the band from
+    the *previous* fit's window (still in the textboxes at that point), and
+    only the next click (once the textboxes hold the new window) draws it
+    correctly. Calling this immediately after Low(X)/High(X) are updated
+    keeps the band in sync within the same click.
+    """
+    band = getattr(app, "data_fit_band_power", None)
+    if band is None:
+        return
+    is_loglog = _plot_is_loglog(app)
+    view_pair = (_xform_for_view(lo, is_loglog), _xform_for_view(hi, is_loglog))
+    if not (np.isfinite(view_pair[0]) and np.isfinite(view_pair[1])):
+        return
+    band.blockSignals(True)
+    try:
+        band.setRegion(view_pair)
+    finally:
+        band.blockSignals(False)
 
 
 def _update_fit_bands(app, x: np.ndarray, y: np.ndarray) -> None:
@@ -4686,6 +4846,7 @@ def run_fit(app):
         all_results: list[tuple[str, object]] = []
         last_show_criterion = True
         last_show_ic = False
+        fitted_by_sig: dict[str, object] = {}
         for entry in included:
             label = entry.get("label", "Curve")
             # Trim from the untrimmed snapshot so this Run Fit honours the
@@ -4698,7 +4859,12 @@ def run_fit(app):
             else:
                 _ensure_entry_origin_snapshot(entry)
                 ex_full, ey_full, et_full = _entry_untrimmed_xyt(entry)
-            ex, ey, et = _trim_xyz_with_step15(app, ex_full, ey_full, et_full)
+            step2_overrides = (
+                _step2_overrides_for_entry(app, entry)
+                if entry.get("signature") != "__preview__"
+                else {}
+            )
+            ex, ey, et = _trim_xyz_with_step15(app, ex_full, ey_full, et_full, **step2_overrides)
             if ex.size == 0 or ey.size == 0 or et is None or et.size == 0:
                 lines.append(f"[{label}] FIT FAILED: No samples after Step 2 trim.")
                 continue
@@ -4739,6 +4905,7 @@ def run_fit(app):
                 _recompute_loglog_i_window_for_entry(result, fit_entry, entry_settings)
                 last_ok = result
                 last_ok_settings = entry_settings
+                fitted_by_sig[str(entry.get("signature"))] = result
                 ok_results.append((label, result))
                 last_show_criterion = bool(entry.get("show_criterion", False))
                 last_show_ic = bool(entry.get("show_ic", False))
@@ -4750,42 +4917,34 @@ def run_fit(app):
         if last_ok is not None:
             controller.last_result = last_ok
             if getattr(last_ok, "fit_method", "") == FIT_METHOD_LOG_LOG:
-                # Each fitted entry stored its recomputed Low/High X in its
-                # per-curve profile; reload the active curve's profile so the
-                # visible widgets reflect that curve's window (not last_ok's).
-                active_profiles = getattr(app, "data_fit_curve_profiles", {}) or {}
-                active_key = _curve_profile_key_from_ui(app)
-                active_profile = active_profiles.get(active_key) if isinstance(active_profiles, dict) else None
-                if active_profile and ("power_low_x" in active_profile or "power_high_x" in active_profile):
-                    lo_txt = str(active_profile.get("power_low_x", "")).strip()
-                    hi_txt = str(active_profile.get("power_high_x", "")).strip()
-                    if lo_txt:
-                        _set_silently(app.data_fit_power_low_x, lo_txt)
-                    if hi_txt:
-                        _set_silently(app.data_fit_power_high_x, hi_txt)
+                # Show the window/Ec for whichever curve is selected in
+                # "Curve label", using the FitResult object this run just
+                # produced for it — not a separately-stored profile string,
+                # which can go stale or orphaned (e.g. a curve replayed from
+                # a previous session's saved fit, no longer in
+                # data_fit_curves) and silently override the fresh result.
+                # Falls back to last_ok when the active curve wasn't part of
+                # this particular fit run.
+                active_key = str(_curve_profile_key_from_ui(app))
+                active_result = fitted_by_sig.get(active_key, last_ok)
+                n_window = getattr(active_result, "n_window_I", None) or (0.0, 0.0)
+                try:
+                    lo_w = float(n_window[0])
+                    hi_w = float(n_window[1])
+                except (TypeError, ValueError, IndexError):
+                    lo_w = hi_w = 0.0
+                if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
+                    _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
+                    _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
                     app.data_fit_power_window_manual = False
-                    # If auto-Ec moved the decade window, the per-entry
-                    # recompute saved the new Ec1/Ec2 into the active profile
-                    # under loglog_low/high — surface them in the visible
-                    # textboxes so the user sees what the algorithm chose.
-                    ec_lo_txt = str(active_profile.get("loglog_low", "")).strip()
-                    ec_hi_txt = str(active_profile.get("loglog_high", "")).strip()
-                    if ec_lo_txt:
-                        _set_silently(app.data_fit_power_low, ec_lo_txt)
-                    if ec_hi_txt:
-                        _set_silently(app.data_fit_power_vfrac, ec_hi_txt)
-                else:
-                    n_window = getattr(last_ok, "n_window_I", None) or (0.0, 0.0)
-                    try:
-                        lo_w = float(n_window[0])
-                        hi_w = float(n_window[1])
-                    except (TypeError, ValueError, IndexError):
-                        lo_w = hi_w = 0.0
-                    if np.isfinite(lo_w) and np.isfinite(hi_w) and hi_w > lo_w:
-                        _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
-                        _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
-                        app.data_fit_power_window_manual = False
-                        _save_active_curve_profile(app)
+                    _set_power_band_region(app, lo_w, hi_w)
+                    _save_active_curve_profile(app)
+                # If auto-Ec moved the decade window for the active curve's
+                # own fit, surface the values it actually used.
+                if bool(getattr(active_result, "ec1_auto_adjusted", False)):
+                    to_disp = 1.0e6 if getattr(active_result, "uses_sample_length", False) else 1.0e3
+                    _set_silently(app.data_fit_power_low, f"{active_result.ec1 * to_disp:.6g}")
+                    _set_silently(app.data_fit_power_vfrac, f"{active_result.ec2 * to_disp:.6g}")
             _show_fit_overlays(
                 app, last_ok, table_entries=ok_results,
                 show_criterion=last_show_criterion, show_ic=last_show_ic,
@@ -4880,6 +5039,7 @@ def run_fit(app):
             _set_silently(app.data_fit_power_low_x, f"{lo_w:.6g}")
             _set_silently(app.data_fit_power_high_x, f"{hi_w:.6g}")
             app.data_fit_power_window_manual = False
+            _set_power_band_region(app, lo_w, hi_w)
             _save_active_curve_profile(app)
     if result.fit_x is not None and result.fit_y is not None:
         app.data_fit_model_curve.setData(result.fit_x, result.fit_y)
@@ -5115,6 +5275,48 @@ def _refresh_save_settings_enabled(app) -> None:
         return
 
 
+def _on_plot_font_size_changed(app, value) -> None:
+    """Apply the Settings dialog's global font-size preference to every plot
+    in both tabs. A single shared size (rather than per-plot controls) since
+    the thing that varies is the user's screen, not the plot.
+
+    The Ic-fitting tab's main preview plot renders its axis/plot titles as
+    inline-styled HTML (``_html_for_title``), driven by the Graph-settings
+    dialog's own size fields — and in Qt's rich-text engine, an explicit
+    inner ``font-size`` always wins over an outer wrapping one, so trying to
+    override that title's size from the *outside* (``apply_plot_font_size``'s
+    ``labelStyle`` merge) silently has no visible effect. Instead, drive the
+    same ``GraphSettings`` size fields this dialog uses and re-render through
+    ``apply_graph_settings`` (with no curve data, so it only restyles — it
+    won't clear a currently-displayed fit). The residual plot and every
+    Plateau-tab plot use plain, unstyled labels with no such per-plot
+    control, so the generic title/legend styling applies there directly.
+    The draggable on-plot fit-parameter table follows the base size too.
+    """
+    pt = int(value)
+    app.plot_font_pt = pt
+    if hasattr(app, "data_fit_plot"):
+        apply_plot_font_size(app.data_fit_plot, pt, style_titles=False)
+        settings = getattr(app, "data_fit_graph_settings", None)
+        if settings is not None:
+            for title in (
+                settings.title_bottom, settings.title_top,
+                settings.title_left, settings.title_right,
+            ):
+                title.size = pt + 2
+            settings.plot_title_size = pt + 4
+            apply_graph_settings(app.data_fit_plot, None, None, None, settings)
+    param_table = getattr(app, "data_fit_param_table", None)
+    if param_table is not None:
+        param_table.set_font_size(pt)
+    if hasattr(app, "data_fit_resid_plot"):
+        apply_plot_font_size(app.data_fit_resid_plot, pt)
+    for name in ("plateau_v_plot", "plateau_i_plot", "plateau_r_plot", "plateau_vi_plot"):
+        plot_widget = getattr(app, name, None)
+        if plot_widget is not None:
+            apply_plot_font_size(plot_widget, pt)
+
+
 def _open_settings_dialog(app) -> None:
     """Open the Data Fitting settings dialog.
 
@@ -5155,6 +5357,14 @@ def _open_settings_dialog(app) -> None:
     app.data_fit_same_group_cb.setVisible(True)
     root.addWidget(save_group)
 
+    plots_group = QGroupBox("Plots")
+    plots_layout = QHBoxLayout(plots_group)
+    plots_layout.addWidget(QLabel("Font size (tick labels, axis titles, legends):"))
+    plots_layout.addWidget(app.data_fit_font_spin)
+    app.data_fit_font_spin.setVisible(True)
+    plots_layout.addStretch(1)
+    root.addWidget(plots_group)
+
     # Re-evaluate dependency rules every time the dialog opens, in case the
     # user has changed checkbox state via a preset since the last open.
     _refresh_save_settings_enabled(app)
@@ -5180,6 +5390,7 @@ def _open_settings_dialog(app) -> None:
             "data_fit_autosave_cb",
             "data_fit_save_separate_cb",
             "data_fit_same_group_cb",
+            "data_fit_font_spin",
         ):
             cb = getattr(app, attr_name, None)
             if cb is None:
@@ -5383,6 +5594,18 @@ def _resolve_fit_parent_and_result(app):
             break
 
     if result is None:
+        # Prefer the most recently computed fit (matches whatever's
+        # currently active/previewed) over an arbitrary other curve's
+        # cached result. When the active selection is the live preview
+        # (no matching entry in data_fit_curves), falling back to "any
+        # curve with a fit_result" would silently pick up some unrelated
+        # channel's stale fit — e.g. a saved fit replayed from a previous
+        # session — instead of the fit that was just run.
+        fit_result = getattr(getattr(app, "data_fit_controller", None), "last_result", None)
+        if fit_result is not None and getattr(fit_result, "ok", False):
+            result = fit_result
+
+    if result is None:
         for entry in getattr(app, "data_fit_curves", []):
             if bool(entry.get("is_fit_result", False)):
                 continue
@@ -5391,11 +5614,6 @@ def _resolve_fit_parent_and_result(app):
                 result = fit_result
                 parent_entry = entry
                 break
-
-    if result is None:
-        fit_result = getattr(getattr(app, "data_fit_controller", None), "last_result", None)
-        if fit_result is not None and getattr(fit_result, "ok", False):
-            result = fit_result
 
     if result is None:
         return None
@@ -5707,6 +5925,22 @@ def _add_smoothed_curve_from_current(app) -> None:
         )
 
 
+def _select_curve_profile(app, signature) -> None:
+    """Make ``signature`` the active "Curve label" selection, if present.
+
+    Without this, adding/updating a curve leaves whatever was previously
+    selected as the active profile — so Step 1-5 edits made right after
+    "Add to plot" (a very natural next action) silently land on some other
+    curve's profile instead of the one just added.
+    """
+    combo = getattr(app, "data_fit_curve_profile_cb", None)
+    if combo is None:
+        return
+    idx = combo.findData(str(signature))
+    if idx >= 0 and idx != combo.currentIndex():
+        combo.setCurrentIndex(idx)
+
+
 def _add_plot_from_current(app) -> None:
     """Snapshot the current inputs and add a curve entry to ``app.data_fit_curves``."""
     if not getattr(app, "data_fit_plot_dirty", True):
@@ -5734,6 +5968,7 @@ def _add_plot_from_current(app) -> None:
             app.data_fit_curve_profiles = profiles
             _refresh_curve_item(entry)
             _refresh_curve_profile_selector(app)
+            _select_curve_profile(app, sig)
             app.data_fit_plot_dirty = False
             return
     transformed = _apply_transforms(app)
@@ -5791,6 +6026,7 @@ def _add_plot_from_current(app) -> None:
     app.data_fit_curve_profiles = profiles
     _refresh_curve_item(entry)
     _refresh_curve_profile_selector(app)
+    _select_curve_profile(app, sig)
     app.data_fit_plot_dirty = False
 
 
@@ -9310,11 +9546,13 @@ def _settings_to_preset(app) -> FitPreset:
         app, "data_fit_same_group_cb", default=True,
     )
     auto_load = _safe_checkbox_checked(
-        app, "data_fit_auto_load_cb", default=True,
+        app, "data_fit_auto_load_cb", default=False,
     )
     autosave = _safe_checkbox_checked(
         app, "data_fit_autosave_cb", default=True,
     )
+    font_spin = getattr(app, "data_fit_font_spin", None)
+    plot_font_pt = int(font_spin.value()) if font_spin is not None else 9
     return FitPreset(
         didt_low=_float_from(app.data_fit_didt_low, DEFAULT_DIDT_LOW_FRAC * 100),
         didt_high=_float_from(app.data_fit_didt_high, DEFAULT_DIDT_HIGH_FRAC * 100),
@@ -9365,6 +9603,7 @@ def _settings_to_preset(app) -> FitPreset:
             getattr(app, "data_fit_auto_target_r2", None),
             DEFAULT_AUTO_EC_TARGET_R2,
         ),
+        plot_font_pt=plot_font_pt,
     )
 
 
@@ -9414,7 +9653,7 @@ def _apply_preset(app, preset: FitPreset) -> None:
     )
     _safe_checkbox_set_checked(
         app, "data_fit_auto_load_cb",
-        bool(getattr(preset, "auto_load_after_acquisition", True)),
+        bool(getattr(preset, "auto_load_after_acquisition", False)),
     )
     _safe_checkbox_set_checked(
         app, "data_fit_autosave_cb",
@@ -9472,6 +9711,12 @@ def _apply_preset(app, preset: FitPreset) -> None:
         idx = combo.findText(name)
         if idx >= 0:
             combo.setCurrentIndex(idx)
+    if getattr(app, "data_fit_font_spin", None) is not None:
+        font_pt = int(getattr(preset, "plot_font_pt", 9) or 9)
+        app.data_fit_font_spin.blockSignals(True)
+        app.data_fit_font_spin.setValue(font_pt)
+        app.data_fit_font_spin.blockSignals(False)
+        _on_plot_font_size_changed(app, font_pt)
     refresh_preview(app)
 
 

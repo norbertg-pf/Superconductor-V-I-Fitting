@@ -13,7 +13,8 @@ dependencies = [
   "pyqtgraph>=0.13",
   "numpy>=1.24",
   "scipy>=1.10",
-  "nptdms>=1.7"
+  "nptdms>=1.7",
+  "nidaqmx>=1.6.0",
 ]
 
 [project.scripts]

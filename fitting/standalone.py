@@ -10,9 +10,10 @@ import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget
+from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget
 import pyqtgraph as pg
 
+from . import plateau_tab as _plateau_tab
 from . import tab as _tab
 from .extras import FitPreset, load_preset_from_file, save_preset_to_file
 
@@ -101,7 +102,13 @@ class DataFittingWindow(QMainWindow):
         self._preset_path: Path | None = None
         central = QWidget()
         self.ui_state.data_fitting_tab = central
-        self.setCentralWidget(central)
+        plateau_central = QWidget()
+        self.ui_state.plateau_tab = plateau_central
+
+        self._tabs = QTabWidget()
+        self._tabs.addTab(central, "Ic fitting")
+        self._tabs.addTab(plateau_central, "Plateau R calculation")
+        self.setCentralWidget(self._tabs)
 
         self.data_fitting_open_file = lambda *_: _tab.open_file_dialog(self)
         self.data_fitting_refresh_current = lambda *_: _tab.refresh_current_recording(self)
@@ -115,6 +122,7 @@ class DataFittingWindow(QMainWindow):
         self.data_fitting_sync_region_to_inputs = lambda *_: _tab.sync_region_to_inputs(self)
 
         _tab.setup_data_fitting_tab_layout(self)
+        _plateau_tab.setup_plateau_tab_layout(self)
         self._load_default_preset()
         self.resize(1500, 950)
 
