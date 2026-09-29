@@ -107,6 +107,8 @@ class _FitParamTable(pg.TextItem):
     """Draggable, editable text overlay that shows the engineering-formatted
     fit parameters. Drag with the mouse to position; double-click to edit."""
 
+    _ROW_NAMES = ("Vc/Ec", "Ic", "n", "R/Rho", "V0")
+
     def __init__(self):
         super().__init__(text="", anchor=(0, 0), color=(30, 30, 30))
         self._font_pt = 10
@@ -133,39 +135,38 @@ class _FitParamTable(pg.TextItem):
     def set_parameters(self, result) -> None:
         self.set_parameters_for_curves([("Fit", result)])
 
+    @staticmethod
+    def _column(result) -> tuple[str, str, str, str, str]:
+        """Format one curve's values, in ``_ROW_NAMES`` order."""
+        v_unit = "V/cm" if result.uses_sample_length else "V"
+        return (
+            _format_engineering(result.criterion, v_unit, 2),
+            f"{result.Ic:.6g} A",
+            f"{result.n_value:.2f}",
+            _format_resistance(result.R, result.uses_sample_length),
+            _format_engineering(result.V0, v_unit, 2),
+        )
+
     def set_parameters_for_curves(self, results: list[tuple[str, object]]) -> None:
         self._last_results = list(results)
         if not results:
             self.clear_parameters()
             return
-        param_names = ("Criterion", "Ic", "n", "R", "V0")
         header_cells = "".join(
             f"<th style='padding:2px 8px; border-bottom:1px solid #bbb;'>{name}</th>"
             for name, _ in results
         )
-        body_rows = []
-        for p in param_names:
-            row_cells = []
-            for _, result in results:
-                r_name = "Rho" if result.uses_sample_length else "R"
-                r_unit = "Ω/cm" if result.uses_sample_length else "Ω"
-                v_name = "Ec" if result.uses_sample_length else "Vc"
-                v_unit = "V/cm" if result.uses_sample_length else "V"
-                value_map = {
-                    "n": f"{result.n_value:.2f}",
-                    "Ic": f"{result.Ic:.6g} A",
-                    "R": _format_engineering(result.R, r_unit, 2),
-                    "Criterion": _format_engineering(result.criterion, v_unit, 2),
-                    "V0": _format_engineering(result.V0, v_unit, 2),
-                }
-                value = value_map[p]
-                row_cells.append(
-                    f"<td style='padding:1px 8px; text-align:right; font-family:monospace;'>{value}</td>"
-                )
-            row_name = "R/Rho" if p == "R" else ("Vc/Ec" if p == "Criterion" else p)
-            body_rows.append(
-                f"<tr><td style='padding-right:10px;'><b>{row_name}</b></td>{''.join(row_cells)}</tr>"
+        # Format each curve once, then transpose the columns into table rows.
+        columns = [self._column(result) for _, result in results]
+        body_rows = [
+            f"<tr><td style='padding-right:10px;'><b>{row_name}</b></td>"
+            + "".join(
+                f"<td style='padding:1px 8px; text-align:right; font-family:monospace;'>{value}</td>"
+                for value in row_values
             )
+            + "</tr>"
+            for row_name, row_values in zip(self._ROW_NAMES, zip(*columns), strict=True)
+        ]
         self.setHtml(
             f"<div style='background:rgba(255,255,255,200); border:1px solid #999; "
             f"padding:5px 8px; font-size:{self._font_pt}pt;'>"
@@ -4083,6 +4084,35 @@ def _format_engineering(value: float, unit: str, decimals: int = 2) -> str:
     return f"{scaled:.{decimals}f} {prefix}{unit}".strip()
 
 
+# Ω/cm → nΩ/m: ×100 (per cm → per m) and ×1e9 (Ω → nΩ).
+_NOHM_PER_M_PER_OHM_PER_CM = 1.0e11
+
+
+def _format_resistance(r_value: float, per_length: bool) -> str:
+    """Format the resistive baseline R for display.
+
+    Per-length R shows in a fixed nΩ/m with 3 significant digits, so taps and
+    runs compare without SI-prefix jumps. Total R keeps the SI prefix.
+
+    Args:
+        r_value: R in Ω/cm when ``per_length``, else in Ω.
+        per_length: True when the fit used a sample length (E-field fit).
+
+    Returns:
+        Display text: 2.594e-12 Ω/cm → "0.259 nΩ/m"; 2.59e-11 Ω → "25.90 pΩ".
+    """
+    if not per_length:
+        return _format_engineering(r_value, "Ω", 2)
+    value = r_value * _NOHM_PER_M_PER_OHM_PER_CM
+    if value == 0 or not np.isfinite(value):
+        return f"{value:.2f} nΩ/m"
+    sci = f"{value:.2e}"  # rounds to 3 digits first: 0.9996 → "1.00e+00"
+    exponent = int(sci.split("e")[1])
+    if not -6 <= exponent < 9:  # outside 1 fΩ/m … 1 Ω/m: keep the text short
+        return f"{sci} nΩ/m"
+    return f"{value:.{max(0, 2 - exponent)}f} nΩ/m"
+
+
 _ENG_PREFIX_BY_EXP = {
     -24: "y", -21: "z", -18: "a", -15: "f", -12: "p",
     -9: "n", -6: "µ", -3: "m", 0: "",
@@ -4147,7 +4177,6 @@ class EngineeringAxisItem(pg.AxisItem):
 def _format_result(result) -> str:
     lines = []
     r_name = "Rho" if result.uses_sample_length else "R"
-    r_unit = "Ω/cm" if result.uses_sample_length else "Ω"
     v_name = "Ec" if result.uses_sample_length else "Vc"
     v_unit = "V/cm" if result.uses_sample_length else "V"
     is_loglog = getattr(result, "fit_method", FIT_METHOD_NONLINEAR) == FIT_METHOD_LOG_LOG
@@ -4175,7 +4204,7 @@ def _format_result(result) -> str:
     lines.append(f"V_ofs         = {_format_engineering(vofs, v_unit, 2)}{vofs_note}")
     lines.append(f"L·di/dt       = {_format_engineering(result.V0, v_unit, 2)}  (= V0 from baseline fit)")
     lines.append(f"L             = {_format_engineering(result.inductance_L, 'H', 2)}  (= L·dI/dt / di_dt)")
-    lines.append(f"{r_name:<13} = {_format_engineering(result.R, r_unit, 2)}")
+    lines.append(f"{r_name:<13} = {_format_resistance(result.R, result.uses_sample_length)}")
     lines.append(f"R·Ic          = {_format_engineering(result.R * result.Ic, v_unit, 2)}")
     sigma_Ic = getattr(result, "sigma_Ic", 0.0)
     sigma_n = getattr(result, "sigma_n", 0.0)
