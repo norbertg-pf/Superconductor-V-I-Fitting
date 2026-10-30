@@ -101,6 +101,7 @@ from .extras import (
     save_preset_to_file,
 )
 from . import get_app_version_label
+from .tdms_source import LazyChannelCache, TdmsRecording
 
 
 class _FitParamTable(pg.TextItem):
@@ -552,21 +553,16 @@ def _adaptive_smooth_visual(y: np.ndarray, ec1: float, ec2: float) -> np.ndarray
     return adaptive_smooth_for_ec_window(y, ec1, ec2)
 
 
-def _read_time_channel(tdms_file):
-    if "RawData" in tdms_file and "Time" in tdms_file["RawData"]:
-        return np.asarray(tdms_file["RawData"]["Time"][:], dtype=float)
-    if "Time" in tdms_file and "Time" in tdms_file["Time"]:
-        return np.asarray(tdms_file["Time"]["Time"][:], dtype=float)
-    return None
-
+# (group, channel) pairs that hold the sample times, in order of preference.
+_TIME_CHANNEL_KEYS = (("RawData", "Time"), ("Time", "Time"))
 
 _VTAP_KEYS = ("VTap_Distance_cm", "Voltage_Tap_Distance_cm",
               "Voltage_Tap_Distance", "Voltage_Tab_Distance",
               "Voltage_Tab_Distance_cm")
 
 
-def _read_channel_metadata(channel) -> dict:
-    """Extract Scale_Factor / Offset / VTap distance metadata.
+def _channel_metadata_from_props(props: dict) -> dict:
+    """Extract Scale_Factor / Offset / VTap distance from channel properties.
 
     The voltage-tap separation is written by the Tape and Cable presets of
     DAQUniversal and by its QD configuration (see TDMS metadata spec). When
@@ -575,7 +571,7 @@ def _read_channel_metadata(channel) -> dict:
     1 µV/cm criterion. Multiple key spellings are accepted to stay
     compatible with older recordings.
     """
-    props = getattr(channel, "properties", {}) or {}
+    props = props or {}
     try:
         scale = float(props.get("Scale_Factor", 1.0))
     except (TypeError, ValueError):
@@ -601,28 +597,28 @@ def _read_channel_metadata(channel) -> dict:
     return {"scale": scale, "offset": offset, "voltage_tap_cm": v_tap}
 
 
-def _read_signal_channel(tdms_file, signal_name: str):
-    if "RawData" in tdms_file and signal_name in tdms_file["RawData"]:
-        return np.asarray(tdms_file["RawData"][signal_name][:], dtype=float)
-    for group in tdms_file.groups():
-        for channel in group.channels():
-            if getattr(channel, "name", "") == signal_name:
-                return np.asarray(channel[:], dtype=float)
-    return None
-
-
-
-
 class DataFittingController:
-    """Keeps the Data Fitting tab state and computation in one place."""
+    """Keeps the Data Fitting tab state and computation in one place.
+
+    Channel values load on demand: ``load_recording`` reads the metadata
+    and the Time channel; ``get_channel`` reads a channel from the file the
+    first time it is used (see :mod:`fitting.tdms_source`).
+    """
 
     def __init__(self, app):
         self.app = app
         self.tdms_path: str = ""
         self.time_array = None
-        self.channel_cache: dict[str, np.ndarray] = {}
+        # name -> float64 values. A LazyChannelCache after a load: a channel
+        # is read from the file on first access and then kept.
+        self.channel_cache = {}
         self.channel_names: list[str] = []
         self.channel_metadata: dict[str, dict] = {}
+        # The open recording (metadata + verified readers), its warnings and
+        # the TDMS object path of each listed channel name.
+        self.recording: Optional[TdmsRecording] = None
+        self.load_warnings: list[str] = []
+        self._channel_paths: dict[str, str] = {}
         self.last_result = None
         # Most recent (label, FitResult) pairs from a multi-curve run_fit.
         # Used by the manual "Save metadata" button to persist results that
@@ -649,51 +645,110 @@ class DataFittingController:
         self.book_decoupled: bool = False
 
     # --- data source -----------------------------------------------------
+    def clear(self) -> None:
+        """Drop the loaded recording and every per-recording state."""
+        self.tdms_path = ""
+        self.time_array = None
+        self.channel_cache = {}
+        self.channel_names = []
+        self.channel_metadata = {}
+        self.saved_fit_results = {}
+        self.recording = None
+        self.load_warnings = []
+        self._channel_paths = {}
+
     def load_recording(self, path: str) -> tuple[bool, str]:
-        self.channel_cache.clear()
-        self.channel_metadata.clear()
+        """Open a TDMS file: metadata, verified readers and the Time channel.
+
+        Other channels are read on first use. Returns (ok, message); the
+        message names the file, the channel count and the first warning
+        (damaged tail, ignored index file, ...).
+        """
+        self.channel_cache = {}
+        self.channel_metadata = {}
         self.channel_names = []
         self.time_array = None
         self.saved_fit_results = {}
+        self.recording = None
+        self.load_warnings = []
+        self._channel_paths = {}
         if not path or not os.path.exists(path):
             return False, "No recording found. Click 'Load File…' to choose a TDMS."
         try:
-            with TdmsFile.read(path) as tdms_file:
-                self.time_array = _read_time_channel(tdms_file)
-                names: list[str] = []
-                for group in tdms_file.groups():
-                    is_fit_results_group = (group.name == "FitResults")
-                    for channel in group.channels():
-                        name = getattr(channel, "name", "")
-                        if not name or name.lower() == "time":
-                            continue
-                        props = dict(getattr(channel, "properties", {}) or {})
-                        if is_fit_results_group:
-                            # FitResults group → property dict per fitted label.
-                            self.saved_fit_results[name] = props
-                            continue
-                        if name in self.channel_cache:
-                            continue
-                        self.channel_cache[name] = np.asarray(channel[:], dtype=float)
-                        self.channel_metadata[name] = _read_channel_metadata(channel)
-                        names.append(name)
-                        # Same-group mode: fit_* properties live on the source
-                        # channel itself. Strip the prefix so consumers see the
-                        # same dict shape as a FitResults entry.
-                        same_group_fit = {
-                            key[len(_FIT_PROPERTY_PREFIX):]: value
-                            for key, value in props.items()
-                            if key.startswith(_FIT_PROPERTY_PREFIX)
-                        }
-                        if same_group_fit and name not in self.saved_fit_results:
-                            self.saved_fit_results[name] = same_group_fit
-                self.channel_names = names
+            recording = TdmsRecording(path)
+            time_channel = None
+            for group, name in _TIME_CHANNEL_KEYS:
+                found = recording.find(group, name)
+                if found is not None and found.numeric:
+                    time_channel = found
+                    break
+            if time_channel is None:
+                return False, "Recording has no 'Time' channel."
+            self.time_array = recording.read_one(time_channel.path)
         except Exception as exc:
             return False, f"Could not read TDMS: {exc}"
-        if self.time_array is None:
-            return False, "Recording has no 'Time' channel."
+        names: list[str] = []
+        paths: dict[str, str] = {}
+        metadata: dict[str, dict] = {}
+        saved: dict[str, dict] = {}
+        for channel in recording.channels:
+            name = channel.name
+            if not name or name.lower() == "time":
+                continue
+            props = dict(channel.properties)
+            if channel.group == "FitResults":
+                # FitResults group → property dict per fitted label.
+                saved[name] = props
+                continue
+            if name in paths or not channel.numeric:
+                continue
+            paths[name] = channel.path
+            metadata[name] = _channel_metadata_from_props(props)
+            names.append(name)
+            # Same-group mode: fit_* properties live on the source channel
+            # itself. Strip the prefix so consumers see the same dict shape
+            # as a FitResults entry.
+            same_group_fit = {
+                key[len(_FIT_PROPERTY_PREFIX):]: value
+                for key, value in props.items()
+                if key.startswith(_FIT_PROPERTY_PREFIX)
+            }
+            if same_group_fit and name not in saved:
+                saved[name] = same_group_fit
+        self.recording = recording
+        self._channel_paths = paths
+        self.channel_cache = LazyChannelCache(names, self._load_channels)
+        self.channel_metadata = metadata
+        self.channel_names = names
+        self.saved_fit_results = saved
+        self.load_warnings = list(recording.warnings)
         self.tdms_path = path
-        return True, f"Loaded {os.path.basename(path)} with {len(self.channel_names)} channels."
+        msg = f"Loaded {os.path.basename(path)} with {len(names)} channels."
+        if self.load_warnings:
+            msg += f" Warning: {self.load_warnings[0]}"
+        return True, msg
+
+    def _load_channels(self, names: list[str]) -> dict[str, np.ndarray]:
+        """Read channels by name from the recording (loader of the lazy cache)."""
+        values = self.recording.read([self._channel_paths[n] for n in names])
+        return {n: values[self._channel_paths[n]] for n in names}
+
+    def preload(self, names) -> None:
+        """Read several channels in one pass over the file (names not loaded yet).
+
+        "Time" and unknown names are skipped. A read error is logged; the
+        next ``get_channel`` reports it as a missing channel.
+        """
+        cache = self.channel_cache
+        if not isinstance(cache, LazyChannelCache):
+            return
+        wanted = [n for n in names if n and n != "Time" and n in cache and not cache.loaded(n)]
+        if not wanted:
+            return
+        try:
+            cache.load(wanted)
+        except Exception:
+            traceback.print_exc()
 
     def get_channel(self, name: str):
         if not name:
@@ -718,6 +773,7 @@ class DataFittingController:
                     y_scale: float, y_offset: float,
                     t_scale: float, t_offset: float,
                     settings: FitSettings, avg_window: int = 1):
+        self.preload((time_sig, x_sig, y_sig))
         x_raw = self.get_channel(x_sig)
         y_raw = self.get_channel(y_sig)
         t_raw = self.get_channel(time_sig) if time_sig and time_sig != "Time" else self.time_array
@@ -899,11 +955,7 @@ def _reset_data_fitting_defaults(app) -> None:
         app.data_fit_books = []
     else:
         app.data_fit_books.clear()
-    app.data_fit_controller.tdms_path = ""
-    app.data_fit_controller.time_array = None
-    app.data_fit_controller.channel_cache = {}
-    app.data_fit_controller.channel_names = []
-    app.data_fit_controller.channel_metadata = {}
+    app.data_fit_controller.clear()
     app.data_fit_controller.book_user_columns = []
     app.data_fit_controller.column_roles = {}
     app.data_fit_path_label.setText("No file loaded.")
@@ -1964,6 +2016,7 @@ def _apply_transforms(app, *, apply_trim: bool = False):
     time_name = app.data_fit_time_cb.currentText()
     x_name = app.data_fit_x_cb.currentText()
     y_name = app.data_fit_y_cb.currentText()
+    controller.preload((time_name, x_name, y_name))
     t_raw = controller.get_channel(time_name) if time_name and time_name != "Time" else controller.time_array
     x_raw = controller.get_channel(x_name)
     y_raw = controller.get_channel(y_name)
@@ -2829,6 +2882,7 @@ def _replay_saved_fits_into_plot(app) -> None:
         # channel that's not the Y itself. Falls back to ``time_array`` if
         # nothing matches — no overlay is drawn in that case.
         x_name = _guess_current_channel(controller, exclude=name)
+        controller.preload((x_name, name))
         x_raw = controller.get_channel(x_name) if x_name else None
         y_raw = controller.get_channel(name)
         t_raw = controller.time_array
@@ -6166,6 +6220,7 @@ def _recompute_curve_from_source(app, entry: dict) -> None:
     src = entry.get("source") or {}
     controller = app.data_fit_controller
     time_sig = src.get("time_sig", "Time")
+    controller.preload((time_sig, src.get("x_sig", ""), src.get("y_sig", "")))
     t_raw = controller.get_channel(time_sig) if time_sig and time_sig != "Time" else controller.time_array
     x_raw = controller.get_channel(src.get("x_sig", ""))
     y_raw = controller.get_channel(src.get("y_sig", ""))
@@ -8743,6 +8798,7 @@ def _build_data_book_columns(app) -> list:
             plot_role=str(roles_map.get("__time__", "")),
         ))
     if not decoupled and controller is not None:
+        controller.preload(controller.channel_names)  # one pass over the file, not one per channel
         for name in controller.channel_names:
             arr = controller.channel_cache.get(name)
             if arr is None:

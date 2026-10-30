@@ -41,6 +41,31 @@ host.data_fitting_refresh_preview = lambda *_: _tab.refresh_preview(host)
 setup_data_fitting_tab_layout(host)
 ```
 
+## Fast TDMS loading
+
+`Load File…` reads the metadata and the Time channel only. A channel is read
+from the file the first time the tab uses it (X, Y, data book, fit replay).
+The reader is a port of the TDMSViewer fast path (`fitting/tdms_fastread.py`):
+
+1. **Metadata only at open.** npTDMS parses the segment table; no data is read.
+2. **Direct reads.** Channel values are read with positional reads from the
+   segment table, 3 to 30 times faster than npTDMS. Equal segments merge into
+   one run; channels written in small pieces are read together in one pass.
+3. **Checked before use.** npTDMS decodes the first values of selected chunks
+   of every channel. The direct reader must give the same bytes; if not, npTDMS
+   reads that channel (scaled channels and DAQmx raw data always use npTDMS).
+4. **No open file handle between reads.** The fit report can rewrite the file
+   at any time; a changed file is parsed again before the next read.
+5. **Damaged files open.** Bytes after the last valid segment and a stale
+   `.tdms_index` are ignored, with one warning in the status line.
+
+Limits: only float, integer and boolean channels are listed (strings and
+timestamps cannot be fitted). The Time channel is `RawData/Time` or
+`Time/Time`. A loaded channel stays in RAM until the next load.
+
+Measured (16 channels x 2.4 M float64 samples + Time, 328 MB, 4-core VM,
+`bench/bench_tdms_load.py`): see `CHANGES.md`.
+
 ## Public API
 
 ```python
@@ -218,8 +243,12 @@ round-trips through LabVIEW, OriginLab and Python.
 | `fitting/service.py` | Pure math (numpy / scipy). No Qt imports. |
 | `fitting/extras.py` | Graph-settings dialog, export dialog, presets, widgets. |
 | `fitting/tab.py` | Qt layout, action functions, in-app help dialog. |
+| `fitting/tdms_source.py` | TDMS recording: metadata at open, channel values on demand. |
+| `fitting/tdms_fastread.py` | Verified direct reader for TDMS channel data (port of TDMSViewer). |
 | `fitting/standalone.py` | Minimal `QMainWindow` that wraps the tab for standalone use. |
 | `fitting/__main__.py` | `python -m fitting` entry point. |
+| `tests/` | `pytest` suite (`pip install -e ".[test]"`, then `QT_QPA_PLATFORM=offscreen pytest`). |
+| `bench/bench_tdms_load.py` | Load benchmark: old loader vs on-demand loader, warm and cold cache. |
 
 ---
 

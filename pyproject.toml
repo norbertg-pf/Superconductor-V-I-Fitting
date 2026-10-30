@@ -13,15 +13,23 @@ dependencies = [
   "pyqtgraph>=0.13",
   "numpy>=1.24",
   "scipy>=1.10",
-  "nptdms>=1.7",
+  # The direct TDMS reader uses npTDMS internals (fitting/tdms_fastread.py):
+  # tested with 1.11 and 1.13. Test before raising the cap.
+  "nptdms>=1.11,<1.14",
   "nidaqmx>=1.6.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
 
 [project.scripts]
 vi-fitting = "fitting.standalone:main"
 
 [tool.setuptools]
 packages = ["fitting"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv]
 # pyqt5-qt5 5.15.19 ships no win_amd64 wheel; declaring the Windows target as a

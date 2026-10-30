@@ -4,6 +4,46 @@ Scope: only the files that affect `python -m fitting` (the `fitting/` package,
 plus `pyproject.toml`/`uv.lock` for the new dependency). Data files, ad-hoc
 scripts, and session notes from this working copy are intentionally excluded.
 
+## New: fast TDMS loading (port of the TDMSViewer reader)
+
+- `fitting/tdms_fastread.py` (new, ported from `TDMSViewer/tdmsviewer/fastread.py`):
+  direct positional reads of channel data from the npTDMS segment table,
+  verified against npTDMS before use. Additions: `bind()`, `max_chunk_stride`,
+  `read_many(..., bulk=True)` (file read in order when most channels of a
+  family are wanted).
+- `fitting/tdms_source.py` (new): `TdmsRecording` opens a file for its metadata
+  only and reads a channel when it is first used; no file handle stays open
+  between reads; a file rewritten on disk (fit report) is parsed again before
+  the next read; bytes after the last segment and a stale `.tdms_index` are
+  ignored with a warning. `LazyChannelCache` is the dict-like channel store.
+- `DataFittingController.load_recording` reads the metadata and the Time channel
+  only. `channel_cache` is a `LazyChannelCache` (same dict interface). New:
+  `preload(names)` (one pass for several channels), `clear()`, `recording`,
+  `load_warnings`. The load message shows the first warning.
+- Channels that are not numeric (strings, timestamps) are skipped; before, one
+  such channel made the whole load fail.
+- `_auto_resample_patch` takes `Sample_Rate_Hz` from the kept root properties
+  (no second parse of the file).
+- `pyproject.toml`: `nptdms>=1.11,<1.14` (the reader uses npTDMS internals;
+  tested with 1.11 and 1.13), `test` extra (`pytest`). New `tests/` (ported
+  reader tests, source and controller tests, offscreen GUI test) and
+  `bench/bench_tdms_load.py`.
+
+Measured with `bench/bench_tdms_load.py`: 16 float64 channels + Time, 2.4 M
+samples each (328 MB), one segment per second, 4-core VM, best of 5.
+"Preview" is what `Load File…` shows (Time, X and Y channel).
+
+| Segments | Page cache | Old loader (all channels) | Load (metadata + Time) | Load + X, Y (preview) | Load + all channels |
+|---|---|---|---|---|---|
+| 240 (10 kS/s) | warm | 211 ms | 25 ms | 43 ms (4.9x) | 171 ms (1.2x) |
+| 240 (10 kS/s) | cold | 443 ms | 75 ms | 129 ms (3.4x) | 373 ms (1.2x) |
+| 2400 (1 kS/s) | warm | 389 ms | 132 ms | 163 ms (2.4x) | 283 ms (1.4x) |
+| 2400 (1 kS/s) | cold | 866 ms | 485 ms | 638 ms (1.4x) | 745 ms (1.2x) |
+
+The gain grows with the channel count and the file size: the old loader read
+and kept every channel; the new one reads only the channels in use. The cost
+that stays is the npTDMS metadata parse, about 50 ms per 1000 segments.
+
 ## New: Plateau R calculation tab
 
 - `fitting/plateau_tab.py` (new file) adds a second tab, "Plateau R

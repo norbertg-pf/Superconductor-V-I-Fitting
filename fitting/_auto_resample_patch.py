@@ -46,6 +46,17 @@ _PATCHED = False
 _TARGET_EFFECTIVE_RATE_HZ = 100.0
 
 
+def _positive_rate(value) -> Optional[float]:
+    """``value`` as a rate in Hz, or ``None`` if it is missing, not a number or <= 0."""
+    try:
+        rate_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if rate_value <= 0:
+        return None
+    return rate_value
+
+
 def _read_sample_rate_from_tdms(path: str) -> Optional[float]:
     """Return the TDMS root ``Sample_Rate_Hz`` property, else ``None``.
 
@@ -64,14 +75,21 @@ def _read_sample_rate_from_tdms(path: str) -> Optional[float]:
             props = dict(getattr(tdms_file, "properties", {}) or {})
     except Exception:
         return None
-    rate = props.get("Sample_Rate_Hz")
-    try:
-        rate_value = float(rate)
-    except (TypeError, ValueError):
-        return None
-    if rate_value <= 0:
-        return None
-    return rate_value
+    return _positive_rate(props.get("Sample_Rate_Hz"))
+
+
+def _sample_rate_from_controller(controller) -> Optional[float]:
+    """``Sample_Rate_Hz`` of the loaded recording, else ``None``.
+
+    Uses the root properties the controller kept at load time (no second
+    parse of the file). Opens the file only for a controller without a
+    ``recording`` attribute (older SVIF copies).
+    """
+    recording = getattr(controller, "recording", None)
+    props = getattr(recording, "properties", None)
+    if props is None:
+        return _read_sample_rate_from_tdms(getattr(controller, "tdms_path", "") or "")
+    return _positive_rate(props.get("Sample_Rate_Hz"))
 
 
 def _apply_target_rate_resample(app,
@@ -89,7 +107,7 @@ def _apply_target_rate_resample(app,
     if controller is None:
         return
 
-    rate_hz = _read_sample_rate_from_tdms(getattr(controller, "tdms_path", "") or "")
+    rate_hz = _sample_rate_from_controller(controller)
     if rate_hz is None or rate_hz <= target_hz:
         return
     n = max(1, int(round(rate_hz / target_hz)))
