@@ -4,6 +4,42 @@ Scope: only the files that affect `python -m fitting` (the `fitting/` package,
 plus `pyproject.toml`/`uv.lock` for the new dependency). Data files, ad-hoc
 scripts, and session notes from this working copy are intentionally excluded.
 
+## New: no full-resolution arrays in the fit flow, appended fit metadata
+
+Measured on a 1.6 GB DAQUniversal-like recording (16 float64 channels + Time,
+12 M samples each at 10 kS/s, auto AVG = 100), real tab code offscreen:
+
+| Step | Before | After |
+|---|---|---|
+| Load File (metadata, preview, labels, bands) | 31.4 s, 1.35 GB RAM | 1.0 s, 0.19 GB RAM |
+| Add to plot + Run Fit + autosave of the metadata | more than 22 min (not finished) | 2.1 s |
+
+The fit results are the same to the last bit. What changed:
+
+- `DataFittingController.transformed(name, scale, offset, avg_window)` gives
+  the transformed and block-averaged channel the tab works with. It is
+  computed block by block, streamed from the file when the channel is not
+  in RAM, so a long recording never needs its full-resolution array. The
+  last results are kept (read-only arrays) and returned again: the widget
+  signal cascades of a load (31 recomputations before) now cost nothing.
+  `_apply_transforms`, `compute_fit` and `_recompute_curve_from_source` use
+  it. `time_array` is read on first access only; the rate label uses the
+  first 4096 sample times (`sample_interval`).
+- `_post_load_setup` refreshes the preview once (`_preview_suspended`), not
+  six times, and the auto-resample patch sets the AVG factor before that
+  one refresh instead of after a full-rate pass.
+- The same-group fit metadata save appends one metadata-only segment (the
+  fitted channels declared again with their `fit_*` properties and no data)
+  instead of reading and rewriting the whole file. The recorded bytes are
+  never touched; a `.tdms_index` next to the file gets the same segment.
+  A file with a torn last segment is rewritten as before. The FitResults
+  mode appends with the same checks.
+- `service.estimate_point_noise`: the rolling median and the rolling median
+  absolute deviation use a sorted window that slides over the array (O(n
+  log w)) instead of one `np.median` per point (3 per point, O(n w)). Same
+  bits as before (tests compare against the old loops); 12 s -> 0.5 s per
+  fit at 120 000 points.
+
 ## New: fast TDMS loading (port of the TDMSViewer reader)
 
 - `fitting/tdms_fastread.py` (new, ported from `TDMSViewer/tdmsviewer/fastread.py`):

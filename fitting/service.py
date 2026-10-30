@@ -6,6 +6,7 @@ find_current_plateaus, fit_reduced_ic, ReducedFitResult.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, insort
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -459,20 +460,121 @@ def _power_law_model(x, Ic, n, V0, R, Vc):
 
 
 def _rolling_median(values: np.ndarray, win: int) -> np.ndarray:
-    """Small helper for robust local trend estimation without SciPy filters."""
+    """Median of a centred window of ``win`` values around each point.
+
+    The window has ``win`` values (made odd); it is shorter at the two
+    ends of the array. Same values as ``np.median`` of each window,
+    computed with a sorted window that slides over the array
+    (O(n log win) instead of one selection per point). Values with NaN
+    keep the plain per-window ``np.median`` (NaN results).
+    """
     n = int(values.size)
-    if n == 0:
-        return values.copy()
-    if win <= 1:
+    if n == 0 or win <= 1:
         return values.copy()
     if win % 2 == 0:
         win += 1
     half = win // 2
-    out = np.empty_like(values, dtype=float)
+    if np.isnan(values).any():
+        return _rolling_apply(values, half, lambda r: float(np.median(r)))
+    vals = values.tolist()
+    out = np.empty(n, dtype=float)
+    window: list = []
+    added = 0
+    for i in range(n):
+        stop = i + half + 1
+        if stop > n:
+            stop = n
+        while added < stop:
+            insort(window, vals[added])
+            added += 1
+        drop = i - half - 1
+        if drop >= 0:
+            del window[bisect_left(window, vals[drop])]
+        size = len(window)
+        centre = size >> 1
+        out[i] = window[centre] if size & 1 else (window[centre - 1] + window[centre]) / 2.0
+    return out
+
+
+def _rolling_mad(values: np.ndarray, win: int) -> np.ndarray:
+    """Median absolute deviation of each centred window of ``win`` values.
+
+    For each point: ``median(|r - median(r)|)`` of its window ``r``
+    (shorter at the ends), the same values as the plain per-window
+    formula. The deviations of a sorted window form two sorted runs away
+    from the median, so the median deviation is found by a binary search
+    on the two runs (no sort or selection per point).
+    """
+    n = int(values.size)
+    if win % 2 == 0:
+        win += 1
+    half = win // 2
+    if n == 0:
+        return np.empty(0, dtype=float)
+    if np.isnan(values).any():
+        return _rolling_apply(values, half, lambda r: float(np.median(np.abs(r - np.median(r)))))
+    vals = values.tolist()
+    out = np.empty(n, dtype=float)
+    window: list = []
+    added = 0
+    for i in range(n):
+        stop = i + half + 1
+        if stop > n:
+            stop = n
+        while added < stop:
+            insort(window, vals[added])
+            added += 1
+        drop = i - half - 1
+        if drop >= 0:
+            del window[bisect_left(window, vals[drop])]
+        size = len(window)
+        centre = size >> 1
+        if size & 1:
+            median = window[centre]
+            rank = (size - 1) >> 1  # rank of the median deviation; the median itself has deviation 0
+            out[i] = 0.0 if rank == 0 else _kth_deviation(window, centre, median, centre + 1,
+                                                          centre, size - 1 - centre, rank - 1)
+        else:
+            median = (window[centre - 1] + window[centre]) / 2.0
+            low = _kth_deviation(window, centre, median, centre, centre, centre, centre - 1)
+            high = _kth_deviation(window, centre, median, centre, centre, centre, centre)
+            out[i] = (low + high) / 2.0
+    return out
+
+
+def _kth_deviation(window: list, centre: int, median: float, right_start: int,
+                   p: int, q: int, k: int) -> float:
+    """k-th smallest (0-based) of the deviations from the median of a sorted window.
+
+    Left run A[i] = median - window[centre - 1 - i] for i < p, right run
+    B[j] = window[right_start + j] - median for j < q; both increase.
+    A binary search finds how many values of the k + 1 smallest come
+    from A; the answer is the larger of the two last values taken.
+    """
+    lo = k + 1 - q if k + 1 > q else 0
+    hi = k + 1 if k + 1 < p else p
+    while lo < hi:
+        i = (lo + hi) >> 1
+        j = k + 1 - i
+        if median - window[centre - 1 - i] < window[right_start + j - 1] - median:
+            lo = i + 1
+        else:
+            hi = i
+    i = lo
+    j = k + 1 - i
+    a = median - window[centre - i] if i > 0 else -1.0
+    b = window[right_start + j - 1] - median if j > 0 else -1.0
+    return a if a > b else b
+
+
+def _rolling_apply(values: np.ndarray, half: int, fn) -> np.ndarray:
+    """``fn`` of each centred window (``2 * half + 1`` values, shorter at the ends)."""
+    n = int(values.size)
+    out = np.empty(n, dtype=float)
     for i in range(n):
         lo = max(0, i - half)
         hi = min(n, i + half + 1)
-        out[i] = float(np.median(values[lo:hi]))
+        out[i] = fn(values[lo:hi])
     return out
 
 
@@ -496,14 +598,7 @@ def estimate_point_noise(x: np.ndarray, signal: np.ndarray,
         win += 1
     trend = _rolling_median(signal, win)
     resid = signal - trend
-    local_sigma = np.empty(n, dtype=float)
-    half = win // 2
-    for i in range(n):
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        r = resid[lo:hi]
-        mad = float(np.median(np.abs(r - np.median(r))))
-        local_sigma[i] = max(1e-12, 1.4826 * mad)
+    local_sigma = np.maximum(1e-12, 1.4826 * _rolling_mad(resid, win))
 
     # Pre-ramp baseline floor from low-current points.
     x_abs_max = float(np.max(np.abs(x)))

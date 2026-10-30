@@ -8,9 +8,11 @@ Functions/Classes:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 import traceback
+from collections import OrderedDict
 from functools import partial
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +22,8 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 from nptdms import ChannelObject, GroupObject, RootObject, TdmsFile, TdmsWriter
+from nptdms.common import ObjectPath
+from nptdms.writer import TdmsObject
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
@@ -608,7 +612,12 @@ class DataFittingController:
     def __init__(self, app):
         self.app = app
         self.tdms_path: str = ""
-        self.time_array = None
+        # Transformed, block-averaged channels by (name, scale, offset,
+        # window): see transformed(). The oldest results are dropped.
+        self._transformed: OrderedDict = OrderedDict()
+        # Sample times: read from the file on the first access of time_array.
+        self._time_array = None
+        self._time_path: str = ""
         # name -> float64 values. A LazyChannelCache after a load: a channel
         # is read from the file on first access and then kept.
         self.channel_cache = {}
@@ -648,7 +657,9 @@ class DataFittingController:
     def clear(self) -> None:
         """Drop the loaded recording and every per-recording state."""
         self.tdms_path = ""
-        self.time_array = None
+        self._time_array = None
+        self._time_path = ""
+        self._transformed.clear()
         self.channel_cache = {}
         self.channel_names = []
         self.channel_metadata = {}
@@ -658,16 +669,19 @@ class DataFittingController:
         self._channel_paths = {}
 
     def load_recording(self, path: str) -> tuple[bool, str]:
-        """Open a TDMS file: metadata, verified readers and the Time channel.
+        """Open a TDMS file: metadata and verified readers, no channel data.
 
-        Other channels are read on first use. Returns (ok, message); the
-        message names the file, the channel count and the first warning
-        (damaged tail, ignored index file, ...).
+        Channels are read on first use (see ``transformed`` and
+        ``get_channel``). Returns (ok, message); the message names the
+        file, the channel count and the first warning (damaged tail,
+        ignored index file, ...).
         """
         self.channel_cache = {}
         self.channel_metadata = {}
         self.channel_names = []
-        self.time_array = None
+        self._time_array = None
+        self._time_path = ""
+        self._transformed.clear()
         self.saved_fit_results = {}
         self.recording = None
         self.load_warnings = []
@@ -684,7 +698,7 @@ class DataFittingController:
                     break
             if time_channel is None:
                 return False, "Recording has no 'Time' channel."
-            self.time_array = recording.read_one(time_channel.path)
+            recording.read_range(time_channel.path, 0, 1)  # the data must be readable: fail here, not later
         except Exception as exc:
             return False, f"Could not read TDMS: {exc}"
         names: list[str] = []
@@ -716,8 +730,9 @@ class DataFittingController:
             if same_group_fit and name not in saved:
                 saved[name] = same_group_fit
         self.recording = recording
+        self._time_path = time_channel.path
         self._channel_paths = paths
-        self.channel_cache = LazyChannelCache(names, self._load_channels)
+        self.channel_cache = LazyChannelCache(names, self._load_channels, on_change=self._drop_transformed)
         self.channel_metadata = metadata
         self.channel_names = names
         self.saved_fit_results = saved
@@ -767,26 +782,126 @@ class DataFittingController:
             return None
         return np.asarray(values, dtype=float) * float(scale) - float(offset)
 
+    # --- derived values ----------------------------------------------------
+    _TRANSFORMED_KEEP = 3  # the live Time, X and Y results always stay
+    _TRANSFORMED_MAX = 24
+    _TRANSFORMED_BYTES = 256 << 20
+
+    @property
+    def time_array(self):
+        """Sample times as float64, read from the file on first access (None without a recording)."""
+        if self._time_array is None and self._time_path and self.recording is not None:
+            try:
+                self._time_array = self.recording.read_one(self._time_path)
+            except Exception:
+                traceback.print_exc()
+        return self._time_array
+
+    @time_array.setter
+    def time_array(self, value) -> None:
+        self._time_array = value
+        self._drop_transformed("Time")
+
+    def transformed(self, name: str, scale: float, offset: float, avg_window: int = 1):
+        """``(raw * scale - offset)``, block-averaged over ``avg_window`` samples.
+
+        Same values as ``_block_average(apply_transform(get_channel(name),
+        scale, offset), avg_window)``, computed block by block: from RAM
+        when the channel is loaded, else streamed from the file, so a long
+        recording never needs its full-resolution array in memory. The last
+        results are kept and returned again (read-only arrays). ``"Time"``
+        is the Time channel. None if the channel is unknown or unreadable.
+        """
+        if not name:
+            return None
+        window = max(1, int(avg_window or 1))
+        key = (name, float(scale), float(offset), window)
+        hit = self._transformed.get(key)
+        if hit is not None:
+            self._transformed.move_to_end(key)
+            return hit
+        try:
+            source = self._raw_source(name, window)
+            if source is None:
+                return None
+            count, blocks = source
+            out = _transform_blocks(blocks, count, scale, offset, window)
+        except Exception:
+            traceback.print_exc()
+            return None
+        out.flags.writeable = False
+        self._transformed[key] = out
+        self._trim_transformed()
+        return out
+
+    def sample_interval(self, time_name: str = "Time", samples: int = 4096):
+        """Mean time step over the first ``samples`` values of a time channel (s), or None."""
+        try:
+            t = self._raw_prefix(time_name or "Time", samples)
+        except Exception:
+            traceback.print_exc()
+            return None
+        if t is None or t.size < 2:
+            return None
+        dt = float(np.mean(np.diff(np.asarray(t, dtype=float))))
+        return dt if dt > 0 else None
+
+    def _raw_in_ram(self, name: str):
+        """(raw values or None, TDMS path or None) of a channel; "Time" is the Time channel."""
+        if name == "Time":
+            return self._time_array, self._time_path
+        cache = self.channel_cache
+        loaded = name in cache and (not isinstance(cache, LazyChannelCache) or cache.loaded(name))
+        return (cache.get(name) if loaded else None), self._channel_paths.get(name)
+
+    def _raw_prefix(self, name: str, count: int):
+        """The first ``count`` raw values of a channel, from RAM or the file; None if unknown."""
+        raw, path = self._raw_in_ram(name)
+        if raw is not None:
+            return np.asarray(raw)[:count]
+        if not path or self.recording is None:
+            return None
+        return self.recording.read_range(path, 0, count)
+
+    def _raw_source(self, name: str, window: int):
+        """(sample count, raw value blocks) of a channel, from RAM or the file; None if unknown.
+
+        Every block but the last holds a multiple of ``window`` values.
+        """
+        block = max(window, _STREAM_BLOCK // window * window)
+        raw, path = self._raw_in_ram(name)
+        if raw is not None:
+            raw = np.asarray(raw, dtype=float)
+            return raw.size, (raw[i:i + block] for i in range(0, raw.size, block))
+        if not path or self.recording is None:
+            return None
+        return self.recording.channel(path).length, self.recording.iter_blocks(path, block)
+
+    def _drop_transformed(self, name: str) -> None:
+        """Forget the transformed results of a channel (its raw values changed)."""
+        for key in [k for k in self._transformed if k[0] == name]:
+            del self._transformed[key]
+
+    def _trim_transformed(self) -> None:
+        """Drop the oldest results: beyond 24 entries, or beyond 256 MB while more than 3 are kept."""
+        cache = self._transformed
+        total = sum(a.nbytes for a in cache.values())
+        while len(cache) > self._TRANSFORMED_MAX or (
+                len(cache) > self._TRANSFORMED_KEEP and total > self._TRANSFORMED_BYTES):
+            _key, old = cache.popitem(last=False)
+            total -= old.nbytes
+
     # --- fit orchestration ----------------------------------------------
     def compute_fit(self, *, time_sig: str, x_sig: str, y_sig: str,
                     x_scale: float, x_offset: float,
                     y_scale: float, y_offset: float,
                     t_scale: float, t_offset: float,
                     settings: FitSettings, avg_window: int = 1):
-        self.preload((time_sig, x_sig, y_sig))
-        x_raw = self.get_channel(x_sig)
-        y_raw = self.get_channel(y_sig)
-        t_raw = self.get_channel(time_sig) if time_sig and time_sig != "Time" else self.time_array
-        if t_raw is None or x_raw is None or y_raw is None:
+        x = self.transformed(x_sig, x_scale, x_offset, avg_window)
+        y = self.transformed(y_sig, y_scale, y_offset, avg_window)
+        t = self.transformed(time_sig or "Time", t_scale, t_offset, avg_window)
+        if t is None or x is None or y is None:
             return None, "Please choose Time, X and Y channels that exist in the recording."
-        x = self.apply_transform(x_raw, x_scale, x_offset)
-        y = self.apply_transform(y_raw, y_scale, y_offset)
-        t = self.apply_transform(t_raw, t_scale, t_offset)
-        if avg_window and avg_window > 1:
-            win = int(avg_window)
-            t = _block_average(t, win)
-            x = _block_average(x, win)
-            y = _block_average(y, win)
         if settings.sample_length_cm and settings.sample_length_cm > 0:
             y = y / float(settings.sample_length_cm)
         result = run_full_fit(t, x, y, settings)
@@ -2008,33 +2123,89 @@ def _block_average(arr: np.ndarray, window: int) -> np.ndarray:
     return arr[: n_bins * window].reshape(n_bins, window).mean(axis=1)
 
 
+# Samples per block when a channel is transformed block by block.
+_STREAM_BLOCK = 1 << 20
+
+
+def _transform_blocks(blocks, count: int, scale: float, offset: float, window: int) -> np.ndarray:
+    """``(raw * scale - offset)`` of ``count`` values, block-averaged over ``window``.
+
+    ``blocks`` yields the raw values in order; every block but the last
+    holds a multiple of ``window`` values. Gives the same bits as
+    ``_block_average(apply_transform(raw, scale, offset), window)`` with
+    one block of temporaries instead of full-size arrays.
+    """
+    scale = float(scale)
+    offset = float(offset)
+    n_bins = count // window if window > 1 else 0
+    if n_bins == 0:  # no averaging: window 1, or fewer values than the window
+        out = np.empty(count, dtype=np.float64)
+        pos = 0
+        for raw in blocks:
+            vals = np.asarray(raw, dtype=float) * scale - offset
+            out[pos:pos + vals.size] = vals
+            pos += vals.size
+        return out[:pos]
+    out = np.empty(n_bins, dtype=np.float64)
+    row = 0
+    for raw in blocks:
+        vals = np.asarray(raw, dtype=float) * scale - offset
+        k = min(vals.size // window, n_bins - row)
+        if k <= 0:
+            break
+        out[row:row + k] = vals[: k * window].reshape(k, window).mean(axis=1)
+        row += k
+    return out[:row]
+
+
+def _trim_mask_cached(app, x: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """Step 2 keep-mask of ``x`` with the live trim settings.
+
+    Kept for the same ``x`` object and settings: the transformed arrays
+    are kept by the controller, so the mask is computed once per change.
+    """
+    if x is None:
+        return None
+    settings = (
+        _float_from(getattr(app, "data_fit_trim_start_abs", None), 30.0),
+        _float_from(getattr(app, "data_fit_trim_start_pct", None), 5.0, as_fraction=True),
+        bool(getattr(app, "data_fit_trim_quench_cb", None) and app.data_fit_trim_quench_cb.isChecked()),
+    )
+    memo = getattr(app, "_data_fit_trim_memo", None)
+    if memo is not None and memo[0] is x and memo[1] == settings:
+        return memo[2]
+    mask = _build_trim_mask(app, x, trim_start_abs=settings[0], trim_start_pct=settings[1],
+                            trim_quench=settings[2])
+    if mask is not None:
+        mask.flags.writeable = False
+    app._data_fit_trim_memo = (x, settings, mask)
+    return mask
+
+
 def _apply_transforms(app, *, apply_trim: bool = False):
+    """Time, X and Y of the active selection: transformed, block-averaged, trimmed.
+
+    The arrays come from ``controller.transformed`` (kept between calls,
+    read-only); the Step 2 trim mask is kept for the same X and settings.
+    """
     controller = app.data_fit_controller
     t_scale, t_offset = _scale_offset_from_inputs(app, "time")
     x_scale, x_offset = _scale_offset_from_inputs(app, "x")
     y_scale, y_offset = _scale_offset_from_inputs(app, "y")
-    time_name = app.data_fit_time_cb.currentText()
+    time_name = app.data_fit_time_cb.currentText() or "Time"
     x_name = app.data_fit_x_cb.currentText()
     y_name = app.data_fit_y_cb.currentText()
-    controller.preload((time_name, x_name, y_name))
-    t_raw = controller.get_channel(time_name) if time_name and time_name != "Time" else controller.time_array
-    x_raw = controller.get_channel(x_name)
-    y_raw = controller.get_channel(y_name)
-    t = controller.apply_transform(t_raw, t_scale, t_offset)
-    x = controller.apply_transform(x_raw, x_scale, x_offset)
-    y = controller.apply_transform(y_raw, y_scale, y_offset)
     avg_window = _active_avg_window(app)
-    if avg_window > 1:
-        t = _block_average(t, avg_window)
-        x = _block_average(x, avg_window)
-        y = _block_average(y, avg_window)
+    t = controller.transformed(time_name, t_scale, t_offset, avg_window)
+    x = controller.transformed(x_name, x_scale, x_offset, avg_window)
+    y = controller.transformed(y_name, y_scale, y_offset, avg_window)
     sample_length = _active_sample_length(app)
     if sample_length is not None and y is not None:
         y = y / sample_length
     x_original = np.asarray(x, dtype=float) if x is not None else None
     t_original = np.asarray(t, dtype=float) if t is not None else None
     y_original = np.asarray(y, dtype=float) if y is not None else None
-    trim_mask = _build_trim_mask(app, x_original) if apply_trim else None
+    trim_mask = _trim_mask_cached(app, x_original) if apply_trim else None
     if trim_mask is not None and np.any(trim_mask):
         if t is not None:
             t = t[trim_mask]
@@ -2630,12 +2801,23 @@ def _post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
     app.data_fit_preview_style = {"draw_mode": "Auto", "line_width": 1.5, "point_size": 4}
     app.data_fit_curve_profiles = {"__preview__": _capture_fit_window_profile(app)}
     app.data_fit_plot_dirty = True
-    _populate_channel_combos(app)
-    load_metadata_from_tdms(app)
-    _refresh_curve_profile_selector(app)
+    with _preview_suspended(app):  # widget signals refresh the preview: once, below
+        _populate_channel_combos(app)
+        load_metadata_from_tdms(app)
+        _refresh_curve_profile_selector(app)
     refresh_preview(app)
     if auto_plot_fits:
         _replay_saved_fits_into_plot(app)
+
+
+@contextlib.contextmanager
+def _preview_suspended(app):
+    """Skip ``refresh_preview`` inside the block; the caller refreshes once after it."""
+    app._data_fit_preview_suspended = getattr(app, "_data_fit_preview_suspended", 0) + 1
+    try:
+        yield
+    finally:
+        app._data_fit_preview_suspended -= 1
 
 
 def _safe_checkbox_checked(app, attr_name: str, *, default: bool) -> bool:
@@ -3139,17 +3321,10 @@ def _update_avg_rate_label(app):
     if label is None:
         return
     controller = getattr(app, "data_fit_controller", None)
-    t_raw = None
-    if controller is not None:
-        time_name = app.data_fit_time_cb.currentText()
-        t_raw = controller.get_channel(time_name) if time_name and time_name != "Time" else controller.time_array
     window = _active_avg_window(app)
-    if t_raw is None or np.asarray(t_raw).size < 2:
-        label.setText(f"Effective rate: — (avg window = {window})")
-        return
-    t_arr = np.asarray(t_raw, dtype=float)
-    dt = float(np.mean(np.diff(t_arr)))
-    if dt <= 0:
+    # Mean time step of the first 4096 samples: no full read of the time channel.
+    dt = controller.sample_interval(app.data_fit_time_cb.currentText()) if controller is not None else None
+    if dt is None:
         label.setText(f"Effective rate: — (avg window = {window})")
         return
     fs_orig = 1.0 / dt
@@ -3392,6 +3567,8 @@ def _on_use_length_changed(app):
 
 
 def refresh_preview(app):
+    if getattr(app, "_data_fit_preview_suspended", 0):
+        return
     _update_y_axis_label(app)
     _update_avg_rate_label(app)
     show_trimmed = bool(getattr(app, "data_fit_show_trimmed_preview", False))
@@ -4586,13 +4763,106 @@ def _build_fit_curve(result, x_data, *, length_cm: Optional[float] = None):
     return fit_x, fit_y
 
 
+class _ChannelPropertiesObject(TdmsObject):
+    """A channel declared with properties and no data, for an appended metadata segment.
+
+    npTDMS 1.13 has ``ChannelObject(group, name, None, properties)`` for
+    this; 1.11 does not. The writer reads ``path``, ``has_data`` (False),
+    ``data_type`` (None) and ``properties``.
+    """
+
+    def __init__(self, group: str, channel: str, properties: dict):
+        self.group = group
+        self.channel = channel
+        self.properties = properties
+
+    @property
+    def path(self) -> str:
+        return str(ObjectPath(self.group, self.channel))
+
+
+def _tdms_append_version(tfile, size: int) -> Optional[int]:
+    """TDMS version of an open file that can take an appended segment, else None.
+
+    A segment appended after a torn or unfinished segment, or after bytes
+    that are not TDMS data, is hidden or corrupts the channel data: such a
+    file must be rewritten instead. Open ``tfile`` from a file object, so
+    that a .tdms_index is not consulted.
+    """
+    try:
+        if tfile.file_status.incomplete_final_segment:
+            return None
+        segments = tfile._reader._segments
+        if not segments or segments[-1].next_segment_pos != size:
+            return None
+        return int(tfile.tdms_version)
+    except Exception:
+        return None
+
+
+def _append_tdms_segment(path: Path, objects: list, version: int) -> None:
+    """Append one segment to a TDMS file; a .tdms_index next to it gets the same segment."""
+    with TdmsWriter(str(path), mode="a", version=version, index_file=os.path.isfile(f"{path}_index")) as writer:
+        writer.write_segment(objects)
+
+
 def _write_fit_report_same_group(report_path: Path,
                                  new_entries: dict[str, dict]) -> Optional[str]:
     """Attach fit properties as channel metadata on the matching source channels.
 
-    Reads the source TDMS, merges each curve's fit properties into the
-    properties of the channel sharing its label, and rewrites the file with
-    the original groups, channels and data preserved. Properties from prior
+    Appends one metadata-only segment: each fitted channel is declared
+    again in its own group with its fit properties and no data, so readers
+    merge the new properties into the channel. The recorded data is not
+    touched and the save takes milliseconds on any file size. Properties
+    from prior fits on the same channel are overridden; other channels are
+    kept untouched.
+
+    Channels whose label has no match in the file (e.g. user renamed a curve
+    before fitting) go to a ``FitResults`` group in the same segment, so
+    nothing is silently dropped. A file that cannot take an appended
+    segment (torn last segment) is rewritten instead.
+    """
+    if not report_path.exists():
+        return None
+    try:
+        with open(report_path, "rb") as fh, TdmsFile.open(fh) as tfile:
+            version = _tdms_append_version(tfile, report_path.stat().st_size)
+            group_of: dict[str, str] = {}
+            for grp in tfile.groups():
+                if grp.name == "FitResults":
+                    continue
+                for ch in grp.channels():
+                    group_of.setdefault(ch.name, grp.name)
+        if version is None:
+            return _rewrite_fit_report_same_group(report_path, new_entries)
+        objects: list = []
+        unmatched: dict[str, dict] = {}
+        for label, fit_props in new_entries.items():
+            group = group_of.get(label)
+            if group is None:
+                unmatched[label] = fit_props
+            else:
+                objects.append(_ChannelPropertiesObject(group, label, _prefix_fit_props(fit_props)))
+        if unmatched:
+            objects.append(GroupObject("FitResults"))
+            for name, props in unmatched.items():
+                objects.append(ChannelObject("FitResults", name, np.array([np.nan], dtype=np.float64),
+                                             properties=props))
+        _append_tdms_segment(report_path, objects, version)
+        return str(report_path)
+    except Exception as exc:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        return None
+
+
+def _rewrite_fit_report_same_group(report_path: Path,
+                                   new_entries: dict[str, dict]) -> Optional[str]:
+    """Rewrite the source TDMS with fit properties merged into the matching channels.
+
+    Fallback of ``_write_fit_report_same_group`` for a file that cannot
+    take an appended segment. Reads the whole file, merges each curve's
+    fit properties into the properties of the channel sharing its label,
+    and rewrites the file with the original groups, channels and data. Properties from prior
     fits on the same channel are overwritten; properties on channels that
     weren't fitted in this run are kept untouched.
 
@@ -4738,51 +5008,55 @@ def _write_fit_report_tdms(app, results: list[tuple[str, object]],
             return None
         return str(report_path)
 
-    # Append a FitResults segment to the source TDMS. nptdms' append mode
-    # adds a new segment; readers see the latest properties, which is the
-    # overwrite semantics requested for re-runs.
+    # Append a FitResults segment to the source TDMS: readers see the latest
+    # properties, which is the overwrite semantics requested for re-runs.
     objects = [GroupObject("FitResults")]
     for name, props in new_entries.items():
         data = np.array([np.nan], dtype=np.float64)
         objects.append(ChannelObject("FitResults", name, data, properties=props))
     try:
-        with TdmsWriter(str(report_path), mode="a") as writer:
-            writer.write_segment(objects)
-    except TypeError:
-        # Older nptdms versions don't support mode='a' on TdmsWriter; fall
-        # back to rewriting the file with merged contents preserved.
+        with open(report_path, "rb") as fh, TdmsFile.open(fh) as tfile:
+            version = _tdms_append_version(tfile, report_path.stat().st_size)
+    except Exception:
+        version = None
+    if version is not None:
         try:
-            existing_root: Optional[RootObject] = None
-            existing_groups: list[GroupObject] = []
-            existing_channels: list[ChannelObject] = []
-            existing_fit: dict[str, dict] = {}
-            if report_path.exists():
-                with TdmsFile.read(str(report_path)) as tfile:
-                    root_props = dict(tfile.properties)
-                    if root_props:
-                        existing_root = RootObject(root_props)
-                    for grp in tfile.groups():
-                        if grp.name == "FitResults":
-                            for ch in grp.channels():
-                                existing_fit[ch.name] = dict(ch.properties)
-                            continue
-                        existing_groups.append(GroupObject(grp.name, properties=dict(grp.properties)))
-                        for ch in grp.channels():
-                            existing_channels.append(
-                                ChannelObject(grp.name, ch.name, np.asarray(ch[:]),
-                                              properties=dict(ch.properties))
-                            )
-            merged = {**existing_fit, **new_entries}
-            root_objects = [existing_root] if existing_root is not None else []
-            out_objects = root_objects + list(existing_groups) + list(existing_channels)
-            out_objects.append(GroupObject("FitResults"))
-            for name, props in merged.items():
-                data = np.array([np.nan], dtype=np.float64)
-                out_objects.append(ChannelObject("FitResults", name, data, properties=props))
-            _write_tdms_objects_atomically(report_path, out_objects)
+            _append_tdms_segment(report_path, objects, version)
+            return str(report_path)
         except Exception as exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
             return None
+    # The file cannot take an appended segment (torn last segment or bytes
+    # after it): rewrite it with the merged contents preserved.
+    try:
+        existing_root: Optional[RootObject] = None
+        existing_groups: list[GroupObject] = []
+        existing_channels: list[ChannelObject] = []
+        existing_fit: dict[str, dict] = {}
+        if report_path.exists():
+            with TdmsFile.read(str(report_path)) as tfile:
+                root_props = dict(tfile.properties)
+                if root_props:
+                    existing_root = RootObject(root_props)
+                for grp in tfile.groups():
+                    if grp.name == "FitResults":
+                        for ch in grp.channels():
+                            existing_fit[ch.name] = dict(ch.properties)
+                        continue
+                    existing_groups.append(GroupObject(grp.name, properties=dict(grp.properties)))
+                    for ch in grp.channels():
+                        existing_channels.append(
+                            ChannelObject(grp.name, ch.name, np.asarray(ch[:]),
+                                          properties=dict(ch.properties))
+                        )
+        merged = {**existing_fit, **new_entries}
+        root_objects = [existing_root] if existing_root is not None else []
+        out_objects = root_objects + list(existing_groups) + list(existing_channels)
+        out_objects.append(GroupObject("FitResults"))
+        for name, props in merged.items():
+            data = np.array([np.nan], dtype=np.float64)
+            out_objects.append(ChannelObject("FitResults", name, data, properties=props))
+        _write_tdms_objects_atomically(report_path, out_objects)
     except Exception as exc:
         traceback.print_exception(type(exc), exc, exc.__traceback__)
         return None
@@ -6219,19 +6493,13 @@ def _upsert_fit_curve_entry(app, source_entry: dict, result) -> None:
 def _recompute_curve_from_source(app, entry: dict) -> None:
     src = entry.get("source") or {}
     controller = app.data_fit_controller
-    time_sig = src.get("time_sig", "Time")
-    controller.preload((time_sig, src.get("x_sig", ""), src.get("y_sig", "")))
-    t_raw = controller.get_channel(time_sig) if time_sig and time_sig != "Time" else controller.time_array
-    x_raw = controller.get_channel(src.get("x_sig", ""))
-    y_raw = controller.get_channel(src.get("y_sig", ""))
-    t = controller.apply_transform(t_raw, float(src.get("t_scale", 1.0)), float(src.get("t_offset", 0.0)))
-    x = controller.apply_transform(x_raw, float(src.get("x_scale", 1.0)), float(src.get("x_offset", 0.0)))
-    y = controller.apply_transform(y_raw, float(src.get("y_scale", 1.0)), float(src.get("y_offset", 0.0)))
+    time_sig = src.get("time_sig", "Time") or "Time"
     avg_window = max(1, int(entry.get("avg_window", 1) or 1))
-    if avg_window > 1:
-        t = _block_average(t, avg_window)
-        x = _block_average(x, avg_window)
-        y = _block_average(y, avg_window)
+    t = controller.transformed(time_sig, float(src.get("t_scale", 1.0)), float(src.get("t_offset", 0.0)), avg_window)
+    x = controller.transformed(src.get("x_sig", ""), float(src.get("x_scale", 1.0)),
+                               float(src.get("x_offset", 0.0)), avg_window)
+    y = controller.transformed(src.get("y_sig", ""), float(src.get("y_scale", 1.0)),
+                               float(src.get("y_offset", 0.0)), avg_window)
     if bool(src.get("use_length")):
         length_cm = float(src.get("length_cm", 1.0))
         if length_cm > 0:

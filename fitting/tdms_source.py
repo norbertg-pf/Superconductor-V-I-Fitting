@@ -491,6 +491,20 @@ class TdmsRecording:
 
     # -- values -------------------------------------------------------------------
 
+    def channel(self, path: str) -> RecordingChannel:
+        """The numeric channel at path; KeyError or ValueError otherwise."""
+        ch = self._by_path.get(path)
+        if ch is None:
+            raise KeyError(path)
+        if not ch.numeric:
+            raise ValueError(f"{ch.label}: values are not numeric ({ch.dtype})")
+        return ch
+
+    def _fresh(self) -> None:
+        """Parse the file again if it changed on disk since the last parse."""
+        if self._file_stamp() != self._stamp:
+            self._reopen()
+
     def read(self, paths) -> dict[str, np.ndarray]:
         """float64 values of whole channels, by path: {path: values}.
 
@@ -501,17 +515,12 @@ class TdmsRecording:
         paths = list(dict.fromkeys(paths))
         if not paths:
             return {}
-        if self._file_stamp() != self._stamp:
-            self._reopen()
+        self._fresh()
         out: dict[str, np.ndarray] = {}
         fast: list[str] = []
         slow: list[str] = []
         for p in paths:
-            ch = self._by_path.get(p)
-            if ch is None:
-                raise KeyError(p)
-            if not ch.numeric:
-                raise ValueError(f"{ch.label}: values are not numeric ({ch.dtype})")
+            ch = self.channel(p)
             if ch.length == 0:
                 out[p] = np.empty(0, dtype=np.float64)
             elif p in self._readers:
@@ -529,6 +538,55 @@ class TdmsRecording:
     def read_one(self, path: str) -> np.ndarray:
         """float64 values of one channel."""
         return self.read([path])[path]
+
+    def read_range(self, path: str, start: int, stop: int) -> np.ndarray:
+        """float64 values [start, stop) of one channel, clamped to the channel."""
+        ch = self.channel(path)
+        start = max(0, start)
+        stop = min(ch.length, stop)
+        if stop <= start:
+            return np.empty(0, dtype=np.float64)
+        self._fresh()
+        reader = self._readers.get(path)
+        if reader is None:
+            return self.read_one(path)[start:stop]
+        fd = os.open(self.path, _O_READ)
+        try:
+            reader.bind(fd)
+            return _as_f64(reader.read(start, stop))
+        finally:
+            reader.bind(-1)
+            os.close(fd)
+
+    def iter_blocks(self, path: str, block: int) -> Iterator[np.ndarray]:
+        """Yield the float64 values of one channel in order, `block` values per array.
+
+        The last array is shorter. A channel with a direct reader is read
+        block by block (RAM use: one block); other channels are read whole
+        first. The file stays open while the generator runs.
+        """
+        ch = self.channel(path)
+        n = ch.length
+        block = max(1, int(block))
+        if n == 0:
+            return
+        self._fresh()
+        reader = self._readers.get(path)
+        if reader is None:
+            whole = self.read_one(path)
+            for i in range(0, n, block):
+                yield whole[i:i + block]
+            return
+        fd = os.open(self.path, _O_READ)
+        try:
+            reader.bind(fd)
+            for i in range(0, n, block):
+                out = np.empty(min(block, n - i), dtype=reader.dtype)
+                reader.read_into(out, i)
+                yield _as_f64(out)
+        finally:
+            reader.bind(-1)
+            os.close(fd)
 
     def _read_direct(self, paths: list[str]) -> dict[str, np.ndarray]:
         """Direct reads, one pass per family.
@@ -617,11 +675,14 @@ class LazyChannelCache(MutableMapping):
 
     loader(names) returns {name: array} for channels not yet in memory.
     get() returns the default when a load fails (the error is logged);
-    ``cache[name]`` raises it.
+    ``cache[name]`` raises it. on_change(name) is called when a value is
+    replaced or removed (not when a channel is loaded from the file).
     """
 
-    def __init__(self, names, loader: Callable[[list[str]], dict[str, np.ndarray]]):
+    def __init__(self, names, loader: Callable[[list[str]], dict[str, np.ndarray]],
+                 on_change: Callable[[str], None] | None = None):
         self._loader = loader
+        self._on_change = on_change  # called with the name when a value is replaced or removed
         self._order: list[str] = list(dict.fromkeys(names))  # file order, then added names
         self._pending: set[str] = set(self._order)
         self._data: dict[str, np.ndarray] = {}
@@ -640,6 +701,8 @@ class LazyChannelCache(MutableMapping):
             self._order.append(name)
         self._pending.discard(name)
         self._data[name] = value
+        if self._on_change is not None:
+            self._on_change(name)
 
     def __delitem__(self, name: str) -> None:
         if name not in self._data and name not in self._pending:
@@ -647,6 +710,8 @@ class LazyChannelCache(MutableMapping):
         self._data.pop(name, None)
         self._pending.discard(name)
         self._order.remove(name)
+        if self._on_change is not None:
+            self._on_change(name)
 
     def __iter__(self) -> Iterator[str]:
         return iter(list(self._order))

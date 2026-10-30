@@ -92,31 +92,28 @@ def _sample_rate_from_controller(controller) -> Optional[float]:
     return _positive_rate(props.get("Sample_Rate_Hz"))
 
 
-def _apply_target_rate_resample(app,
-                                target_hz: float = _TARGET_EFFECTIVE_RATE_HZ) -> None:
-    """Set ``data_fit_avg_input`` so the effective rate matches ``target_hz``.
+def _avg_factor_from_rate(app, target_hz: float = _TARGET_EFFECTIVE_RATE_HZ) -> Optional[int]:
+    """Block-average factor that brings the recording rate to about ``target_hz``, or ``None``."""
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return None
+    rate_hz = _sample_rate_from_controller(controller)
+    if rate_hz is None or rate_hz <= target_hz:
+        return None
+    n = max(1, int(round(rate_hz / target_hz)))
+    return n if n > 1 else None
 
-    Mirrors DAQUniversal's runtime helper of the same name but runs from
-    the SVIF side so it covers manual ``Load File…`` opens as well as
-    post-acquisition auto-loads.
+
+def _set_avg_silently(app, n: int) -> bool:
+    """Write ``n`` into the AVG textbox without signals; False without the textbox.
+
+    ``editingFinished`` is suppressed because the curve-profile autosave
+    handler reads the textbox and would persist the auto-filled AVG over
+    the freshly reset profile if it ran here.
     """
     avg_input = getattr(app, "data_fit_avg_input", None)
     if avg_input is None:
-        return
-    controller = getattr(app, "data_fit_controller", None)
-    if controller is None:
-        return
-
-    rate_hz = _sample_rate_from_controller(controller)
-    if rate_hz is None or rate_hz <= target_hz:
-        return
-    n = max(1, int(round(rate_hz / target_hz)))
-    if n <= 1:
-        return
-
-    # ``editingFinished`` is suppressed because the curve-profile
-    # autosave handler reads the textbox and would persist the auto-
-    # filled AVG over the freshly reset profile if it ran here.
+        return False
     try:
         avg_input.blockSignals(True)
         avg_input.setText(str(int(n)))
@@ -125,6 +122,20 @@ def _apply_target_rate_resample(app,
             avg_input.blockSignals(False)
         except Exception:
             pass
+    return True
+
+
+def _apply_target_rate_resample(app,
+                                target_hz: float = _TARGET_EFFECTIVE_RATE_HZ) -> None:
+    """Set ``data_fit_avg_input`` so the effective rate matches ``target_hz``.
+
+    Mirrors DAQUniversal's runtime helper of the same name but runs from
+    the SVIF side so it covers manual ``Load File…`` opens as well as
+    post-acquisition auto-loads.
+    """
+    n = _avg_factor_from_rate(app, target_hz)
+    if n is None or not _set_avg_silently(app, n):
+        return
 
     try:
         from . import tab as _tab
@@ -163,9 +174,17 @@ def _patch_post_load_setup(_tab) -> None:
         return
 
     def _patched_post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
+        # The AVG factor goes in before the first preview: one pass at the
+        # final rate, not one at full rate and one more after it.
+        try:
+            n = _avg_factor_from_rate(app)
+            if n is not None:
+                _set_avg_silently(app, n)
+        except Exception:
+            pass
         orig(app, auto_plot_fits=auto_plot_fits)
         try:
-            _apply_target_rate_resample(app)
+            _apply_target_rate_resample(app)  # replayed curves take the factor too
         except Exception:
             # Never let the resample helper abort a successful load.
             pass

@@ -70,16 +70,23 @@ def test_load_plot_fit_and_reload(window, tmp_path, monkeypatch):
     c = window.data_fit_controller
     assert c.channel_names == ["Current", "Voltage"]
     assert window.data_fit_x_cb.currentText() == "Current" and window.data_fit_y_cb.currentText() == "Voltage"
-    # The preview read exactly the channels it shows; nothing else was read.
-    assert c.channel_cache.loaded("Current") and c.channel_cache.loaded("Voltage")
+    # The averaging factor (1000 S/s -> 100 S/s) was set before the first preview, and the preview
+    # was streamed from the file: no full-resolution array is kept, no full-rate pass was made.
+    assert window.data_fit_avg_input.text() == "10"
+    assert not c.channel_cache.loaded("Current") and not c.channel_cache.loaded("Voltage")
+    assert c._time_array is None
+    assert c._transformed and all(key[3] == 10 for key in c._transformed), list(c._transformed)
     xs = window.data_fit_raw_curve.xData
-    assert xs is not None and 0 < xs.size <= 5000
+    assert xs is not None and xs.size == 2000
     assert np.isclose(float(xs.max()), 100.0, atol=0.1)
+    assert window.data_fit_avg_rate_label.text().startswith("Resampled to 100 Hz")
 
     # Add to plot, fit (autosave writes fit_* properties into the source file), reload.
     t._add_plot_from_current(window)
     assert len(window.data_fit_curves) == 1
     before = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        head = fh.read(before)
     t.run_fit(window)
     assert os.path.exists(path)
     results = [r for _label, r in c.last_fit_results if r is not None]
@@ -89,14 +96,18 @@ def test_load_plot_fit_and_reload(window, tmp_path, monkeypatch):
         props = f["Dev"]["Voltage"].properties
         assert any(k.startswith("fit_") for k in props), list(props)
         assert np.array_equal(f["Dev"]["Voltage"][:], data["Voltage"])
-    assert os.path.getsize(path) != before or True  # the file was rewritten in place
+    # The save appended a small metadata segment; the recorded bytes were not touched.
+    after = os.path.getsize(path)
+    assert before < after < before + 4096
+    with open(path, "rb") as fh:
+        assert fh.read(before) == head
 
     # The rewritten file is read again on demand; a reload finds the saved fit and can replay it.
     assert np.array_equal(c.get_channel("Current"), data["Current"])
     msg = load_via_dialog(window, path, monkeypatch)
     assert msg.startswith("Loaded vi.tdms with 2 channels"), msg
     c = window.data_fit_controller
-    assert c.recording.n_segments == 1  # rewritten by the fit report, parsed again
+    assert c.recording.n_segments == 3  # two data segments and the appended metadata segment
     assert "Voltage" in c.saved_fit_results
     t._replay_saved_fits_into_plot(window)  # what the "Auto-load fitted recording" option runs
     assert any(e.get("is_fit_result") for e in window.data_fit_curves), [e.get("label") for e in window.data_fit_curves]

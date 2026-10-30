@@ -10,7 +10,7 @@ import os
 import numpy as np
 from nptdms import ChannelObject, GroupObject, RootObject, TdmsFile, TdmsWriter
 
-from fitting.tab import DataFittingController
+from fitting.tab import DataFittingController, _block_average, _transform_blocks
 from fitting.tdms_source import LazyChannelCache
 
 
@@ -51,7 +51,9 @@ def test_load_reads_metadata_and_time_only(tmp_path, monkeypatch):
     assert ok, msg
     assert msg == "Loaded rec.tdms with 2 channels."
     assert c.tdms_path == path and c.load_warnings == []
+    assert c._time_array is None  # the Time channel is read on first access
     assert np.array_equal(c.time_array, data["Time"]) and c.time_array.dtype == np.float64
+    assert c._time_array is not None
     assert c.channel_names == ["AI0", "AI1"]
     assert isinstance(c.channel_cache, LazyChannelCache)
     assert len(c.channel_cache) == 2 and "AI0" in c.channel_cache and "Time" not in c.channel_cache
@@ -108,8 +110,9 @@ def test_compute_fit_inputs_come_from_the_recording(tmp_path):
     result, message = c.compute_fit(time_sig="Time", x_sig="AI9", y_sig="AI1", x_scale=1, x_offset=0,
                                     y_scale=1, y_offset=0, t_scale=1, t_offset=0, settings=None)
     assert result is None and "exist in the recording" in message
-    assert c.channel_cache.loaded("AI1") and not c.channel_cache.loaded("AI0")
-    assert np.array_equal(c.channel_cache["AI1"], data["AI1"])
+    # The inputs are streamed from the file: no full-resolution channel is kept in channel_cache.
+    assert not c.channel_cache.loaded("AI1") and not c.channel_cache.loaded("AI0") and c._time_array is None
+    assert np.array_equal(c.transformed("AI1", 1.0, 0.0, 1), data["AI1"])
 
 
 def test_rawdata_time_group_and_old_layout(tmp_path):
@@ -236,3 +239,90 @@ def test_file_rewritten_after_load_like_the_fit_report(tmp_path):
     assert np.array_equal(c.get_channel("AI1"), data["AI1"])
     assert c.get_channel("AI0") is ai0  # loaded before the rewrite: kept
     assert c.recording.n_segments == 1
+
+
+# -- transformed (block-wise, kept) ------------------------------------------------------------
+
+def reference_transform(raw, scale, offset, window):
+    return _block_average(DataFittingController.apply_transform(raw, scale, offset), window)
+
+
+def test_transform_blocks_equals_old_pipeline_bit_for_bit():
+    rng = np.random.default_rng(11)
+    raw = rng.standard_normal(100_003) * 1e-3 + 0.5
+    for window in (1, 7, 100, 4096, 100_003, 200_000):
+        for scale, offset in ((1.0, 0.0), (2.5, -0.125), (1e-6, 3.0)):
+            ref = reference_transform(raw, scale, offset, window)
+            for block in (1, 7 * 13, 1 << 16, 10 ** 9):
+                block = max(window, block // window * window)
+                blocks = (raw[i:i + block] for i in range(0, raw.size, block))
+                got = _transform_blocks(blocks, raw.size, scale, offset, window)
+                assert got.dtype == np.float64 and got.shape == ref.shape, (window, block)
+                assert got.tobytes() == ref.tobytes(), (window, scale, offset, block)
+
+
+def test_transformed_streams_from_file_and_equals_ram(tmp_path):
+    path = str(tmp_path / "rec.tdms")
+    data = write_daqu_file(path, n=20_000, segments=7)
+    c = DataFittingController(None)
+    assert c.load_recording(path)[0]
+    for name, raw in (("AI0", data["AI0"]), ("Time", data["Time"])):
+        for window in (1, 3, 100, 20_000, 30_000):
+            ref = reference_transform(raw, 2.0, 1.0, window)
+            got = c.transformed(name, 2.0, 1.0, window)
+            assert got.tobytes() == ref.tobytes(), (name, window)
+            assert not got.flags.writeable
+            assert c.transformed(name, 2.0, 1.0, window) is got  # kept, not computed again
+    assert not c.channel_cache.loaded("AI0") and c._time_array is None  # streamed: nothing kept at full size
+    # The same values once the channel is in RAM (data book), and after an edit the result changes.
+    c.channel_cache.load(["AI0"])
+    assert c.channel_cache.loaded("AI0")
+    kept = c.transformed("AI0", 2.0, 1.0, 100)
+    assert kept.tobytes() == reference_transform(data["AI0"], 2.0, 1.0, 100).tobytes()
+    c.channel_cache["AI0"] = data["AI0"] * 3.0
+    fresh = c.transformed("AI0", 2.0, 1.0, 100)
+    assert fresh is not kept and fresh.tobytes() == reference_transform(data["AI0"] * 3.0, 2.0, 1.0, 100).tobytes()
+    before = c.transformed("Time", 1.0, 0.0, 10)
+    c.time_array = data["Time"] + 1.0
+    assert c.transformed("Time", 1.0, 0.0, 10) is not before
+    assert np.allclose(c.transformed("Time", 1.0, 0.0, 10), before + 1.0)
+    assert c.transformed("", 1.0, 0.0, 1) is None and c.transformed("nope", 1.0, 0.0, 1) is None
+
+
+def test_transformed_cache_is_bounded(tmp_path):
+    path = str(tmp_path / "rec.tdms")
+    write_daqu_file(path, n=3000)
+    c = DataFittingController(None)
+    assert c.load_recording(path)[0]
+    for k in range(40):
+        c.transformed("AI0", 1.0, float(k), 1)
+    assert len(c._transformed) == c._TRANSFORMED_MAX
+    assert ("AI0", 1.0, 39.0, 1) in c._transformed and ("AI0", 1.0, 0.0, 1) not in c._transformed
+    c._TRANSFORMED_BYTES = 10
+    c.transformed("AI1", 1.0, 0.0, 1)
+    assert len(c._transformed) == c._TRANSFORMED_KEEP  # over the byte budget: only the newest stay
+    c.clear()
+    assert len(c._transformed) == 0
+
+
+def test_sample_interval_uses_a_prefix(tmp_path, monkeypatch):
+    path = str(tmp_path / "rec.tdms")
+    data = write_daqu_file(path, n=20_000, rate_hz=2500.0)
+    c = DataFittingController(None)
+    assert c.load_recording(path)[0]
+    reads = []
+    orig = c.recording.read_range
+
+    def spy(p, start, stop):
+        reads.append((start, stop))
+        return orig(p, start, stop)
+
+    monkeypatch.setattr(c.recording, "read_range", spy)
+    assert np.isclose(c.sample_interval("Time"), 1 / 2500.0)
+    assert reads == [(0, 4096)] and c._time_array is None
+    assert np.isclose(c.sample_interval(""), 1 / 2500.0)
+    assert c.sample_interval("AI0") is not None  # any channel can serve as time
+    assert c.sample_interval("nope") is None
+    assert len(reads) == 3  # one short read per call, never the whole channel
+    c.time_array = data["Time"] * 2.0
+    assert np.isclose(c.sample_interval("Time"), 2 / 2500.0) and len(reads) == 3  # from RAM now
