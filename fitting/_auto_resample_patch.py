@@ -46,6 +46,17 @@ _PATCHED = False
 _TARGET_EFFECTIVE_RATE_HZ = 100.0
 
 
+def _positive_rate(value) -> Optional[float]:
+    """``value`` as a rate in Hz, or ``None`` if it is missing, not a number or <= 0."""
+    try:
+        rate_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if rate_value <= 0:
+        return None
+    return rate_value
+
+
 def _read_sample_rate_from_tdms(path: str) -> Optional[float]:
     """Return the TDMS root ``Sample_Rate_Hz`` property, else ``None``.
 
@@ -64,14 +75,54 @@ def _read_sample_rate_from_tdms(path: str) -> Optional[float]:
             props = dict(getattr(tdms_file, "properties", {}) or {})
     except Exception:
         return None
-    rate = props.get("Sample_Rate_Hz")
+    return _positive_rate(props.get("Sample_Rate_Hz"))
+
+
+def _sample_rate_from_controller(controller) -> Optional[float]:
+    """``Sample_Rate_Hz`` of the loaded recording, else ``None``.
+
+    Uses the root properties the controller kept at load time (no second
+    parse of the file). Opens the file only for a controller without a
+    ``recording`` attribute (older SVIF copies).
+    """
+    recording = getattr(controller, "recording", None)
+    props = getattr(recording, "properties", None)
+    if props is None:
+        return _read_sample_rate_from_tdms(getattr(controller, "tdms_path", "") or "")
+    return _positive_rate(props.get("Sample_Rate_Hz"))
+
+
+def _avg_factor_from_rate(app, target_hz: float = _TARGET_EFFECTIVE_RATE_HZ) -> Optional[int]:
+    """Block-average factor that brings the recording rate to about ``target_hz``, or ``None``."""
+    controller = getattr(app, "data_fit_controller", None)
+    if controller is None:
+        return None
+    rate_hz = _sample_rate_from_controller(controller)
+    if rate_hz is None or rate_hz <= target_hz:
+        return None
+    n = max(1, int(round(rate_hz / target_hz)))
+    return n if n > 1 else None
+
+
+def _set_avg_silently(app, n: int) -> bool:
+    """Write ``n`` into the AVG textbox without signals; False without the textbox.
+
+    ``editingFinished`` is suppressed because the curve-profile autosave
+    handler reads the textbox and would persist the auto-filled AVG over
+    the freshly reset profile if it ran here.
+    """
+    avg_input = getattr(app, "data_fit_avg_input", None)
+    if avg_input is None:
+        return False
     try:
-        rate_value = float(rate)
-    except (TypeError, ValueError):
-        return None
-    if rate_value <= 0:
-        return None
-    return rate_value
+        avg_input.blockSignals(True)
+        avg_input.setText(str(int(n)))
+    finally:
+        try:
+            avg_input.blockSignals(False)
+        except Exception:
+            pass
+    return True
 
 
 def _apply_target_rate_resample(app,
@@ -82,31 +133,9 @@ def _apply_target_rate_resample(app,
     the SVIF side so it covers manual ``Load File…`` opens as well as
     post-acquisition auto-loads.
     """
-    avg_input = getattr(app, "data_fit_avg_input", None)
-    if avg_input is None:
+    n = _avg_factor_from_rate(app, target_hz)
+    if n is None or not _set_avg_silently(app, n):
         return
-    controller = getattr(app, "data_fit_controller", None)
-    if controller is None:
-        return
-
-    rate_hz = _read_sample_rate_from_tdms(getattr(controller, "tdms_path", "") or "")
-    if rate_hz is None or rate_hz <= target_hz:
-        return
-    n = max(1, int(round(rate_hz / target_hz)))
-    if n <= 1:
-        return
-
-    # ``editingFinished`` is suppressed because the curve-profile
-    # autosave handler reads the textbox and would persist the auto-
-    # filled AVG over the freshly reset profile if it ran here.
-    try:
-        avg_input.blockSignals(True)
-        avg_input.setText(str(int(n)))
-    finally:
-        try:
-            avg_input.blockSignals(False)
-        except Exception:
-            pass
 
     try:
         from . import tab as _tab
@@ -145,9 +174,17 @@ def _patch_post_load_setup(_tab) -> None:
         return
 
     def _patched_post_load_setup(app, *, auto_plot_fits: bool = True) -> None:
+        # The AVG factor goes in before the first preview: one pass at the
+        # final rate, not one at full rate and one more after it.
+        try:
+            n = _avg_factor_from_rate(app)
+            if n is not None:
+                _set_avg_silently(app, n)
+        except Exception:
+            pass
         orig(app, auto_plot_fits=auto_plot_fits)
         try:
-            _apply_target_rate_resample(app)
+            _apply_target_rate_resample(app)  # replayed curves take the factor too
         except Exception:
             # Never let the resample helper abort a successful load.
             pass
